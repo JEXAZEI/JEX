@@ -154,7 +154,8 @@ const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='
 // ═══════════════════════════════════════════════
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
-  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000}};
+  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null}};
+let SHEETS_URL=null;
 let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy'};
 let charts={},sessionTimer=null;
 
@@ -219,6 +220,33 @@ const pad=n=>n<10?'0'+n:String(n);
 function getAZTime(){return new Date(new Date().toLocaleString('en-US',{timeZone:'America/Phoenix'}));}
 function fmtAZTime(d){return d.toLocaleString('en-US',{timeZone:'America/Phoenix',weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true})+' MST';}
 async function saveSession(data){Object.assign(DB.session,data);await sb.patch('jex_session','id=eq.1',data);}
+async function saveSheetsUrl(url){
+  url=(url||'').trim();
+  SHEETS_URL=url||null;
+  await sb.patch('jex_session','id=eq.1',{sheets_url:url||null});
+  DB.session.sheets_url=url||null;
+  toast(url?'Google Sheets sync URL saved ✓':'Sheets sync URL cleared');
+  render();
+}
+async function pushToSheets(type,payload){
+  if(!SHEETS_URL)return;
+  try{
+    await fetch(SHEETS_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type,...payload})});
+  }catch(e){console.warn('Sheets sync failed:',e);}
+}
+async function pushBalances(){
+  if(!SHEETS_URL)return;
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+  const rows=students.map((u,i)=>({
+    rank:i+1,name:u.name,email:u.email,
+    cash:Math.round(u.cash*100)/100,
+    portfolio:Math.round(pv(u)*100)/100,
+    shortPnl:Math.round(sPnl(u)*100)/100,
+    divs:Math.round(divRec(u)*100)/100,
+    nw:nw(u),vsStart:Math.round((nw(u)-10000)*100)/100
+  })).sort((a,b)=>b.nw-a.nw).map((r,i)=>({...r,rank:i+1}));
+  await pushToSheets('balances',{rows});
+}
 async function setSession(status){const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';clearInterval(sessionTimer);sessionTimer=null;await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null});const u=cu();await logActivity('session','Session '+status+(u?' by '+u.name:''),{userId:u?.id,userName:u?.name});render();}
 async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);render();}
 function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
@@ -305,6 +333,8 @@ async function logActivity(type,description,extras={}){
     await sb.post('jex_activity',rec);
     DB.activity.unshift(rec);
     if(DB.activity.length>200)DB.activity=DB.activity.slice(0,200);
+    // Push latest 10 activity items to Sheets
+    pushToSheets('activity',{items:DB.activity.slice(0,10)});
   }catch(e){console.warn('Activity log failed:',e);}
 }
 
@@ -399,7 +429,16 @@ setInterval(checkLimitOrders,15000);
 // ═══════════════════════════════════════════════
 async function updateUser(uid2,data){const u=getUser(uid2);if(!u)return;Object.assign(u,data);await sb.patch('jex_users','id=eq.'+uid2,data);}
 async function updateCo(ticker,data){const co=getCo(ticker);if(!co)return;Object.assign(co,data);await sb.patch('jex_companies','ticker=eq.'+ticker,data);}
-async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){const rec={ticker,qty,price,buyer_id:buyerId,seller_id:sellerId,type,ts:ts()};const result=await sb.post('jex_trades',rec);if(result&&result[0])DB.trades.push(result[0]);}
+async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
+  const rec={ticker,qty,price,buyer_id:buyerId,seller_id:sellerId,type,ts:ts()};
+  const result=await sb.post('jex_trades',rec);
+  if(result&&result[0])DB.trades.push(result[0]);
+  // Push to Sheets asynchronously (don't block trade)
+  pushBalances();
+  pushToSheets('trades',{trades:[{ticker,qty,price,type,ts:ts(),
+    buyer:['exchange','short'].includes(buyerId)?'JEX':getUser(buyerId)?.name||buyerId,
+    seller:['exchange','cover'].includes(sellerId)?'JEX':getUser(sellerId)?.name||sellerId}]});
+}
 
 async function placeBuy(ticker,qty){
   if(!requireOpen())return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
@@ -482,6 +521,7 @@ async function issueDividend(ticker,perShare,note){
   const div={id:uid(),ticker,company_name:co.name,per_share:perShare,total,note:note.trim(),payouts,ts:ts()};
   await sb.post('jex_dividends',div);DB.dividends.push(div);
   await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(total),{ticker,userId:owner.id,userName:owner.name,amount:total});
+  pushBalances();
   toast(co.name+' paid '+fmt(perShare)+'/share');UI.companyTab='dividends';render();
 }
 function submitIPOForm(){
@@ -1042,7 +1082,17 @@ function renderTrades(adminView){
 // ═══════════════════════════════════════════════
 function renderSettings(){
   const u=cu();
-  return `<div class="card"><div class="section-title">Account</div><div class="grid2"><div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${u.name}</div></div><div class="mcard"><div class="mlabel">Email</div><div class="mval" style="font-size:14px;margin-top:4px">${u.email}</div></div></div></div>
+  const sheetsSection=isChairman(u)?`<div class="card"><div class="section-title">Google Sheets sync</div>
+    <div class="ibox ibox-blue">Paste your Google Apps Script web app URL here. JEX will automatically push balance updates to your sheet after every trade, dividend, and balance adjustment.</div>
+    <div class="frow"><label class="flabel">Web app URL</label><input type="text" id="sheets-url" placeholder="https://script.google.com/macros/s/..." value="${SHEETS_URL||''}"></div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-primary" onclick="saveSheetsUrl(get('sheets-url')?.value)">Save URL</button>
+      <button class="btn btn-success" onclick="pushBalances().then(()=>toast('Manual sync sent to Sheets'))">Push now</button>
+      ${SHEETS_URL?'<button class="btn btn-danger" onclick="saveSheetsUrl(&quot;&quot;)">Clear</button>':''}
+    </div>
+    ${SHEETS_URL?'<div style="font-size:12px;color:var(--text2);margin-top:8px">✓ Sync active — pushing to Sheets automatically</div>':''}
+  </div>`:'';
+  return sheetsSection+`<div class="card"><div class="section-title">Account</div><div class="grid2"><div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${u.name}</div></div><div class="mcard"><div class="mlabel">Email</div><div class="mval" style="font-size:14px;margin-top:4px">${u.email}</div></div></div></div>
   <div class="card"><div class="section-title">Change password</div><div class="frow"><label class="flabel">Current password</label><input type="password" id="pw-cur" placeholder="Current password"></div><div class="frow"><label class="flabel">New password</label><input type="password" id="pw-new" placeholder="New password (min 4 characters)"></div><div class="frow"><label class="flabel">Confirm new password</label><input type="password" id="pw-conf" placeholder="Repeat new password"></div><button class="btn btn-primary" onclick="changePw('${u.id}',get('pw-cur')?.value,get('pw-new')?.value,get('pw-conf')?.value)">Update password</button></div>
   <div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><input type="password" id="settings-secq-pw" placeholder="Current password"></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`;
 }
@@ -1528,6 +1578,7 @@ async function adjustCash(uid2){
   const prev=u.cash;
   await updateUser(uid2,{cash:newCash});
   await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:''+u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
+  pushBalances();
   toast(u.name+"'s balance updated to "+fmt(newCash));render();
 }
 function renderAdminUsers(students,companies){
@@ -1864,6 +1915,7 @@ async function boot(){
       UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'apply':'market';
     }
     if(DB.session.ends_at&&DB.session.status==='open')sessionTimer=setInterval(tickTimer,500);
+    SHEETS_URL=DB.session.sheets_url||null;
     render();
   }catch(err){
     document.getElementById('app').innerHTML=`<div class="config-page"><div class="config-card"><div style="font-family:var(--mono);font-size:20px;font-weight:600;margin-bottom:12px;color:var(--red)">Connection failed</div><div class="ibox ibox-red" style="margin-bottom:16px">Could not connect to Supabase.<br><br><strong>Error:</strong> ${err.message}</div><div style="font-size:13px;color:var(--text2);margin-bottom:12px">Check that your Supabase URL and anon key are correct.</div><button class="btn btn-primary" onclick="boot()">Retry</button></div></div>`;
