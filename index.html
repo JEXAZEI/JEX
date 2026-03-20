@@ -1148,7 +1148,19 @@ function renderStockOverview(co,u){
   });
 
   html+='</div>';
-  html+=`<div class="card"><div class="section-title">Price chart — ${co.ticker}</div><div style="position:relative;height:160px"><canvas id="co-chart"></canvas></div></div>`;
+  // One chart per ticker
+  html+='<div class="card"><div class="section-title">Price charts</div>'
+    +'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px">';
+  allTickers.forEach(ticker=>{
+    const stock=getCo(ticker);if(!stock)return;
+    const meta=getClassMeta(ticker);
+    const label=ticker===co.ticker?ticker+' (base)':(ticker+' Class '+(meta?meta.class:''));
+    html+='<div>'
+      +'<div style="font-size:12px;font-weight:500;font-family:var(--mono);margin-bottom:6px;color:var(--text2)">'+label+'</div>'
+      +'<div style="position:relative;height:140px"><canvas id="co-chart-'+ticker+'"></canvas></div>'
+      +'</div>';
+  });
+  html+='</div></div>';
   return html;
 }
 function renderClassesTab(co){
@@ -1769,7 +1781,15 @@ function render(){
   app.innerHTML=`${renderTopbar()}${renderBanner()}${renderNav()}<div class="content">${getPageContent()}</div>`;
   if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
   setTimeout(()=>{
-    if(UI.navTab==='mystock'&&UI.companyTab==='stock'){const co=DB.companies.find(c=>c.owner_id===UI.userId);if(co)buildChart('co-chart',co);}
+    if(UI.navTab==='mystock'&&UI.companyTab==='stock'){
+      const co=DB.companies.find(c=>c.owner_id===UI.userId);
+      if(co){
+        getCompanyTickers(co.ticker).forEach(ticker=>{
+          const stock=getCo(ticker);
+          if(stock)buildChart('co-chart-'+ticker,stock);
+        });
+      }
+    }
     if(UI.navTab==='market')buildSparklines();
   },60);
 }
