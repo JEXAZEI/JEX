@@ -599,7 +599,11 @@ function getClassMeta(ticker){return DB.shareClasses.find(c=>c.ticker===ticker)|
 // Helper: get all tickers for a company (base + classes)
 function getCompanyTickers(parentTicker){
   const base=[parentTicker];
-  const classes=DB.shareClasses.filter(c=>c.parent_ticker===parentTicker).map(c=>c.ticker);
+  // Classes whose ticker differs from the parent (new classes like BWV.B)
+  // Conversions share the same ticker as parent so we exclude duplicates
+  const classes=DB.shareClasses
+    .filter(c=>c.parent_ticker===parentTicker&&c.ticker!==parentTicker)
+    .map(c=>c.ticker);
   return [...base,...classes];
 }
 // Helper: can this user see/trade this ticker?
