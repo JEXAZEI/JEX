@@ -495,7 +495,7 @@ async function submitIPO(name,ticker,price,shares,desc){
   const p=parseFloat(price),s=parseInt(shares);
   if(isNaN(p)||p<=0)return toast('Enter a valid IPO price');
   if(isNaN(s)||s<=0)return toast('Enter a valid share count');
-  const app={id:uid(),user_id:UI.userId,name:name.trim(),ticker,price:p,shares:s,desc:(desc||'').trim(),status:'pending',ts:ts()};
+  const app={id:uid(),user_id:UI.userId,name:name.trim(),ticker,price:p,shares:s,description:(desc||'').trim(),status:'pending',ts:ts()};
   await sb.post('jex_ipo_applications',app);
   DB.ipoApps.push(app);
   await updateUser(UI.userId,{app_status:'pending'});
@@ -508,7 +508,7 @@ async function reviewIPO(id,approve){
   await sb.patch('jex_ipo_applications','id=eq.'+id,{status:approve?'approved':'rejected'});
   app.status=approve?'approved':'rejected';
   if(approve){
-    const co={id:uid(),name:app.name,ticker:app.ticker,price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',owner_id:app.user_id,description:app.desc,price_history:[{p:app.price,t:'IPO'}],financials:[]};
+    const co={id:uid(),name:app.name,ticker:app.ticker,price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',owner_id:app.user_id,description:app.description,price_history:[{p:app.price,t:'IPO'}],financials:[]};
     await sb.post('jex_companies',co);DB.companies.push(co);
     await updateUser(app.user_id,{app_status:'approved'});
     await logActivity('ipo',app.name+' ('+app.ticker+') listed on JEX @ '+fmt(app.price),{ticker:app.ticker,userId:app.user_id,amount:app.price});
@@ -1280,7 +1280,7 @@ function renderAdminResetForm(){
   form.innerHTML=`<div style="font-size:13px;margin-bottom:10px;padding:10px;background:var(--bg3);border-radius:var(--radius)">Resetting: <strong>${u.name}</strong><br><span style="font-size:12px;color:var(--text2)">Security question: ${u.sec_q||'—'}</span></div><div class="frow"><label class="flabel">New password</label><input type="password" id="admin-reset-pw" placeholder="New password (min 4 characters)"></div><button class="btn btn-primary" onclick="adminResetPw('${u.id}',get('admin-reset-pw')?.value)">Reset password</button>`;
 }
 function renderAdminIPO(pIPO,rIPO){
-  return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${a.name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${a.desc||'no desc'}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewIPO('${a.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewIPO('${a.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${a.name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}`;
+  return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${a.name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${a.description||'no desc'}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewIPO('${a.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewIPO('${a.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${a.name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}`;
 }
 function renderAdminDilution(pDil,rDil){
   return`<div class="card"><div class="section-title">Pending dilution requests</div>${pDil.length?pDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${d.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span> <span class="badge b-coral">+${d.pct_increase}%</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares — "${d.reason}"</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewDilution('${d.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewDilution('${d.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending dilution requests</div>'}${rDil.length?`<hr class="divider">${rDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${d.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares</div></div><span class="badge ${d.status==='approved'?'b-green':'b-red'}">${d.status}</span></div>`).join('')}`:''}`;
