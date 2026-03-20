@@ -403,6 +403,7 @@ async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){cons
 
 async function placeBuy(ticker,qty){
   if(!requireOpen())return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(u.role==='company'&&co.owner_id===u.id)return toast("You can't buy your own company's stock — use Buyback instead.");
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
   const np=impactPrice(co,qty,'buy'),cost=Math.round(np*qty*100)/100;
@@ -606,6 +607,7 @@ function canAccessTicker(ticker,userId){
   const meta=getClassMeta(ticker);
   if(!meta)return true; // base class, always accessible
   if(!meta.restricted)return true;
+  if(!userId)return false;
   return (meta.whitelist||[]).includes(userId);
 }
 // Helper: voting power a user has for a company
@@ -813,7 +815,7 @@ function renderNav(){
   let tabs;
   if(isChairman(u))tabs=[['admin','Admin'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
   else if(u.role==='president')tabs=[['admin','Admin'],['market','Market'],['settings','Settings']];
-  else if(u.role==='company')tabs=[['market','Market'],['news','News'],['apply','IPO'],['mystock','My stock'],['settings','Settings']];
+  else if(u.role==='company')tabs=[['market','Market'],['portfolio','Portfolio'],['news','News'],['apply','IPO'],['mystock','My stock'],['settings','Settings']];
   else tabs=[['market','Market'],['portfolio','Portfolio'],['leaderboard','Leaderboard'],['orders','Orders'],['trades','Trades'],['settings','Settings']];
   return `<div class="nav">${tabs.map(([k,v])=>`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
 }
@@ -848,11 +850,11 @@ function renderMarket(){
   const recentNews=DB.news.slice(0,5);
   return `${renderTickerBar()}
     <div class="card"><div class="section-title">Listed companies</div>
-      <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${u.role==='student'?'<th>Watch</th><th></th>':''}</tr></thead>
+      <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${(u.role==='student'||u.role==='company')?'<th>Watch</th><th></th>':''}</tr></thead>
       <tbody>${listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
     const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
-    return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${u.role==='student'?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openPanel('${c.ticker}')">Trade</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
+    return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openPanel('${c.ticker}')">Trade</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
     </div>
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
       +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
