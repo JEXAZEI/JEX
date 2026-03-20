@@ -26,6 +26,7 @@ body{font-family:var(--font);font-size:14px;color:var(--text);background:var(--b
 .avatar{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500}
 .av-s{background:rgba(55,138,221,0.2);color:#85B7EB}.av-c{background:rgba(240,165,0,0.15);color:var(--amber)}
 .av-ch{background:rgba(201,162,39,0.2);color:var(--chair)}.av-pr{background:rgba(124,109,250,0.2);color:var(--pres)}
+.av-sec{background:rgba(0,200,150,0.15);color:#00c896}.av-tre{background:rgba(255,77,106,0.15);color:#ff4d6a}
 .logout-btn{font-size:12px;cursor:pointer;padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:transparent;color:var(--text2);font-family:var(--font)}
 .logout-btn:hover{background:var(--bg3)}
 .session-banner{display:flex;align-items:center;justify-content:space-between;padding:7px 20px;font-size:12px;border-bottom:1px solid var(--border)}
@@ -54,6 +55,7 @@ th.r,td.r{text-align:right}
 .b-gray{background:rgba(136,150,168,0.12);color:var(--text2)}.b-purple{background:rgba(83,74,183,0.15);color:#AFA9EC}
 .b-teal{background:rgba(0,200,150,0.1);color:var(--teal)}.b-coral{background:rgba(255,77,106,0.1);color:#FF8099}
 .b-chair{background:rgba(201,162,39,0.15);color:var(--chair)}.b-pres{background:rgba(124,109,250,0.15);color:var(--pres)}
+.b-sec{background:rgba(0,200,150,0.12);color:#00c896}.b-tre{background:rgba(255,77,106,0.12);color:#ff4d6a}
 input,select,textarea{width:100%;padding:8px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg);color:var(--text);font-size:13px;font-family:var(--font);outline:none}
 input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 0 2px rgba(55,138,221,0.15)}
 .frow{margin-bottom:12px}.flabel{font-size:12px;color:var(--text2);margin-bottom:5px;display:block}
@@ -198,8 +200,10 @@ const pv=u=>Object.entries(holdings(u)).reduce((s,[t,q])=>{const c=getCo(t);retu
 const sPnl=u=>Object.entries(shorts(u)).reduce((s,[t,pos])=>{const c=getCo(t);if(!c)return s;return s+Math.round((pos.avgPrice-c.price)*pos.qty*100)/100;},0);
 const divRec=u=>DB.dividends.reduce((s,d)=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);return s+(p?p.payout:0);},0);
 const nw=u=>Math.round((u.cash+pv(u)+sPnl(u))*100)/100;
-const isAdmin=u=>(u?.role==='chairman'||u?.role==='president');
+const isAdmin=u=>(['chairman','president','secretary','treasurer'].includes(u?.role));
 const isChairman=u=>u?.role==='chairman';
+const isPresident=u=>u?.role==='president';
+const isSecTre=u=>(u?.role==='secretary'||u?.role==='treasurer');
 const isOpen=()=>DB.session.status==='open';
 const requireOpen=()=>{if(!isOpen()){toast('Trading is '+DB.session.status+'. Wait for the session to open.');return false;}return true;};
 const shareholders=ticker=>DB.users.filter(u=>u.role==='student'&&(holdings(u)[ticker]||0)>0);
@@ -207,8 +211,8 @@ const divTotal=(ticker,ps)=>shareholders(ticker).reduce((s,u)=>s+Math.round(((ho
 const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);return Math.max(0.01,Math.round((dir==='buy'?co.price*(1+impact):co.price*(1-impact))*100)/100);};
 const isWatched=ticker=>{const u=cu();return u&&watchlist(u).includes(ticker);};
 const sharesBar=co=>{const pct=co.shares>0?Math.round((co.shares_avail/co.shares)*100):0;return `<div class="sbar-wrap"><div style="font-size:12px;font-weight:500;font-family:var(--mono)">${co.shares_avail.toLocaleString()} <span style="font-weight:400;color:var(--text2)">/ ${co.shares.toLocaleString()}</span></div><div style="font-size:11px;color:var(--text3);margin-top:1px">${pct}% available</div><div class="sbar-bg"><div class="sbar-fill" style="width:${pct}%"></div></div></div>`;};
-const roleBadge=role=>role==='chairman'?'<span class="badge b-chair">Chairman</span>':role==='president'?'<span class="badge b-pres">President</span>':role==='student'?'<span class="badge b-blue">Student</span>':role==='company'?'<span class="badge b-amber">Company</span>':'';
-const avatarClass=role=>role==='chairman'?'av-ch':role==='president'?'av-pr':role==='company'?'av-c':'av-s';
+const roleBadge=role=>role==='chairman'?'<span class="badge b-chair">Chairman</span>':role==='president'?'<span class="badge b-pres">President</span>':role==='secretary'?'<span class="badge b-sec">Secretary</span>':role==='treasurer'?'<span class="badge b-tre">Treasurer</span>':role==='student'?'<span class="badge b-blue">Student</span>':role==='company'?'<span class="badge b-amber">Company</span>':'';
+const avatarClass=role=>role==='chairman'?'av-ch':role==='president'?'av-pr':role==='secretary'?'av-sec':role==='treasurer'?'av-tre':role==='company'?'av-c':'av-s';
 
 function toast(msg){const t=get('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3200);}
 function destroyCharts(){Object.values(charts).forEach(c=>{try{c.destroy();}catch(e){}});charts={};}
@@ -841,7 +845,7 @@ function renderVoteCard(v,isOwner,isAdminUser){
 // ═══════════════════════════════════════════════
 // RENDER: CONFIG
 // ═══════════════════════════════════════════════
-function renderConfig(){return `<div class="config-page"><div class="config-card"><div style="font-family:var(--mono);font-size:22px;font-weight:600;margin-bottom:4px"><span style="color:var(--amber)">JEX</span> — Setup required</div><div style="font-size:13px;color:var(--text2);margin-bottom:24px">Connect JEX to your Supabase database.</div><div class="ibox ibox-amber" style="margin-bottom:20px"><strong>One-time setup:</strong><br>1. Go to <strong>supabase.com</strong> and create a free account.<br>2. Create a new project.<br>3. Go to <strong>SQL Editor</strong> → paste and run <code>supabase_setup.sql</code>.<br>4. Go to <strong>Project Settings → API</strong> → copy Project URL and anon key.<br>5. Open <code>index.html</code>, paste your values into the two config lines at the top of the script.<br>6. Upload to GitHub.</div><div class="ibox ibox-blue">After setup this screen will be replaced by the JEX login.<br><br>Default logins: <code>chairman@jted.edu / chairman1234</code> and <code>president@jted.edu / president1234</code></div></div></div>`;}
+function renderConfig(){return `<div class="config-page"><div class="config-card"><div style="font-family:var(--mono);font-size:22px;font-weight:600;margin-bottom:4px"><span style="color:var(--amber)">JEX</span> — Setup required</div><div style="font-size:13px;color:var(--text2);margin-bottom:24px">Connect JEX to your Supabase database.</div><div class="ibox ibox-amber" style="margin-bottom:20px"><strong>One-time setup:</strong><br>1. Go to <strong>supabase.com</strong> and create a free account.<br>2. Create a new project.<br>3. Go to <strong>SQL Editor</strong> → paste and run <code>supabase_setup.sql</code>.<br>4. Go to <strong>Project Settings → API</strong> → copy Project URL and anon key.<br>5. Open <code>index.html</code>, paste your values into the two config lines at the top of the script.<br>6. Upload to GitHub.</div><div class="ibox ibox-blue">After setup this screen will be replaced by the JEX login.<br><br>Default logins: <code>chairman@jted.edu / chairman1234</code> and <code>president@jted.edu / president1234</code><br>Secretary and Treasurer accounts must be created via Supabase SQL.</div></div></div>`;}
 
 // ═══════════════════════════════════════════════
 // RENDER: LOGIN
@@ -851,6 +855,8 @@ function renderLogin(){
   const companies=DB.users.filter(u=>u.role==='company'&&u.status==='approved');
   const chairman=DB.users.find(u=>u.role==='chairman');
   const president=DB.users.find(u=>u.role==='president');
+  const secretary=DB.users.find(u=>u.role==='secretary');
+  const treasurer=DB.users.find(u=>u.role==='treasurer');
   const pending=DB.pending.length;
   const acctRow=(u,cls)=>`<div class="acct-item" onclick="UI.pendingLoginId='${u.id}';UI.loginView='password';render()"><div class="avatar ${cls}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><div><div class="acct-name">${u.name} ${roleBadge(u.role)}${isAdmin(u)&&pending?` <span class="badge b-blue">${pending} pending</span>`:''}</div>${!isAdmin(u)?`<div class="acct-email">${u.email}</div>`:''}</div></div>`;
   if(UI.loginView==='password'){const u=getUser(UI.pendingLoginId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Sign in as ${u?.name||'user'}</div>${!isAdmin(u)?`<div class="frow"><label class="flabel">Email</label><div style="padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;color:var(--text2);background:var(--bg3)">${u?.email||''}</div></div>`:``}<div class="frow"><label class="flabel">Password</label><input type="password" id="login-pw" placeholder="Enter password" onkeydown="if(event.key==='Enter')loginWith(UI.pendingLoginId,get('login-pw')?.value)"></div><div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn btn-primary" onclick="loginWith(UI.pendingLoginId,get('login-pw')?.value)">Sign in</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div><button class="link-btn" onclick="UI.loginView='forgot-email';render()">Forgot password?</button></div></div>`;}
@@ -861,6 +867,8 @@ function renderLogin(){
   return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span> — JTED Stock Exchange</div><div class="login-sub">Sign in to your account</div><div class="acct-list">
     ${chairman?acctRow(chairman,'av-ch'):''}
     ${president?acctRow(president,'av-pr'):''}
+    ${secretary?acctRow(secretary,'av-sec'):''}
+    ${treasurer?acctRow(treasurer,'av-tre'):''}
     ${companies.map(u=>acctRow(u,'av-c')).join('')}
     ${students.map(u=>acctRow(u,'av-s')).join('')}
   </div><div style="display:flex;justify-content:flex-start;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)"><button class="btn btn-sm btn-primary" onclick="UI.loginView='register';render()">Register new account</button></div></div></div>`;
@@ -896,7 +904,7 @@ function renderNav(){
   const u=cu();
   let tabs;
   if(isChairman(u))tabs=[['admin','Admin'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
-  else if(u.role==='president')tabs=[['admin','Admin'],['market','Market'],['settings','Settings']];
+  else if(isAdmin(u))tabs=[['admin','Admin'],['market','Market'],['settings','Settings']];
   else if(u.role==='company')tabs=[['market','Market'],['portfolio','Portfolio'],['news','News'],['apply','IPO'],['mystock','My stock'],['settings','Settings']];
   else tabs=[['market','Market'],['portfolio','Portfolio'],['leaderboard','Leaderboard'],['orders','Orders'],['trades','Trades'],['settings','Settings']];
   return `<div class="nav">${tabs.map(([k,v])=>`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
@@ -1483,12 +1491,14 @@ function renderAdmin(){
   const pS=DB.pending.filter(r=>r.role==='student'),pC=DB.pending.filter(r=>r.role==='company');
 
   // President can only see: session, balances, passwords
-  const presidentTabs=[['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News']];
+  const presidentTabs=[['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
+  const sectreTabs=[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
   const chairmanTabs=[['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log']];
-  const tabs=chair?chairmanTabs:presidentTabs;
+  const tabs=chair?chairmanTabs:isPresident(u)?presidentTabs:sectreTabs;
+  const allowedTabs=tabs.map(([k])=>k);
 
-  // Ensure president can't access chairman-only tabs by URL-style nav
-  if(!chair&&!presidentTabs.find(([k])=>k===UI.adminTab))UI.adminTab='session';
+  // Block access to tabs not in allowed list
+  if(!allowedTabs.includes(UI.adminTab))UI.adminTab=tabs[0][0];
 
   return`<div class="tab-row">${tabs.map(([k,v])=>`<button class="tab ${UI.adminTab===k?'active':''}" onclick="UI.adminTab='${k}';render()">${v}${k==='registrations'&&DB.pending.length?` <span class="badge b-blue" style="margin-left:4px">${DB.pending.length}</span>`:''} ${k==='ipo'&&pIPO.length?`<span class="badge b-amber" style="margin-left:4px">${pIPO.length}</span>`:''} ${k==='dilution'&&pDil.length?`<span class="badge b-coral" style="margin-left:4px">${pDil.length}</span>`:''}</button>`).join('')}</div>
   ${UI.adminTab==='session'?renderAdminSession(students)
