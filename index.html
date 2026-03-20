@@ -262,7 +262,7 @@ async function approveReg(id,startCash){
   const r=DB.pending.find(x=>x.id===id);if(!r)return;
   startCash=parseFloat(startCash)||DB.session.starting_cash||10000;
   const u={id:r.id,name:r.name,email:r.email,password:r.password,role:r.role,status:'approved',
-    cash:r.role==='student'?startCash:5000,sec_q:r.sec_q,sec_a:r.sec_a,
+    cash:startCash,sec_q:r.sec_q,sec_a:r.sec_a,
     description:r.description||null,app_status:r.role==='company'?'none':null,
     holdings:{},shorts:{},watchlist:[],created_at:new Date().toISOString()};
   await sb.post('jex_users',u);await sb.del('jex_pending','id=eq.'+id);
@@ -1263,7 +1263,7 @@ function renderAdminSession(students){
 function renderAdminRegs(pS,pC,students,companies){
   return`<div class="card">
     ${pS.length?`<div class="section-title">Pending students</div>${pS.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${r.name} <span class="badge b-blue">student</span></div><div class="app-meta">${r.email} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
-    ${pC.length?`<div class="section-title">Pending companies</div>${pC.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${r.name} <span class="badge b-amber">company</span></div><div class="app-meta">${r.email} — ${r.description||''} — ${r.ts}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',5000)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
+    ${pC.length?`<div class="section-title">Pending companies</div>${pC.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${r.name} <span class="badge b-amber">company</span></div><div class="app-meta">${r.email} — ${r.description||''} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
     ${!DB.pending.length?`<div class="empty" style="padding:16px">No pending registrations</div><hr class="divider">`:''}
     <div class="section-title" style="margin-top:4px">Approved accounts</div>
     ${[...students,...companies].length?`<table><thead><tr><th>Name</th><th>Role</th><th>Email</th><th class="r">Cash</th></tr></thead><tbody>${[...students,...companies].map(u=>`<tr><td>${u.name}</td><td>${roleBadge(u.role)}</td><td style="color:var(--text2)">${u.email}</td><td class="r" style="font-family:var(--mono)">${fmt(u.cash)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No approved accounts yet</div>'}
