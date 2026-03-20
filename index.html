@@ -1091,7 +1091,7 @@ async function convertBaseClass(parentTicker,classType,votesPerShare,restricted,
     shares:co.shares,price:co.price,
     restricted:!!restricted,whitelist:whitelistIds||[],
     company_name:co.name,owner_id:u.id,status:'pending',
-    reason:'[CONVERT] '+(reason||'').trim(),ts:ts(),is_conversion:true};
+    reason:'[CONVERT] '+(reason||'').trim(),ts:ts()};
   await sb.post('jex_class_applications',app);
   DB.classApps.push(app);
   toast('Conversion request submitted — awaiting Chairman approval');
