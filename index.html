@@ -563,6 +563,33 @@ async function removeCompany(uid2){
   DB.dilApps=DB.dilApps.filter(d=>d.user_id!==uid2);
   toast(u.name+' removed');render();
 }
+async function removeShareClass(ticker){
+  const meta=DB.shareClasses.find(c=>c.ticker===ticker);
+  const co=DB.companies.find(c=>c.ticker===ticker);
+  const isConversion=meta&&meta.ticker===meta.parent_ticker;
+  const msg=isConversion
+    ?'Remove Class '+meta.class+' classification from '+ticker+'? This strips the class metadata but keeps the stock listed and trading. This cannot be undone.'
+    :'Remove share class '+ticker+' (Class '+(meta?.class||'?')+')? This will delist the stock and remove all class metadata. This cannot be undone.';
+  if(!confirm(msg))return;
+  // Remove class metadata
+  await sb.del('jex_share_classes','ticker=eq.'+ticker);
+  DB.shareClasses=DB.shareClasses.filter(c=>c.ticker!==ticker);
+  // If it's a new class (not a conversion), also delist the trading entry
+  if(!isConversion&&co){
+    await sb.del('jex_companies','ticker=eq.'+ticker);
+    await sb.del('jex_dilution_applications','ticker=eq.'+ticker);
+    await sb.del('jex_news','ticker=eq.'+ticker);
+    DB.companies=DB.companies.filter(c=>c.ticker!==ticker);
+    DB.dilApps=DB.dilApps.filter(d=>d.ticker!==ticker);
+    DB.news=DB.news.filter(n=>n.ticker!==ticker);
+  }
+  // Remove any pending class applications for this ticker
+  await sb.del('jex_class_applications','proposed_ticker=eq.'+ticker);
+  DB.classApps=DB.classApps.filter(a=>a.proposed_ticker!==ticker);
+  await logActivity('class_removed',(isConversion?'Class '+meta.class+' stripped from':'Share class '+ticker+' removed from')+' '+meta?.company_name,{ticker});
+  toast(isConversion?ticker+' class stripped — stock remains listed':ticker+' class removed and delisted');
+  render();
+}
 async function delistCompany(ticker,silent=false){
   const co=DB.companies.find(c=>c.ticker===ticker);if(!co)return;
   if(!silent&&!confirm('Delist '+co.name+' ('+ticker+')? This cannot be undone.'))return;
@@ -1531,24 +1558,49 @@ function renderAdminUsers(students,companies){
 function renderAdminClasses(){
   const pending=DB.classApps.filter(a=>a.status==='pending');
   const reviewed=DB.classApps.filter(a=>a.status!=='pending');
+  // Group active share classes by company
+  const byCompany={};
+  DB.shareClasses.forEach(c=>{
+    if(!byCompany[c.parent_ticker])byCompany[c.parent_ticker]={name:c.company_name,classes:[]};
+    byCompany[c.parent_ticker].classes.push(c);
+  });
+  const activeEntries=Object.entries(byCompany);
   return '<div class="card"><div class="section-title">Pending share class applications '
     +(pending.length?'<span class="badge b-amber" style="margin-left:4px">'+pending.length+'</span>':'')+'</div>'
     +(pending.length?pending.map(a=>'<div class="app-row"><div class="app-info">'
       +'<div class="app-name">'+a.company_name+' — <span class="badge b-gray" style="font-family:var(--mono)">'+a.proposed_ticker+'</span> Class '+a.class+'</div>'
       +'<div class="app-meta">'+a.votes_per_share+' vote'+(a.votes_per_share!==1?'s':'')+'/share · '+a.shares.toLocaleString()+' shares @ '+fmt(a.price)
       +(a.restricted?' · <span class="badge b-red">Restricted</span> to: '+(a.whitelist||[]).map(id=>getUser(id)?.name||id).join(', '):'')+'</div>'
-      +(a.reason?'<div class="app-meta">Reason: '+a.reason+'</div>':'')
+      +(a.reason?'<div class="app-meta">Reason: '+a.reason.replace('[CONVERT]','[Conversion]')+'</div>':'')
       +'</div><div class="btn-row">'
       +'<button class="btn btn-success btn-sm" onclick="reviewClassApp(&quot;'+a.id+'&quot;,true)">Approve</button>'
       +'<button class="btn btn-danger btn-sm" onclick="reviewClassApp(&quot;'+a.id+'&quot;,false)">Reject</button>'
       +'</div></div>').join('')
     :'<div class="empty">No pending applications</div>')
     +'</div>'
-    +(reviewed.length?'<div class="card"><div class="section-title">Reviewed applications</div>'
+    +(activeEntries.length?'<div class="card"><div class="section-title">Active share classes</div>'
+      +'<div class="ibox ibox-blue">Removing a <strong>conversion</strong> strips the class label but keeps the stock trading. Removing a <strong>new class</strong> delists it entirely.</div>'
+      +activeEntries.map(([parentTicker,entry])=>{
+        return '<div style="padding:10px 0;border-bottom:1px solid var(--border)">'
+          +'<div style="font-size:12px;font-weight:500;color:var(--text2);margin-bottom:8px;padding:0 2px">'+entry.name+' ('+parentTicker+')</div>'
+          +entry.classes.map(c=>{
+            const isConv=c.ticker===c.parent_ticker;
+            return '<div class="app-row" style="margin-bottom:4px"><div class="app-info">'
+              +'<div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">'+c.ticker+'</span> <span class="badge b-amber">Class '+c.class+'</span>'
+              +(isConv?'<span class="badge b-blue" style="margin-left:4px">Conversion</span>':'<span class="badge b-teal" style="margin-left:4px">New class</span>')
+              +(c.restricted?'<span class="badge b-red" style="margin-left:4px">Restricted</span>':'')+'</div>'
+              +'<div class="app-meta">'+c.votes_per_share+' vote'+(c.votes_per_share!==1?'s':'')+'/share'+(c.restricted?' · '+(c.whitelist||[]).length+' whitelisted':'')+'</div>'
+              +'</div>'
+              +'<button class="btn btn-sm btn-danger" onclick="removeShareClass(&quot;'+c.ticker+'&quot;)">Remove</button>'
+              +'</div>';
+          }).join('')
+          +'</div>';
+      }).join('')+'</div>':'')
+    +(reviewed.length?'<div class="card"><div class="section-title">Application history</div>'
       +reviewed.map(a=>'<div class="app-row"><div class="app-info">'
         +'<div class="app-name">'+a.company_name+' — '+a.proposed_ticker+' Class '+a.class+'</div>'
         +'<div class="app-meta">'+a.ts+'</div></div>'
-        +'<span class="badge '+(a.status==='approved'?'b-green':'b-red')+'">'+a.status+'</span></div>'
+        +'<span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-gray')+'">'+a.status+'</span></div>'
       ).join('')+'</div>':'');
 }
 function renderAdminNews(){
