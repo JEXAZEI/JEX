@@ -651,21 +651,32 @@ async function reviewClassApp(id,approve){
   const app=DB.classApps.find(a=>a.id===id);if(!app)return;
   await sb.patch('jex_class_applications','id=eq.'+id,{status:approve?'approved':'rejected'});
   app.status=approve?'approved':'rejected';
+  const isConversion=app.reason&&app.reason.startsWith('[CONVERT]');
   if(approve){
-    // Create trading entry in jex_companies
-    const co={id:uid(),name:app.company_name+' (Class '+app.class+')',ticker:app.proposed_ticker,
-      price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',
-      owner_id:app.owner_id,description:'Class '+app.class+' shares of '+app.company_name,
-      price_history:[{p:app.price,t:'Class '+app.class+' IPO'}],financials:[]};
-    await sb.post('jex_companies',co);DB.companies.push(co);
-    // Store class metadata
-    const meta={id:uid(),parent_ticker:app.parent_ticker,ticker:app.proposed_ticker,
-      class:app.class,label:'Class '+app.class,votes_per_share:app.votes_per_share,
-      restricted:app.restricted,whitelist:app.whitelist||[],
-      company_name:app.company_name,owner_id:app.owner_id};
-    await sb.post('jex_share_classes',meta);DB.shareClasses.push(meta);
-    await logActivity('class_approved',app.company_name+' Class '+app.class+' ('+app.proposed_ticker+') approved',{ticker:app.proposed_ticker});
-    toast(app.company_name+' Class '+app.class+' listed as '+app.proposed_ticker+'!');
+    if(isConversion){
+      // Convert existing stock — just add metadata, don't create new company entry
+      const meta={id:uid(),parent_ticker:app.parent_ticker,ticker:app.proposed_ticker,
+        class:app.class,label:'Class '+app.class,votes_per_share:app.votes_per_share,
+        restricted:app.restricted,whitelist:app.whitelist||[],
+        company_name:app.company_name,owner_id:app.owner_id};
+      await sb.post('jex_share_classes',meta);DB.shareClasses.push(meta);
+      await logActivity('class_approved',app.company_name+' '+app.proposed_ticker+' converted to Class '+app.class,{ticker:app.proposed_ticker});
+      toast(app.company_name+' ('+app.proposed_ticker+') converted to Class '+app.class+'!');
+    } else {
+      // New class — create a new company listing
+      const co={id:uid(),name:app.company_name+' (Class '+app.class+')',ticker:app.proposed_ticker,
+        price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',
+        owner_id:app.owner_id,description:'Class '+app.class+' shares of '+app.company_name,
+        price_history:[{p:app.price,t:'Class '+app.class+' IPO'}],financials:[]};
+      await sb.post('jex_companies',co);DB.companies.push(co);
+      const meta={id:uid(),parent_ticker:app.parent_ticker,ticker:app.proposed_ticker,
+        class:app.class,label:'Class '+app.class,votes_per_share:app.votes_per_share,
+        restricted:app.restricted,whitelist:app.whitelist||[],
+        company_name:app.company_name,owner_id:app.owner_id};
+      await sb.post('jex_share_classes',meta);DB.shareClasses.push(meta);
+      await logActivity('class_approved',app.company_name+' Class '+app.class+' ('+app.proposed_ticker+') listed',{ticker:app.proposed_ticker});
+      toast(app.company_name+' Class '+app.class+' listed as '+app.proposed_ticker+'!');
+    }
   } else {
     toast('Class application rejected');
   }
@@ -1053,48 +1064,161 @@ function renderMyStock(){
     <button class="tab ${UI.companyTab==='financials'?'active':''}" onclick="UI.companyTab='financials';render()">Financials</button>
     <button class="tab ${UI.companyTab==='dividends'?'active':''}" onclick="UI.companyTab='dividends';render()">Dividends</button>
     <button class="tab ${UI.companyTab==='buyback'?'active':''}" onclick="UI.companyTab='buyback';render()">Buyback</button>
-    <button class="tab ${UI.companyTab==='dilution'?'active':''}" onclick="UI.companyTab='dilution';render()">Dilution ${pendingDil?'<span class="badge b-amber" style="margin-left:4px">1</span>':''}</button>
+    <button class="tab ${UI.companyTab==='dilution'?'active':''}" onclick="UI.companyTab='dilution';render()">Dilution ${DB.dilApps.filter(d=>getCompanyTickers(co.ticker).includes(d.ticker)&&d.status==='pending').length?'<span class="badge b-amber" style="margin-left:4px">'+DB.dilApps.filter(d=>getCompanyTickers(co.ticker).includes(d.ticker)&&d.status==='pending').length+'</span>':''}</button>
   </div>
-  ${UI.companyTab==='stock'?`<div class="grid4"><div class="mcard"><div class="mlabel">Price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div><div class="mcard"><div class="mlabel">Market cap</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price*co.shares)}</div></div><div class="mcard"><div class="mlabel">Issued / avail.</div><div class="mval">${co.shares.toLocaleString()} <span style="font-size:12px;color:var(--text2)">(${co.shares_avail.toLocaleString()} free)</span></div></div><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div></div><div class="card"><div class="section-title">Price chart</div><div style="position:relative;height:160px"><canvas id="co-chart"></canvas></div></div>`
+  ${UI.companyTab==='stock'?renderStockOverview(co,u)
   :UI.companyTab==='classes'?renderClassesTab(co)
   :UI.companyTab==='votes'?renderCompanyVotesTab(co)
   :UI.companyTab==='news'?renderCompanyNewsTab(co,myNews)
   :UI.companyTab==='financials'?renderFinancials(co)
   :UI.companyTab==='dividends'?renderDivTab(co,myDivs)
   :UI.companyTab==='buyback'?renderBBTab(co,myBBs)
-  :renderDilTab(co,pendingDil,myDils)}`;
+  :renderDilTab(co)}`;
 }
 
+async function convertBaseClass(parentTicker,classType,votesPerShare,restricted,whitelistIds,reason){
+  const co=getCo(parentTicker);if(!co)return;
+  const u=cu();
+  if(!classType)return toast('Select a class type');
+  votesPerShare=parseInt(votesPerShare);
+  if(isNaN(votesPerShare)||votesPerShare<0)return toast('Enter valid votes per share');
+  if(!reason||reason.trim().length<5)return toast('Please add a reason');
+  // Check not already converted
+  if(DB.shareClasses.find(c=>c.ticker===parentTicker))return toast('This stock is already classified');
+  if(DB.classApps.find(a=>a.proposed_ticker===parentTicker&&a.status==='pending'))return toast('A conversion is already pending');
+  const app={id:uid(),parent_ticker:parentTicker,proposed_ticker:parentTicker,
+    class:classType,label:'Class '+classType,votes_per_share:votesPerShare,
+    shares:co.shares,price:co.price,
+    restricted:!!restricted,whitelist:whitelistIds||[],
+    company_name:co.name,owner_id:u.id,status:'pending',
+    reason:'[CONVERT] '+(reason||'').trim(),ts:ts(),is_conversion:true};
+  await sb.post('jex_class_applications',app);
+  DB.classApps.push(app);
+  toast('Conversion request submitted — awaiting Chairman approval');
+  UI.companyTab='classes';render();
+}
+function convertBaseClassForm(parentTicker){
+  const classType=document.getElementById('conv-type')?.value;
+  const votes=document.getElementById('conv-votes')?.value;
+  const restrictedVal=document.getElementById('conv-restricted')?.value;
+  const restricted=restrictedVal==='yes';
+  const whitelistEl=document.getElementById('conv-whitelist');
+  const whitelist=restricted&&whitelistEl?Array.from(whitelistEl.selectedOptions).map(o=>o.value):[];
+  const reason=document.getElementById('conv-reason')?.value;
+  convertBaseClass(parentTicker,classType,votes,restricted,whitelist,reason);
+}
+
+function renderStockOverview(co,u){
+  const allTickers=getCompanyTickers(co.ticker);
+  const baseMeta=DB.shareClasses.find(c=>c.ticker===co.ticker);
+  // Aggregate totals across all classes
+  const totalShares=allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares:0);},0);
+  const totalMarketCap=allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.price*c.shares:0);},0);
+
+  let html=`<div class="grid4">
+    <div class="mcard"><div class="mlabel">Base price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div>
+    <div class="mcard"><div class="mlabel">Total market cap</div><div class="mval" style="font-family:var(--mono)">${fmt(totalMarketCap)}</div></div>
+    <div class="mcard"><div class="mlabel">Total shares issued</div><div class="mval">${totalShares.toLocaleString()}</div></div>
+    <div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div>
+  </div>`;
+
+  // Base stock card
+  html+='<div class="card"><div class="section-title">Share classes</div>';
+
+  allTickers.forEach((ticker,i)=>{
+    const stock=getCo(ticker);if(!stock)return;
+    const meta=getClassMeta(ticker);
+    const chg=priceChg(stock);
+    const classLabel=meta?'Class '+meta.class:'Unclassified';
+    const classColor=meta?meta.class==='A'?'b-blue':meta.class==='B'?'b-amber':'b-teal':'b-gray';
+    const vps=meta?meta.votes_per_share:1;
+    html+='<div style="padding:12px;'+(i>0?'border-top:1px solid var(--border);':'')+'display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr;gap:12px;align-items:center">'
+      +'<div><div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">'
+      +'<span style="font-family:var(--mono);font-weight:500">'+ticker+'</span>'
+      +'<span class="badge '+classColor+'">'+classLabel+'</span>'
+      +(meta&&meta.restricted?'<span class="badge b-red">Restricted</span>':'')
+      +'</div>'
+      +'<div style="font-size:11px;color:var(--text2)">'+vps+' vote'+(vps!==1?'s':'')+'/share'+(meta&&meta.restricted?' · '+(meta.whitelist||[]).length+' whitelisted':'')+'</div>'
+      +'</div>'
+      +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Price</div><div style="font-family:var(--mono);font-weight:500">'+fmt(stock.price)+'</div></div>'
+      +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Change</div><div class="'+(chg>=0?'price-up':'price-down')+'" style="font-family:var(--mono)">'+fmtChg(chg)+'</div></div>'
+      +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Shares</div><div style="font-size:13px">'+stock.shares.toLocaleString()+' <span style="color:var(--text2);font-size:11px">('+stock.shares_avail.toLocaleString()+' free)</span></div></div>'
+      +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Market cap</div><div style="font-family:var(--mono);font-size:13px">'+fmt(stock.price*stock.shares)+'</div></div>'
+      +'</div>';
+  });
+
+  html+='</div>';
+  html+=`<div class="card"><div class="section-title">Price chart — ${co.ticker}</div><div style="position:relative;height:160px"><canvas id="co-chart"></canvas></div></div>`;
+  return html;
+}
 function renderClassesTab(co){
   const myClasses=DB.shareClasses.filter(c=>c.parent_ticker===co.ticker);
   const myApps=DB.classApps.filter(a=>a.parent_ticker===co.ticker).reverse();
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
-  const availClasses=['A','B','C'].filter(cls=>cls!=='A'||!DB.shareClasses.find(c=>c.parent_ticker===co.ticker&&c.class==='A'));
-  // Build whitelist selector
   const studentOptions=students.map(s=>'<option value="'+s.id+'">'+s.name+'</option>').join('');
+  const baseIsConverted=!!DB.shareClasses.find(c=>c.ticker===co.ticker);
+  const basePendingConversion=!!DB.classApps.find(a=>a.proposed_ticker===co.ticker&&a.status==='pending');
+  // Get base class metadata if converted
+  const baseMeta=DB.shareClasses.find(c=>c.ticker===co.ticker);
   let html='';
-  // Existing classes
+
+  // ── Current class status ──────────────────────────────
+  html+='<div class="card"><div class="section-title">Current share structure</div>';
+  if(baseMeta){
+    html+='<div class="app-row"><div class="app-info">'
+      +'<div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">'+co.ticker+'</span> <span class="badge b-amber">Class '+baseMeta.class+'</span>'
+      +(baseMeta.restricted?'<span class="badge b-red" style="margin-left:4px">Restricted</span>':'')+'</div>'
+      +'<div class="app-meta">'+baseMeta.votes_per_share+' vote'+(baseMeta.votes_per_share!==1?'s':'')+'/share · '+co.shares.toLocaleString()+' shares · '+fmt(co.price)
+      +(baseMeta.restricted?' · Whitelist: '+(baseMeta.whitelist||[]).map(id=>getUser(id)?.name||id).join(', '):'')+'</div>'
+      +'</div></div>';
+  } else {
+    html+='<div class="app-row"><div class="app-info">'
+      +'<div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">'+co.ticker+'</span> <span class="badge b-gray">Unclassified</span></div>'
+      +'<div class="app-meta">No class set · '+co.shares.toLocaleString()+' shares · '+fmt(co.price)+'</div>'
+      +'</div></div>';
+  }
   if(myClasses.length){
-    html+='<div class="card"><div class="section-title">Issued share classes</div>';
-    html+='<div class="ibox ibox-blue">Base ticker <strong>'+co.ticker+'</strong> = Class A (1 vote/share) — the original IPO listing.</div>';
     html+=myClasses.map(c=>{
       const co2=getCo(c.ticker);
       return '<div class="app-row"><div class="app-info">'
-        +'<div class="app-name">'+c.ticker+' <span class="badge b-amber">Class '+c.class+'</span>'
+        +'<div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">'+c.ticker+'</span> <span class="badge b-amber">Class '+c.class+'</span>'
         +(c.restricted?'<span class="badge b-red" style="margin-left:4px">Restricted</span>':'')+'</div>'
         +'<div class="app-meta">'+c.votes_per_share+' vote'+(c.votes_per_share!==1?'s':'')+'/share'
+        +(co2?' · '+co2.shares.toLocaleString()+' shares · '+fmt(co2.price):'')
         +(c.restricted?' · Whitelist: '+(c.whitelist||[]).map(id=>getUser(id)?.name||id).join(', '):'')+'</div>'
-        +(co2?'<div class="app-meta">Price: '+fmt(co2.price)+' · Shares: '+co2.shares.toLocaleString()+'</div>':'')
         +'</div></div>';
     }).join('');
-    html+='</div>';
   }
-  // Apply for new class
+  html+='</div>';
+
+  // ── Convert existing stock ────────────────────────────
+  if(!baseIsConverted&&!basePendingConversion){
+    html+='<div class="card"><div class="section-title">Convert '+co.ticker+' to a share class</div>'
+      +'<div class="ibox ibox-amber">This reclassifies your existing <strong>'+co.ticker+'</strong> stock by assigning it a class type and voting rights. The ticker stays the same. Requires Chairman approval.</div>'
+      +'<div class="frow"><label class="flabel">Class type</label>'
+      +'<select id="conv-type"><option value="">— Select —</option>'
+      +'<option value="A">Class A — Standard voting</option>'
+      +'<option value="B">Class B — High voting power</option>'
+      +'<option value="C">Class C — No votes, dividends only</option>'
+      +'</select></div>'
+      +'<div class="frow"><label class="flabel">Votes per share</label><input type="number" id="conv-votes" value="1" min="0" placeholder="e.g. 10"></div>'
+      +'<div class="frow"><label class="flabel">Restrict to specific students? (optional)</label>'
+      +'<select id="conv-restricted"><option value="">No restriction</option><option value="yes">Yes — restricted</option></select></div>'
+      +'<div id="conv-whitelist-wrap" style="display:none"><div class="frow"><label class="flabel">Select allowed students</label>'
+      +'<select id="conv-whitelist" multiple style="height:90px">'+studentOptions+'</select></div></div>'
+      +'<div class="frow"><label class="flabel">Reason</label><textarea id="conv-reason" rows="2" placeholder="e.g. Converting to Class B for founder control..."></textarea></div>'
+      +'<button class="btn btn-warning" onclick="convertBaseClassForm(&quot;'+co.ticker+'&quot;)">Submit conversion request</button>'
+      +'</div>';
+  } else if(basePendingConversion){
+    html+='<div class="ibox ibox-amber">A conversion request for <strong>'+co.ticker+'</strong> is pending Chairman approval.</div>';
+  }
+
+  // ── Issue new class ───────────────────────────────────
   html+='<div class="card"><div class="section-title">Issue a new share class</div>'
-    +'<div class="ibox ibox-teal">Each class gets its own ticker (e.g. '+co.ticker+'.B), trades independently, and requires Chairman approval.</div>'
+    +'<div class="ibox ibox-teal">Issues a new class with its own ticker (e.g. '+co.ticker+'.B), price, and share count. Trades independently. Requires Chairman approval.</div>'
     +'<div class="frow"><label class="flabel">Class type</label>'
     +'<select id="cls-type"><option value="">— Select —</option>'
-    +'<option value="A">Class A — Standard (1 vote default)</option>'
+    +'<option value="A">Class A — Standard voting</option>'
     +'<option value="B">Class B — High voting power</option>'
     +'<option value="C">Class C — No votes, dividends only</option>'
     +'</select></div>'
@@ -1105,20 +1229,23 @@ function renderClassesTab(co){
     +'<div class="frow"><label class="flabel">Total shares to issue</label><input type="number" id="cls-shares" placeholder="1000" min="1"></div>'
     +'<div class="frow"><label class="flabel">Restrict to specific students? (optional)</label>'
     +'<select id="cls-restricted"><option value="">No restriction — open to all</option><option value="yes">Yes — restricted to selected students</option></select></div>'
-    +'<div id="cls-whitelist-wrap" style="display:none"><div class="frow"><label class="flabel">Select allowed students (hold Ctrl/Cmd to select multiple)</label>'
+    +'<div id="cls-whitelist-wrap" style="display:none"><div class="frow"><label class="flabel">Select allowed students (hold Ctrl/Cmd for multiple)</label>'
     +'<select id="cls-whitelist" multiple style="height:100px">'+studentOptions+'</select></div></div>'
     +'<div class="frow"><label class="flabel">Reason for issuance</label><textarea id="cls-reason" rows="2" placeholder="e.g. Issuing Class B to founders..."></textarea></div>'
     +'<button class="btn btn-primary" onclick="submitClassAppForm(&quot;'+co.ticker+'&quot;)">Submit for approval</button>'
     +'</div>';
-  // Pending/past applications
+
+  // ── Application history ───────────────────────────────
   if(myApps.length){
     html+='<div class="card"><div class="section-title">Application history</div>'
-    +myApps.map(a=>'<div class="app-row"><div class="app-info">'
-      +'<div class="app-name">'+a.proposed_ticker+' Class '+a.class+'</div>'
-      +'<div class="app-meta">'+a.votes_per_share+' vote'+(a.votes_per_share!==1?'s':'')+'/share · '+a.shares.toLocaleString()+' shares @ '+fmt(a.price)+(a.restricted?' · Restricted':'')+'</div>'
-      +'<div class="app-meta">'+a.ts+'</div></div>'
-      +'<span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-amber')+'">'+a.status+'</span></div>'
-    ).join('')+'</div>';
+    +myApps.map(a=>{
+      const isConv=a.reason&&a.reason.startsWith('[CONVERT]');
+      return '<div class="app-row"><div class="app-info">'
+        +'<div class="app-name">'+(isConv?'Convert ':'New class ')+'<span class="badge b-gray" style="font-family:var(--mono)">'+a.proposed_ticker+'</span> Class '+a.class+'</div>'
+        +'<div class="app-meta">'+a.votes_per_share+' vote'+(a.votes_per_share!==1?'s':'')+'/share'+(isConv?'':' · '+a.shares.toLocaleString()+' shares @ '+fmt(a.price))+(a.restricted?' · Restricted':'')+'</div>'
+        +'<div class="app-meta">'+a.ts+'</div></div>'
+        +'<span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-amber')+'">'+a.status+'</span></div>';
+    }).join('')+'</div>';
   }
   return html;
 }
@@ -1138,6 +1265,10 @@ function submitClassAppForm(parentTicker){
 document.addEventListener('change',function(e){
   if(e.target&&e.target.id==='cls-restricted'){
     const wrap=document.getElementById('cls-whitelist-wrap');
+    if(wrap)wrap.style.display=e.target.value==='yes'?'':'none';
+  }
+  if(e.target&&e.target.id==='conv-restricted'){
+    const wrap=document.getElementById('conv-whitelist-wrap');
     if(wrap)wrap.style.display=e.target.value==='yes'?'':'none';
   }
 });
@@ -1199,8 +1330,50 @@ function renderBBTab(co,myBBs){
   return`<div class="card"><div class="section-title">Share buyback</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${sold.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div></div>${sold>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Shares to buy back</label><input type="number" id="bb-qty" placeholder="50" min="1" max="${sold}" oninput="updateBBPrev('${co.ticker}')"></div><div style="padding-bottom:12px"><button class="btn btn-primary" onclick="doBuyback('${co.ticker}',get('bb-qty')?.value)">Buy back</button></div></div><div id="bb-prev"></div>`:'<div class="empty">No shares in circulation.</div>'}</div>${myBBs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${myBBs.map(b=>`<tr><td style="color:var(--text2)">${b.ts}</td><td>${b.qty}</td><td style="font-family:var(--mono)">${fmt(b.price)}</td><td style="font-weight:500;font-family:var(--mono)">${fmt(b.total)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
 }
 function updateBBPrev(ticker){const co=getCo(ticker);if(!co)return;const q=parseInt(get('bb-qty')?.value)||0;const p=get('bb-prev');if(p)p.innerHTML=q>0?impactPreview(co,q,'buy'):'';}
-function renderDilTab(co,pendingDil,myDils){
-  return`${pendingDil?`<div class="ibox ibox-amber">A dilution application is pending admin approval.</div>`:''}${!pendingDil?`<div class="card"><div class="section-title">Apply for share dilution</div><div class="grid2"><div class="mcard"><div class="mlabel">Current shares</div><div class="mval">${co.shares.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div></div><hr class="divider"><div class="frow"><label class="flabel">New shares to issue</label><input type="number" id="dil-shares" placeholder="200" min="1" oninput="updateDilPrev('${co.ticker}')"></div><div id="dil-prev"></div><div class="frow" style="margin-top:10px"><label class="flabel">Reason</label><textarea id="dil-reason" rows="2" placeholder="e.g. Raising capital for expansion..."></textarea></div><button class="btn btn-warning" onclick="submitDilution('${co.ticker}',get('dil-shares')?.value,get('dil-reason')?.value)">Submit application</button></div>`:''}${myDils.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>New shares</th><th>+%</th><th>Reason</th><th>Status</th></tr></thead><tbody>${myDils.map(d=>`<tr><td style="color:var(--text2)">${d.ts}</td><td>+${d.new_shares.toLocaleString()}</td><td style="color:var(--amber)">+${d.pct_increase}%</td><td style="font-size:12px">${d.reason}</td><td><span class="badge ${d.status==='approved'?'b-green':d.status==='rejected'?'b-red':'b-amber'}">${d.status}</span></td></tr>`).join('')}</tbody></table></div>`:''}`;
+function renderDilTab(co){
+  // Get all tickers for this company: base + classes
+  const allTickers=getCompanyTickers(co.ticker);
+  let html='';
+  allTickers.forEach(ticker=>{
+    const stock=getCo(ticker);if(!stock)return;
+    const meta=getClassMeta(ticker);
+    const label=ticker===co.ticker?'<span class="badge b-gray" style="font-family:var(--mono)">'+ticker+'</span> (base stock)'
+      :'<span class="badge b-gray" style="font-family:var(--mono)">'+ticker+'</span> <span class="badge b-amber">Class '+meta.class+'</span>';
+    const pending=DB.dilApps.find(d=>d.ticker===ticker&&d.status==='pending');
+    const history=DB.dilApps.filter(d=>d.ticker===ticker).reverse();
+    html+='<div class="card"><div class="section-title">Dilution — '+label+'</div>';
+    if(pending){
+      html+='<div class="ibox ibox-amber">A dilution application for <strong>'+ticker+'</strong> is pending Chairman approval.</div>';
+    } else {
+      html+='<div class="grid2" style="margin-bottom:12px">'
+        +'<div class="mcard"><div class="mlabel">Current shares</div><div class="mval">'+stock.shares.toLocaleString()+'</div></div>'
+        +'<div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">'+fmt(stock.price)+'</div></div>'
+        +'</div>'
+        +'<div class="frow"><label class="flabel">New shares to issue</label><input type="number" id="dil-shares-'+ticker+'" placeholder="200" min="1" oninput="updateDilPrevFor(&quot;'+ticker+'&quot;)"></div>'
+        +'<div id="dil-prev-'+ticker+'"></div>'
+        +'<div class="frow" style="margin-top:10px"><label class="flabel">Reason</label><textarea id="dil-reason-'+ticker+'" rows="2" placeholder="e.g. Raising capital for expansion..."></textarea></div>'
+        +'<button class="btn btn-warning" onclick="submitDilutionFor(&quot;'+ticker+'&quot;)">Submit application</button>';
+    }
+    if(history.length){
+      html+='<hr class="divider"><div class="section-title" style="font-size:13px;margin-bottom:8px">History</div>'
+        +'<table><thead><tr><th>Time</th><th>New shares</th><th>+%</th><th>Reason</th><th>Status</th></tr></thead><tbody>'
+        +history.map(d=>'<tr><td style="color:var(--text2)">'+d.ts+'</td><td>+'+d.new_shares.toLocaleString()+'</td><td style="color:var(--amber)">+'+d.pct_increase+'%</td><td style="font-size:12px">'+d.reason+'</td><td><span class="badge '+(d.status==='approved'?'b-green':d.status==='rejected'?'b-red':'b-amber')+'">'+d.status+'</span></td></tr>').join('')
+        +'</tbody></table>';
+    }
+    html+='</div>';
+  });
+  return html;
+}
+function updateDilPrevFor(ticker){
+  const co=getCo(ticker);if(!co)return;
+  const ns=parseInt(document.getElementById('dil-shares-'+ticker)?.value)||0;
+  const p=document.getElementById('dil-prev-'+ticker);
+  if(p)p.innerHTML=dilPreview(co,ns);
+}
+function submitDilutionFor(ticker){
+  const newShares=document.getElementById('dil-shares-'+ticker)?.value;
+  const reason=document.getElementById('dil-reason-'+ticker)?.value;
+  submitDilution(ticker,newShares,reason);
 }
 function updateDilPrev(ticker){const co=getCo(ticker);if(!co)return;const ns=parseInt(get('dil-shares')?.value)||0;const p=get('dil-prev');if(p)p.innerHTML=dilPreview(co,ns);}
 
