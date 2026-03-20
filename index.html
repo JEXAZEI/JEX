@@ -488,19 +488,35 @@ function submitIPOForm(){
 }
 async function submitIPO(name,ticker,price,shares,desc){
   if(!name||!ticker||!price||!shares)return toast('Fill in all fields');
-  ticker=ticker.toUpperCase();
-  if(DB.companies.find(c=>c.ticker===ticker)||DB.ipoApps.find(a=>a.ticker===ticker))return toast('Ticker already exists');
-  const app={id:uid(),user_id:UI.userId,name,ticker,price:parseFloat(price),shares:parseInt(shares),desc,status:'pending',ts:ts()};
-  await sb.post('jex_ipo_applications',app);DB.ipoApps.push(app);
+  if(!name.trim()||name.trim().length<2)return toast('Enter a valid company name');
+  ticker=ticker.toUpperCase().replace(/[^A-Z]/g,'');
+  if(!ticker||ticker.length<2)return toast('Ticker must be 2-4 letters');
+  if(DB.companies.find(c=>c.ticker===ticker)||DB.ipoApps.find(a=>a.ticker===ticker&&a.status!=='rejected'&&a.status!=='withdrawn'))return toast('Ticker already exists or is pending');
+  const p=parseFloat(price),s=parseInt(shares);
+  if(isNaN(p)||p<=0)return toast('Enter a valid IPO price');
+  if(isNaN(s)||s<=0)return toast('Enter a valid share count');
+  const app={id:uid(),user_id:UI.userId,name:name.trim(),ticker,price:p,shares:s,desc:(desc||'').trim(),status:'pending',ts:ts()};
+  await sb.post('jex_ipo_applications',app);
+  DB.ipoApps.push(app);
   await updateUser(UI.userId,{app_status:'pending'});
-  toast('IPO application submitted!');render();
+  toast('✓ IPO application submitted! Awaiting Chairman approval.');
+  UI.appTab='status';
+  render();
 }
 async function reviewIPO(id,approve){
   const app=DB.ipoApps.find(a=>a.id===id);if(!app)return;
   await sb.patch('jex_ipo_applications','id=eq.'+id,{status:approve?'approved':'rejected'});
   app.status=approve?'approved':'rejected';
-  if(approve){const co={id:uid(),name:app.name,ticker:app.ticker,price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',owner_id:app.user_id,description:app.desc,price_history:[{p:app.price,t:'IPO'}],financials:[]};await sb.post('jex_companies',co);DB.companies.push(co);await updateUser(app.user_id,{app_status:'approved'});await logActivity('ipo',app.name+' ('+app.ticker+') listed on JEX @ '+fmt(app.price),{ticker:app.ticker,userId:app.user_id,amount:app.price});toast(app.name+' listed!');}
-  else{await updateUser(app.user_id,{app_status:'rejected'});toast('IPO rejected');}
+  if(approve){
+    const co={id:uid(),name:app.name,ticker:app.ticker,price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',owner_id:app.user_id,description:app.desc,price_history:[{p:app.price,t:'IPO'}],financials:[]};
+    await sb.post('jex_companies',co);DB.companies.push(co);
+    await updateUser(app.user_id,{app_status:'approved'});
+    await logActivity('ipo',app.name+' ('+app.ticker+') listed on JEX @ '+fmt(app.price),{ticker:app.ticker,userId:app.user_id,amount:app.price});
+    toast('✓ '+app.name+' ('+app.ticker+') is now listed on JEX!');
+  } else {
+    await updateUser(app.user_id,{app_status:'rejected'});
+    toast('IPO application rejected');
+  }
   render();
 }
 async function submitDilution(ticker,newShares,reason){
@@ -998,7 +1014,18 @@ function renderAppStatus(app){
   if(!app)return`<div class="card"><div class="empty">No application yet.<br><br><button class="btn btn-primary" onclick="UI.appTab='apply';render()">Start application</button></div></div>`;
   const co=app.status==='approved'?DB.companies.find(c=>c.ticker===app.ticker):null;
   const sm={pending:'b-amber',approved:'b-green',rejected:'b-red'};
-  return`<div class="card"><div class="section-title">${app.name} (${app.ticker})</div><div style="display:flex;align-items:center;gap:8px;margin-bottom:14px"><span class="badge ${sm[app.status]||'b-gray'}">${app.status}</span><span style="font-size:12px;color:var(--text2)">${app.ts}</span></div><div class="grid2"><div class="mcard"><div class="mlabel">IPO price</div><div class="mval" style="font-family:var(--mono)">${fmt(app.price)}</div></div><div class="mcard"><div class="mlabel">Shares issued</div><div class="mval">${app.shares.toLocaleString()}</div></div></div>${app.status==='approved'&&co?`<hr class="divider"><div class="grid3"><div class="mcard"><div class="mlabel">Price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div><div class="mcard"><div class="mlabel">Available</div><div class="mval">${co.shares_avail.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Market cap</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price*co.shares)}</div></div></div>`:''}${app.status==='rejected'?`<button class="btn btn-primary" onclick="reapply()">New application</button>`:''}</div>`;
+  const notif=app.status==='approved'
+    ?'<div class="ibox ibox-green" style="margin-bottom:14px">🎉 <strong>Congratulations! Your IPO has been approved.</strong> Your company <strong>'+app.name+'</strong> is now listed on JEX as <span style="font-family:var(--mono)">'+app.ticker+'</span>. Go to <strong>My stock</strong> to manage it.</div>'
+    :app.status==='rejected'
+    ?'<div class="ibox ibox-red" style="margin-bottom:14px">❌ <strong>Your IPO application was rejected.</strong> You can submit a new application with a different ticker or details.</div>'
+    :'<div class="ibox ibox-amber" style="margin-bottom:14px">⏳ <strong>Your application is under review.</strong> The Chairman will approve or reject it shortly.</div>';
+  return`<div class="card"><div class="section-title">${app.name} (${app.ticker})</div>
+    ${notif}
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px"><span class="badge ${sm[app.status]||'b-gray'}">${app.status}</span><span style="font-size:12px;color:var(--text2)">Submitted ${app.ts}</span></div>
+    <div class="grid2"><div class="mcard"><div class="mlabel">IPO price</div><div class="mval" style="font-family:var(--mono)">${fmt(app.price)}</div></div><div class="mcard"><div class="mlabel">Shares issued</div><div class="mval">${app.shares.toLocaleString()}</div></div></div>
+    ${app.status==='approved'&&co?`<hr class="divider"><div class="grid3"><div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div><div class="mcard"><div class="mlabel">Available shares</div><div class="mval">${co.shares_avail.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Market cap</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price*co.shares)}</div></div></div>`:''}
+    ${app.status==='rejected'?`<button class="btn btn-primary" onclick="reapply()">Submit new application</button>`:''}
+  </div>`;
 }
 async function reapply(){const idx=DB.ipoApps.findIndex(a=>a.user_id===UI.userId);if(idx>=0){await sb.patch('jex_ipo_applications','id=eq.'+DB.ipoApps[idx].id,{status:'withdrawn'});DB.ipoApps.splice(idx,1);}await updateUser(UI.userId,{app_status:'none'});UI.appTab='apply';render();}
 function renderAppForm(app){
