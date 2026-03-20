@@ -1195,7 +1195,7 @@ function renderStockOverview(co,u){
   return html;
 }
 function renderClassesTab(co){
-  const myClasses=DB.shareClasses.filter(c=>c.parent_ticker===co.ticker);
+  const myClasses=DB.shareClasses.filter(c=>c.parent_ticker===co.ticker&&c.ticker!==co.ticker);
   const myApps=DB.classApps.filter(a=>a.parent_ticker===co.ticker).reverse();
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
   const studentOptions=students.map(s=>'<option value="'+s.id+'">'+s.name+'</option>').join('');
