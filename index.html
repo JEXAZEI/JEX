@@ -601,13 +601,23 @@ function doRegister(){const active=document.querySelector('.reg-tab.active');con
 function renderTopbar(){const u=cu();return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><span>${u.name}</span>${roleBadge(u.role)}<button class="logout-btn" onclick="logout()">sign out</button></div></div>`;}
 function renderBanner(){
   const s=DB.session,cls=s.status==='open'?'s-open':s.status==='paused'?'s-paused':'s-closed';
-  const timer=s.ends_at?`<span id="timer-el" class="timer">...</span>`:'';
+  const timer=s.ends_at?'<span id="timer-el" class="timer">...</span>':'';
   const u=cu();const canControl=isAdmin(u);
-  const latestAnn=DB.announ&&DB.announ.length?null:DB.announcements&&DB.announcements[0]||null;
   const ann=DB.announcements&&DB.announcements[0]||null;
-  const annColor=ann?ann.level==='urgent'?'background:rgba(255,77,106,0.12);border-bottom:1px solid rgba(255,77,106,0.25);color:#ff4d6a':ann.level==='warning'?'background:rgba(240,165,0,0.1);border-bottom:1px solid rgba(240,165,0,0.2);color:var(--amber)':'background:rgba(55,138,221,0.08);border-bottom:1px solid rgba(55,138,221,0.2);color:#85B7EB':'';
-  return `${ann?`<div style="${annColor};padding:8px 20px;font-size:13px;display:flex;align-items:center;justify-content:space-between"><span>📢 <strong>${ann.title}</strong>${ann.body?' — '+ann.body:''} <span style="font-size:11px;opacity:0.7;margin-left:8px">${ann.author_name||''} · ${ann.ts||''}</span></span>${canControl?`<button class="btn btn-sm btn-danger" style="font-size:11px;padding:2px 8px" onclick="deleteAnnouncement('${ann.id}')">✕</button>`:''}</div>`:''}
-    <div class="session-banner ${cls}"><span>${s.label}${timer}</span>${canControl?`<div style="display:flex;gap:6px">${s.status!=='open'?`<button class="btn btn-sm btn-success" onclick="setSession('open')">Open</button>`:''} ${s.status==='open'?`<button class="btn btn-sm" style="border-color:var(--amber);color:var(--amber)" onclick="setSession('paused')">Pause</button>`:''} ${s.status!=='closed'?`<button class="btn btn-sm btn-danger" onclick="setSession('closed')">Close</button>`:''}</div>`:''}</div>`;
+  let annHtml='';
+  if(ann){
+    const annColor=ann.level==='urgent'?'background:rgba(255,77,106,0.12);border-bottom:1px solid rgba(255,77,106,0.25);color:#ff4d6a':ann.level==='warning'?'background:rgba(240,165,0,0.1);border-bottom:1px solid rgba(240,165,0,0.2);color:var(--amber)':'background:rgba(55,138,221,0.08);border-bottom:1px solid rgba(55,138,221,0.2);color:#85B7EB';
+    const delBtn=canControl?('<button class="btn btn-sm btn-danger" style="font-size:11px;padding:2px 8px" onclick="deleteAnnouncement(&#39;'+ann.id+'&#39;)">&#x2715;</button>'):'';
+    annHtml='<div style="'+annColor+';padding:8px 20px;font-size:13px;display:flex;align-items:center;justify-content:space-between"><span>📢 <strong>'+ann.title+'</strong>'+(ann.body?' — '+ann.body:'')+' <span style="font-size:11px;opacity:0.7;margin-left:8px">'+(ann.author_name||'')+' · '+(ann.ts||'')+'</span></span>'+delBtn+'</div>';
+  }
+  let sessionBtns='';
+  if(canControl){
+    const openBtn=s.status!=='open'?'<button class="btn btn-sm btn-success" onclick="setSession(&quot;open&quot;)">Open</button>':'';
+    const pauseBtn=s.status==='open'?'<button class="btn btn-sm" style="border-color:var(--amber);color:var(--amber)" onclick="setSession(&quot;paused&quot;)">Pause</button>':'';
+    const closeBtn=s.status!=='closed'?'<button class="btn btn-sm btn-danger" onclick="setSession(&quot;closed&quot;)">Close</button>':'';
+    sessionBtns='<div style="display:flex;gap:6px">'+openBtn+' '+pauseBtn+' '+closeBtn+'</div>';
+  }
+  return annHtml+'<div class="session-banner '+cls+'"><span>'+s.label+timer+'</span>'+sessionBtns+'</div>';
 }
 function renderNav(){
   const u=cu();
@@ -738,19 +748,46 @@ function renderPortfolio(){
   const held=Object.entries(holdings(u)),sh=Object.entries(shorts(u)).filter(([,s])=>s.qty>0);
   const _divs=divRec(u),watched=DB.companies.filter(c=>c.status==='listed'&&isWatched(c.ticker));
   const myDivs=DB.dividends.filter(d=>(d.payouts||[]).some(p=>p.userId===u.id)).reverse();
-  return `<div class="tab-row">
+
+  const tabs=`<div class="tab-row">
     <button class="tab ${UI.portfolioTab==='holdings'?'active':''}" onclick="UI.portfolioTab='holdings';render()">Holdings</button>
-    <button class="tab ${UI.portfolioTab==='shorts'?'active':''}" onclick="UI.portfolioTab='shorts';render()">Shorts ${sh.length?`<span class="badge b-purple" style="margin-left:4px">${sh.length}</span>`:''}</button>
-    <button class="tab ${UI.portfolioTab==='watchlist'?'active':''}" onclick="UI.portfolioTab='watchlist';render()">Watchlist ${watched.length?`<span class="badge b-teal" style="margin-left:4px">${watched.length}</span>`:''}</button>
+    <button class="tab ${UI.portfolioTab==='shorts'?'active':''}" onclick="UI.portfolioTab='shorts';render()">Shorts ${sh.length?'<span class="badge b-purple" style="margin-left:4px">'+sh.length+'</span>':''}</button>
+    <button class="tab ${UI.portfolioTab==='watchlist'?'active':''}" onclick="UI.portfolioTab='watchlist';render()">Watchlist ${watched.length?'<span class="badge b-teal" style="margin-left:4px">'+watched.length+'</span>':''}</button>
     <button class="tab ${UI.portfolioTab==='dividends'?'active':''}" onclick="UI.portfolioTab='dividends';render()">Dividends</button>
     <button class="tab ${UI.portfolioTab==='history'?'active':''}" onclick="UI.portfolioTab='history';render()">Trade history</button>
-  </div>
-  ${UI.portfolioTab==='holdings'?`<div class="grid4"><div class="mcard"><div class="mlabel">Cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div><div class="mcard"><div class="mlabel">Portfolio</div><div class="mval" style="font-family:var(--mono)">${fmt(_pv)}</div></div><div class="mcard"><div class="mlabel">Net worth</div><div class="mval ${_nw>=10000?'green':'red'}" style="font-family:var(--mono)">${fmt(_nw)}</div></div><div class="mcard"><div class="mlabel">Dividends received</div><div class="mval green" style="font-family:var(--mono)">${fmt(_divs)}</div></div></div>
-    <div class="card"><div class="section-title">Holdings</div><table><thead><tr><th>Ticker</th><th>Company</th><th>Shares</th><th>Price</th><th>Value</th><th>P&L</th><th></th></tr></thead><tbody>${held.length?held.map(([t,q])=>{const c=getCo(t);if(!c)return'';const val=c.price*q,chg=priceChg(c);return`<tr><td><span class="badge b-gray" style="font-family:var(--mono)">${t}</span></td><td>${c.name}</td><td>${q}</td><td style="font-family:var(--mono)">${fmt(c.price)}</td><td style="font-weight:500;font-family:var(--mono)">${fmt(val)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><button class="btn btn-sm" onclick="setTab('market');setTimeout(()=>openPanel('${t}'),50)">Trade</button></td></tr>`;}).join(''):`<tr><td colspan="7"><div class="empty">No holdings</div></td></tr>`}</tbody></table></div>`
-  :UI.portfolioTab==='shorts'?`<div class="grid3"><div class="mcard"><div class="mlabel">Open shorts</div><div class="mval">${sh.length}</div></div><div class="mcard"><div class="mlabel">Unrealised P&L</div><div class="mval ${_spnl>=0?'green':'red'}" style="font-family:var(--mono)">${fmt(_spnl)}</div></div><div class="mcard"><div class="mlabel">Collateral locked</div><div class="mval" style="font-family:var(--mono)">${fmt(Object.values(shorts(u)).reduce((s,p)=>s+p.collateral,0))}</div></div></div>
-    ${sh.length?sh.map(([t,pos])=>{const c=getCo(t);if(!c)return'';const p=(pos.avgPrice-c.price)*pos.qty;return`<div class="short-pos"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-weight:500">${c.name} <span class="badge b-gray" style="font-family:var(--mono)">${t}</span></span><button class="btn btn-sm btn-warning" onclick="setTab('market');UI.panelMode='cover';setTimeout(()=>openPanel('${t}'),50)">Cover</button></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:12px"><div><div style="color:var(--text2)">Qty</div><div style="font-weight:500">${pos.qty}</div></div><div><div style="color:var(--text2)">Avg price</div><div style="font-family:var(--mono)">${fmt(pos.avgPrice)}</div></div><div><div style="color:var(--text2)">Current</div><div style="font-family:var(--mono)">${fmt(c.price)}</div></div><div><div style="color:var(--text2)">P&L</div><div style="font-family:var(--mono);color:${p>=0?'var(--green)':'var(--red)'}">${fmt(p)}</div></div></div></div>`;}).join(''):'<div class="empty">No open short positions</div>'}`
-  :UI.portfolioTab==='watchlist'?`${watched.length?`<div class="card"><div class="section-title">Watched stocks</div><table><thead><tr><th>Ticker</th><th>Company</th><th>Price</th><th>Change</th><th>Avail.</th><th></th><th></th></tr></thead><tbody>${watched.map(c=>{const chg=priceChg(c);return`<tr><td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td><td>${c.name}</td><td style="font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${c.shares_avail.toLocaleString()}</td><td><button class="wstar on" onclick="toggleWatch('${c.ticker}')">★</button></td><td><button class="btn btn-sm btn-primary" onclick="setTab('market');setTimeout(()=>openPanel('${c.ticker}'),50)">Trade</button></td></tr>`;}).join('')}</tbody></table></div>`:'<div class="empty">No stocks on your watchlist.<br>Click ☆ on any stock to add it.</div>'}`
-  :`${myDivs.length?`<div class="card"><div class="section-title">Dividend history</div><table><thead><tr><th>Time</th><th>Company</th><th>Per share</th><th>Shares</th><th>Received</th><th>Note</th></tr></thead><tbody>${myDivs.map(d=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);if(!p)return'';return`<tr><td style="color:var(--text2)">${d.ts}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></td><td style="font-family:var(--mono)">${fmt(d.per_share)}</td><td>${p.shares}</td><td style="color:var(--green);font-family:var(--mono)">${fmt(p.payout)}</td><td style="font-size:12px;color:var(--text2)">${d.note}</td></tr>`;}).join('')}</tbody></table></div>`:'<div class="empty">No dividends received yet</div>'}`:UI.portfolioTab==='history'?renderTradingHistory():''}`;
+  </div>`;
+
+  if(UI.portfolioTab==='holdings'){
+    const rows=held.length?held.map(([t,q])=>{
+      const c=getCo(t);if(!c)return'';
+      const val=c.price*q,chg=priceChg(c);
+      return '<tr><td><span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></td><td>'+c.name+'</td><td>'+q+'</td><td style="font-family:var(--mono)">'+fmt(c.price)+'</td><td style="font-weight:500;font-family:var(--mono)">'+fmt(val)+'</td><td class="'+(chg>=0?'price-up':'price-down')+'">'+fmtChg(chg)+'</td><td><button class="btn btn-sm" onclick="setTab(&quot;market&quot;);setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Trade</button></td></tr>';
+    }).join(''):'<tr><td colspan="7"><div class="empty">No holdings</div></td></tr>';
+    return tabs+`<div class="grid4"><div class="mcard"><div class="mlabel">Cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div><div class="mcard"><div class="mlabel">Portfolio</div><div class="mval" style="font-family:var(--mono)">${fmt(_pv)}</div></div><div class="mcard"><div class="mlabel">Net worth</div><div class="mval ${_nw>=10000?'green':'red'}" style="font-family:var(--mono)">${fmt(_nw)}</div></div><div class="mcard"><div class="mlabel">Dividends received</div><div class="mval green" style="font-family:var(--mono)">${fmt(_divs)}</div></div></div>
+    <div class="card"><div class="section-title">Holdings</div><table><thead><tr><th>Ticker</th><th>Company</th><th>Shares</th><th>Price</th><th>Value</th><th>P&L</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  if(UI.portfolioTab==='shorts'){
+    const shortRows=sh.length?sh.map(([t,pos])=>{
+      const c=getCo(t);if(!c)return'';const p=(pos.avgPrice-c.price)*pos.qty;
+      return '<div class="short-pos"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-weight:500">'+c.name+' <span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></span><button class="btn btn-sm btn-warning" onclick="setTab(&quot;market&quot;);UI.panelMode=&quot;cover&quot;;setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Cover</button></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:12px"><div><div style="color:var(--text2)">Qty</div><div>'+pos.qty+'</div></div><div><div style="color:var(--text2)">Avg price</div><div style="font-family:var(--mono)">'+fmt(pos.avgPrice)+'</div></div><div><div style="color:var(--text2)">Current</div><div style="font-family:var(--mono)">'+fmt(c.price)+'</div></div><div><div style="color:var(--text2)">P&L</div><div style="font-family:var(--mono);color:'+(p>=0?'var(--green)':'var(--red)')+'">'+fmt(p)+'</div></div></div></div>';
+    }).join(''):'<div class="empty">No open short positions</div>';
+    const collTotal=Object.values(shorts(u)).reduce((s,p)=>s+p.collateral,0);
+    return tabs+`<div class="grid3"><div class="mcard"><div class="mlabel">Open shorts</div><div class="mval">${sh.length}</div></div><div class="mcard"><div class="mlabel">Unrealised P&L</div><div class="mval ${_spnl>=0?'green':'red'}" style="font-family:var(--mono)">${fmt(_spnl)}</div></div><div class="mcard"><div class="mlabel">Collateral locked</div><div class="mval" style="font-family:var(--mono)">${fmt(collTotal)}</div></div></div>${shortRows}`;
+  }
+
+  if(UI.portfolioTab==='watchlist'){
+    if(!watched.length)return tabs+'<div class="empty">No stocks on your watchlist.<br>Click ☆ on any stock to add it.</div>';
+    const wrows=watched.map(c=>{const chg=priceChg(c);return '<tr><td><span class="badge b-gray" style="font-family:var(--mono)">'+c.ticker+'</span></td><td>'+c.name+'</td><td style="font-family:var(--mono)">'+fmt(c.price)+'</td><td class="'+(chg>=0?'price-up':'price-down')+'">'+fmtChg(chg)+'</td><td>'+c.shares_avail.toLocaleString()+'</td><td><button class="wstar on" onclick="toggleWatch(&quot;'+c.ticker+'&quot;)">★</button></td><td><button class="btn btn-sm btn-primary" onclick="setTab(&quot;market&quot;);setTimeout(()=>openPanel(&quot;'+c.ticker+'&quot;),50)">Trade</button></td></tr>';}).join('');
+    return tabs+'<div class="card"><div class="section-title">Watched stocks</div><table><thead><tr><th>Ticker</th><th>Company</th><th>Price</th><th>Change</th><th>Avail.</th><th></th><th></th></tr></thead><tbody>'+wrows+'</tbody></table></div>';
+  }
+
+  if(UI.portfolioTab==='history') return tabs+renderTradingHistory();
+
+  // dividends tab
+  if(!myDivs.length)return tabs+'<div class="empty">No dividends received yet</div>';
+  const divRows=myDivs.map(d=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);if(!p)return'';return '<tr><td style="color:var(--text2)">'+d.ts+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+d.ticker+'</span></td><td style="font-family:var(--mono)">'+fmt(d.per_share)+'</td><td>'+p.shares+'</td><td style="color:var(--green);font-family:var(--mono)">'+fmt(p.payout)+'</td><td style="font-size:12px;color:var(--text2)">'+d.note+'</td></tr>';}).join('');
+  return tabs+'<div class="card"><div class="section-title">Dividend history</div><table><thead><tr><th>Time</th><th>Company</th><th>Per share</th><th>Shares</th><th>Received</th><th>Note</th></tr></thead><tbody>'+divRows+'</tbody></table></div>';
 }
 
 // ═══════════════════════════════════════════════
