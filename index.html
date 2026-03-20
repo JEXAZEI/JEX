@@ -153,13 +153,13 @@ const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='
 // STATE
 // ═══════════════════════════════════════════════
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
-  announcements:[],limitOrders:[],activity:[],
+  announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000}};
 let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy'};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
-  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity]=await Promise.all([
+  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots]=await Promise.all([
     sb.get('jex_users','order=created_at.asc'),sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_companies','order=created_at.asc'),sb.get('jex_news','order=created_at.desc'),
     sb.get('jex_ipo_applications','order=created_at.asc'),sb.get('jex_dilution_applications','order=created_at.asc'),
@@ -167,10 +167,15 @@ async function loadAll(){
     sb.get('jex_buybacks','order=created_at.asc'),sb.get('jex_session','id=eq.1'),
     sb.get('jex_announcements','order=created_at.desc'),
     sb.get('jex_limit_orders','order=created_at.asc'),
-    sb.get('jex_activity','order=created_at.desc&limit=200')
+    sb.get('jex_activity','order=created_at.desc&limit=200'),
+    sb.get('jex_share_classes','order=created_at.asc'),
+    sb.get('jex_class_applications','order=created_at.asc'),
+    sb.get('jex_votes','order=created_at.desc'),
+    sb.get('jex_vote_ballots','order=created_at.asc')
   ]);
   DB={users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,
-    session:session[0]||DB.session,announcements,limitOrders,activity};
+    session:session[0]||DB.session,announcements,limitOrders,activity,
+    shareClasses,classApps,votes,ballots};
 }
 
 // ═══════════════════════════════════════════════
@@ -566,6 +571,171 @@ function shortPrev(co,qty){if(!qty||qty<=0)return'';const c=Math.round(co.price*
 function dilPreview(co,ns){if(!ns||ns<=0)return'';const ta=co.shares+ns,np=Math.max(0.01,Math.round(co.price*(co.shares/ta)*100)/100);return `<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px"><div><div style="color:var(--text2);margin-bottom:2px">Total after</div><div style="font-weight:500">${ta.toLocaleString()}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Increase</div><div style="font-weight:500;color:var(--amber)">+${Math.round((ns/co.shares)*100)}%</div></div><div><div style="color:var(--text2);margin-bottom:2px">Est. price</div><div style="font-weight:500;color:var(--red)">${fmt(np)}</div></div></div>`;}
 
 // ═══════════════════════════════════════════════
+// SHARE CLASSES & VOTES
+// ═══════════════════════════════════════════════
+
+// Helper: get class metadata for a ticker (or null if base class)
+function getClassMeta(ticker){return DB.shareClasses.find(c=>c.ticker===ticker)||null;}
+// Helper: get all tickers for a company (base + classes)
+function getCompanyTickers(parentTicker){
+  const base=[parentTicker];
+  const classes=DB.shareClasses.filter(c=>c.parent_ticker===parentTicker).map(c=>c.ticker);
+  return [...base,...classes];
+}
+// Helper: can this user see/trade this ticker?
+function canAccessTicker(ticker,userId){
+  const meta=getClassMeta(ticker);
+  if(!meta)return true; // base class, always accessible
+  if(!meta.restricted)return true;
+  return (meta.whitelist||[]).includes(userId);
+}
+// Helper: voting power a user has for a company
+function getVotingPower(userId,parentTicker){
+  const u=getUser(userId);if(!u)return 0;
+  const tickers=getCompanyTickers(parentTicker);
+  return tickers.reduce((total,ticker)=>{
+    const held=(holdings(u)[ticker])||0;if(!held)return total;
+    const meta=getClassMeta(ticker);
+    const vps=meta?meta.votes_per_share:1; // base class = 1 vote
+    return total+held*vps;
+  },0);
+}
+
+// ── Submit new share class application ───────────────────
+async function submitClassApplication(parentTicker,classType,votesPerShare,shares,price,restricted,whitelistIds,reason){
+  const co=getCo(parentTicker);if(!co)return;
+  const u=cu();
+  if(!classType)return toast('Select a class type');
+  votesPerShare=parseInt(votesPerShare);
+  if(isNaN(votesPerShare)||votesPerShare<0)return toast('Enter valid votes per share');
+  shares=parseInt(shares);price=parseFloat(price);
+  if(isNaN(shares)||shares<=0)return toast('Enter valid share count');
+  if(isNaN(price)||price<=0)return toast('Enter valid price');
+  const proposedTicker=parentTicker+'.'+classType;
+  if(DB.companies.find(c=>c.ticker===proposedTicker)||DB.classApps.find(a=>a.proposed_ticker===proposedTicker&&a.status==='pending'))
+    return toast('A '+classType+' class already exists or is pending for this company');
+  const app={id:uid(),parent_ticker:parentTicker,proposed_ticker:proposedTicker,class:classType,
+    label:'Class '+classType,votes_per_share:votesPerShare,shares,price,
+    restricted:!!restricted,whitelist:whitelistIds||[],
+    company_name:co.name,owner_id:u.id,status:'pending',reason:reason||'',ts:ts()};
+  await sb.post('jex_class_applications',app);
+  DB.classApps.push(app);
+  await logActivity('class_app',u.name+' applied for '+co.name+' Class '+classType+' ('+proposedTicker+')',{ticker:parentTicker,userId:u.id,userName:u.name});
+  toast('Class '+classType+' application submitted — awaiting Chairman approval');
+  UI.companyTab='classes';render();
+}
+
+// ── Chairman: approve / reject class application ─────────
+async function reviewClassApp(id,approve){
+  const app=DB.classApps.find(a=>a.id===id);if(!app)return;
+  await sb.patch('jex_class_applications','id=eq.'+id,{status:approve?'approved':'rejected'});
+  app.status=approve?'approved':'rejected';
+  if(approve){
+    // Create trading entry in jex_companies
+    const co={id:uid(),name:app.company_name+' (Class '+app.class+')',ticker:app.proposed_ticker,
+      price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',
+      owner_id:app.owner_id,description:'Class '+app.class+' shares of '+app.company_name,
+      price_history:[{p:app.price,t:'Class '+app.class+' IPO'}],financials:[]};
+    await sb.post('jex_companies',co);DB.companies.push(co);
+    // Store class metadata
+    const meta={id:uid(),parent_ticker:app.parent_ticker,ticker:app.proposed_ticker,
+      class:app.class,label:'Class '+app.class,votes_per_share:app.votes_per_share,
+      restricted:app.restricted,whitelist:app.whitelist||[],
+      company_name:app.company_name,owner_id:app.owner_id};
+    await sb.post('jex_share_classes',meta);DB.shareClasses.push(meta);
+    await logActivity('class_approved',app.company_name+' Class '+app.class+' ('+app.proposed_ticker+') approved',{ticker:app.proposed_ticker});
+    toast(app.company_name+' Class '+app.class+' listed as '+app.proposed_ticker+'!');
+  } else {
+    toast('Class application rejected');
+  }
+  render();
+}
+
+// ── Votes ─────────────────────────────────────────────────
+async function postVote(parentTicker,question,optA,optB,closesAt){
+  if(!question||question.trim().length<5)return toast('Enter a question');
+  if(!optA||!optB)return toast('Enter both options');
+  const co=getCo(parentTicker);if(!co)return;
+  const u=cu();
+  const v={id:uid(),parent_ticker:parentTicker,company_name:co.name,
+    question:question.trim(),option_a:optA.trim(),option_b:optB.trim(),
+    status:'open',created_by:u.id,ts:ts(),closes_at:closesAt||null};
+  await sb.post('jex_votes',v);DB.votes.push(v);
+  await logActivity('vote',co.name+' posted vote: '+question.trim(),{ticker:parentTicker,userId:u.id,userName:u.name});
+  toast('Vote posted');UI.companyTab='votes';render();
+}
+async function castVote(voteId,choice){
+  const v=DB.votes.find(x=>x.id===voteId);if(!v)return;
+  const u=cu();if(!u)return;
+  if(DB.ballots.find(b=>b.vote_id===voteId&&b.voter_id===u.id))return toast('You have already voted');
+  const power=getVotingPower(u.id,v.parent_ticker);
+  if(power<=0)return toast('You have no voting shares in this company');
+  const ballot={id:uid(),vote_id:voteId,voter_id:u.id,voter_name:u.name,choice,voting_power:power,ts:ts()};
+  await sb.post('jex_vote_ballots',ballot);DB.ballots.push(ballot);
+  toast('Vote cast — '+power+' vote'+(power!==1?'s':'')+' counted');render();
+}
+async function closeVote(voteId){
+  if(!confirm('Close this vote?'))return;
+  await sb.patch('jex_votes','id=eq.'+voteId,{status:'closed'});
+  const v=DB.votes.find(x=>x.id===voteId);if(v)v.status='closed';
+  toast('Vote closed');render();
+}
+function postVoteForm(parentTicker){
+  postVote(parentTicker,
+    document.getElementById('vote-q')?.value,
+    document.getElementById('vote-a')?.value,
+    document.getElementById('vote-b')?.value,
+    document.getElementById('vote-closes')?.value);
+}
+async function deleteVote(voteId){
+  if(!confirm('Delete this vote and all ballots?'))return;
+  await sb.del('jex_votes','id=eq.'+voteId);
+  await sb.del('jex_vote_ballots','vote_id=eq.'+voteId);
+  DB.votes=DB.votes.filter(x=>x.id!==voteId);
+  DB.ballots=DB.ballots.filter(b=>b.vote_id!==voteId);
+  toast('Vote deleted');render();
+}
+function getVoteResults(voteId){
+  const ballots=DB.ballots.filter(b=>b.vote_id===voteId);
+  const powerA=ballots.filter(b=>b.choice==='A').reduce((s,b)=>s+b.voting_power,0);
+  const powerB=ballots.filter(b=>b.choice==='B').reduce((s,b)=>s+b.voting_power,0);
+  const total=powerA+powerB;
+  return{powerA,powerB,total,pctA:total?Math.round(powerA/total*100):0,pctB:total?Math.round(powerB/total*100):0,count:ballots.length};
+}
+
+// ── Render: vote card ─────────────────────────────────────
+function renderVoteCard(v,isOwner,isAdminUser){
+  const res=getVoteResults(v.id);
+  const u=cu();
+  const myBallot=DB.ballots.find(b=>b.vote_id===v.id&&b.voter_id===u?.id);
+  const myPower=u?getVotingPower(u.id,v.parent_ticker):0;
+  const canVote=!myBallot&&myPower>0&&v.status==='open'&&u?.role==='student';
+  return '<div class="news-item" style="margin-bottom:12px">'
+    +'<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">'
+    +'<div><div style="font-weight:500;font-size:14px;margin-bottom:2px">'+v.question+'</div>'
+    +'<div style="font-size:11px;color:var(--text2)">'+v.company_name+' · '+v.ts+(v.closes_at?' · closes '+v.closes_at:'')+'</div></div>'
+    +'<span class="badge '+(v.status==='open'?'b-green':'b-gray')+'">'+v.status+'</span></div>'
+    // Results bars
+    +'<div style="margin-bottom:10px">'
+    +'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>'+v.option_a+'</span><span style="font-family:var(--mono)">'+res.powerA+' votes ('+res.pctA+'%)</span></div>'
+    +'<div style="height:8px;background:var(--bg3);border-radius:4px;overflow:hidden;margin-bottom:8px"><div style="height:100%;width:'+res.pctA+'%;background:var(--green);border-radius:4px;transition:width 0.3s"></div></div>'
+    +'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>'+v.option_b+'</span><span style="font-family:var(--mono)">'+res.powerB+' votes ('+res.pctB+'%)</span></div>'
+    +'<div style="height:8px;background:var(--bg3);border-radius:4px;overflow:hidden"><div style="height:100%;width:'+res.pctB+'%;background:var(--red);border-radius:4px;transition:width 0.3s"></div></div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-top:4px">'+res.count+' voter'+(res.count!==1?'s':'')+' · '+res.total+' total votes</div></div>'
+    // Voting buttons
+    +(canVote?'<div style="display:flex;gap:8px;margin-bottom:8px">'
+      +'<button class="btn btn-sm btn-success" onclick="castVote(&quot;'+v.id+'&quot;,&quot;A&quot;)">Vote: '+v.option_a+'</button>'
+      +'<button class="btn btn-sm btn-danger" onclick="castVote(&quot;'+v.id+'&quot;,&quot;B&quot;)">Vote: '+v.option_b+'</button>'
+      +'<span style="font-size:11px;color:var(--text2);line-height:28px">Your voting power: <strong>'+myPower+'</strong></span></div>':'')
+    +(myBallot?'<div class="ibox ibox-green" style="padding:6px 10px;margin-bottom:0">You voted: <strong>'+(myBallot.choice==='A'?v.option_a:v.option_b)+'</strong> ('+myBallot.voting_power+' votes)</div>':'')
+    // Admin/owner controls
+    +((isOwner||isAdminUser)?'<div style="display:flex;gap:6px;margin-top:8px">'
+      +(v.status==='open'?'<button class="btn btn-sm btn-warning" onclick="closeVote(&quot;'+v.id+'&quot;)">Close vote</button>':'')
+      +'<button class="btn btn-sm btn-danger" onclick="deleteVote(&quot;'+v.id+'&quot;)">Delete</button></div>':'')
+    +'</div>';
+}
+
+// ═══════════════════════════════════════════════
 // RENDER: CONFIG
 // ═══════════════════════════════════════════════
 function renderConfig(){return `<div class="config-page"><div class="config-card"><div style="font-family:var(--mono);font-size:22px;font-weight:600;margin-bottom:4px"><span style="color:var(--amber)">JEX</span> — Setup required</div><div style="font-size:13px;color:var(--text2);margin-bottom:24px">Connect JEX to your Supabase database.</div><div class="ibox ibox-amber" style="margin-bottom:20px"><strong>One-time setup:</strong><br>1. Go to <strong>supabase.com</strong> and create a free account.<br>2. Create a new project.<br>3. Go to <strong>SQL Editor</strong> → paste and run <code>supabase_setup.sql</code>.<br>4. Go to <strong>Project Settings → API</strong> → copy Project URL and anon key.<br>5. Open <code>index.html</code>, paste your values into the two config lines at the top of the script.<br>6. Upload to GitHub.</div><div class="ibox ibox-blue">After setup this screen will be replaced by the JEX login.<br><br>Default logins: <code>chairman@jted.edu / chairman1234</code> and <code>president@jted.edu / president1234</code></div></div></div>`;}
@@ -653,15 +823,21 @@ function renderNewsFeed(){
 // ═══════════════════════════════════════════════
 // RENDER: MARKET
 // ═══════════════════════════════════════════════
-function renderTickerBar(){return `<div class="ticker-bar">${DB.companies.filter(c=>c.status==='listed').map(c=>{const chg=priceChg(c),w=isWatched(c.ticker);return `<div class="ticker-item ${UI.panelTicker===c.ticker?'active-t':''} ${w?'watched':''}" onclick="openPanel('${c.ticker}')"><div class="tsym">${c.ticker}${w?' ★':''}</div><div class="tprice">${fmt(c.price)}</div><div class="tchg ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</div></div>`;}).join('')}</div>`;}
+function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)).map(c=>{const chg=priceChg(c),w=isWatched(c.ticker);return `<div class="ticker-item ${UI.panelTicker===c.ticker?'active-t':''} ${w?'watched':''}" onclick="openPanel('${c.ticker}')"><div class="tsym">${c.ticker}${w?' ★':''}</div><div class="tprice">${fmt(c.price)}</div><div class="tchg ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</div></div>`;}).join('')}</div>`;}
 function renderMarket(){
-  const listed=DB.companies.filter(c=>c.status==='listed'),u=cu();
+  const u=cu();const listed=DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id));
   const recentNews=DB.news.slice(0,5);
   return `${renderTickerBar()}
     <div class="card"><div class="section-title">Listed companies</div>
       <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${u.role==='student'?'<th>Watch</th><th></th>':''}</tr></thead>
-      <tbody>${listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];return`<tr><td><span style="font-weight:500">${c.name}</span><br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${u.role==='student'?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openPanel('${c.ticker}')">Trade</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
+      <tbody>${listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
+    const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
+    const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
+    return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${u.role==='student'?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openPanel('${c.ticker}')">Trade</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
     </div>
+    ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
+      +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
+      +'</div>':''}
     ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.news.length} post${DB.news.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${n.headline}</div>${n.body?`<div class="news-body">${n.body}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${n.company_name}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${DB.news.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${DB.news.length} posts</div>`:''}</div>`:''}
     <div id="trade-panel"></div>`;
 }
@@ -835,20 +1011,120 @@ function renderMyStock(){
   const myDivs=DB.dividends.filter(d=>d.ticker===co.ticker).reverse();
   const myBBs=DB.buybacks.filter(b=>b.ticker===co.ticker).reverse();
   const myNews=DB.news.filter(n=>n.ticker===co.ticker);
+  const pendingClassApp=DB.classApps.filter(a=>a.owner_id===u.id&&a.status==='pending').length;
+  const myVotes=DB.votes.filter(v=>v.parent_ticker===co.ticker);
   return`<div class="tab-row">
     <button class="tab ${UI.companyTab==='stock'?'active':''}" onclick="UI.companyTab='stock';render()">Overview</button>
-    <button class="tab ${UI.companyTab==='news'?'active':''}" onclick="UI.companyTab='news';render()">News ${myNews.length?`<span class="badge b-amber" style="margin-left:4px">${myNews.length}</span>`:''}</button>
+    <button class="tab ${UI.companyTab==='classes'?'active':''}" onclick="UI.companyTab='classes';render()">Share classes ${pendingClassApp?'<span class="badge b-amber" style="margin-left:4px">'+pendingClassApp+'</span>':''}</button>
+    <button class="tab ${UI.companyTab==='votes'?'active':''}" onclick="UI.companyTab='votes';render()">Votes ${myVotes.length?'<span class="badge b-purple" style="margin-left:4px">'+myVotes.length+'</span>':''}</button>
+    <button class="tab ${UI.companyTab==='news'?'active':''}" onclick="UI.companyTab='news';render()">News ${myNews.length?'<span class="badge b-amber" style="margin-left:4px">'+myNews.length+'</span>':''}</button>
     <button class="tab ${UI.companyTab==='financials'?'active':''}" onclick="UI.companyTab='financials';render()">Financials</button>
     <button class="tab ${UI.companyTab==='dividends'?'active':''}" onclick="UI.companyTab='dividends';render()">Dividends</button>
     <button class="tab ${UI.companyTab==='buyback'?'active':''}" onclick="UI.companyTab='buyback';render()">Buyback</button>
     <button class="tab ${UI.companyTab==='dilution'?'active':''}" onclick="UI.companyTab='dilution';render()">Dilution ${pendingDil?'<span class="badge b-amber" style="margin-left:4px">1</span>':''}</button>
   </div>
   ${UI.companyTab==='stock'?`<div class="grid4"><div class="mcard"><div class="mlabel">Price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div><div class="mcard"><div class="mlabel">Market cap</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price*co.shares)}</div></div><div class="mcard"><div class="mlabel">Issued / avail.</div><div class="mval">${co.shares.toLocaleString()} <span style="font-size:12px;color:var(--text2)">(${co.shares_avail.toLocaleString()} free)</span></div></div><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div></div><div class="card"><div class="section-title">Price chart</div><div style="position:relative;height:160px"><canvas id="co-chart"></canvas></div></div>`
+  :UI.companyTab==='classes'?renderClassesTab(co)
+  :UI.companyTab==='votes'?renderCompanyVotesTab(co)
   :UI.companyTab==='news'?renderCompanyNewsTab(co,myNews)
   :UI.companyTab==='financials'?renderFinancials(co)
   :UI.companyTab==='dividends'?renderDivTab(co,myDivs)
   :UI.companyTab==='buyback'?renderBBTab(co,myBBs)
   :renderDilTab(co,pendingDil,myDils)}`;
+}
+
+function renderClassesTab(co){
+  const myClasses=DB.shareClasses.filter(c=>c.parent_ticker===co.ticker);
+  const myApps=DB.classApps.filter(a=>a.parent_ticker===co.ticker).reverse();
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+  const availClasses=['A','B','C'].filter(cls=>cls!=='A'||!DB.shareClasses.find(c=>c.parent_ticker===co.ticker&&c.class==='A'));
+  // Build whitelist selector
+  const studentOptions=students.map(s=>'<option value="'+s.id+'">'+s.name+'</option>').join('');
+  let html='';
+  // Existing classes
+  if(myClasses.length){
+    html+='<div class="card"><div class="section-title">Issued share classes</div>';
+    html+='<div class="ibox ibox-blue">Base ticker <strong>'+co.ticker+'</strong> = Class A (1 vote/share) — the original IPO listing.</div>';
+    html+=myClasses.map(c=>{
+      const co2=getCo(c.ticker);
+      return '<div class="app-row"><div class="app-info">'
+        +'<div class="app-name">'+c.ticker+' <span class="badge b-amber">Class '+c.class+'</span>'
+        +(c.restricted?'<span class="badge b-red" style="margin-left:4px">Restricted</span>':'')+'</div>'
+        +'<div class="app-meta">'+c.votes_per_share+' vote'+(c.votes_per_share!==1?'s':'')+'/share'
+        +(c.restricted?' · Whitelist: '+(c.whitelist||[]).map(id=>getUser(id)?.name||id).join(', '):'')+'</div>'
+        +(co2?'<div class="app-meta">Price: '+fmt(co2.price)+' · Shares: '+co2.shares.toLocaleString()+'</div>':'')
+        +'</div></div>';
+    }).join('');
+    html+='</div>';
+  }
+  // Apply for new class
+  html+='<div class="card"><div class="section-title">Issue a new share class</div>'
+    +'<div class="ibox ibox-teal">Each class gets its own ticker (e.g. '+co.ticker+'.B), trades independently, and requires Chairman approval.</div>'
+    +'<div class="frow"><label class="flabel">Class type</label>'
+    +'<select id="cls-type"><option value="">— Select —</option>'
+    +'<option value="A">Class A — Standard (1 vote default)</option>'
+    +'<option value="B">Class B — High voting power</option>'
+    +'<option value="C">Class C — No votes, dividends only</option>'
+    +'</select></div>'
+    +'<div class="grid2" style="margin-bottom:12px">'
+    +'<div class="frow" style="margin-bottom:0"><label class="flabel">Votes per share</label><input type="number" id="cls-votes" value="1" min="0" placeholder="e.g. 10"></div>'
+    +'<div class="frow" style="margin-bottom:0"><label class="flabel">IPO price ($)</label><input type="number" id="cls-price" placeholder="25.00" min="0.01" step="0.01"></div>'
+    +'</div>'
+    +'<div class="frow"><label class="flabel">Total shares to issue</label><input type="number" id="cls-shares" placeholder="1000" min="1"></div>'
+    +'<div class="frow"><label class="flabel">Restrict to specific students? (optional)</label>'
+    +'<select id="cls-restricted"><option value="">No restriction — open to all</option><option value="yes">Yes — restricted to selected students</option></select></div>'
+    +'<div id="cls-whitelist-wrap" style="display:none"><div class="frow"><label class="flabel">Select allowed students (hold Ctrl/Cmd to select multiple)</label>'
+    +'<select id="cls-whitelist" multiple style="height:100px">'+studentOptions+'</select></div></div>'
+    +'<div class="frow"><label class="flabel">Reason for issuance</label><textarea id="cls-reason" rows="2" placeholder="e.g. Issuing Class B to founders..."></textarea></div>'
+    +'<button class="btn btn-primary" onclick="submitClassAppForm(&quot;'+co.ticker+'&quot;)">Submit for approval</button>'
+    +'</div>';
+  // Pending/past applications
+  if(myApps.length){
+    html+='<div class="card"><div class="section-title">Application history</div>'
+    +myApps.map(a=>'<div class="app-row"><div class="app-info">'
+      +'<div class="app-name">'+a.proposed_ticker+' Class '+a.class+'</div>'
+      +'<div class="app-meta">'+a.votes_per_share+' vote'+(a.votes_per_share!==1?'s':'')+'/share · '+a.shares.toLocaleString()+' shares @ '+fmt(a.price)+(a.restricted?' · Restricted':'')+'</div>'
+      +'<div class="app-meta">'+a.ts+'</div></div>'
+      +'<span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-amber')+'">'+a.status+'</span></div>'
+    ).join('')+'</div>';
+  }
+  return html;
+}
+function submitClassAppForm(parentTicker){
+  const clsType=document.getElementById('cls-type')?.value;
+  const votes=document.getElementById('cls-votes')?.value;
+  const price=document.getElementById('cls-price')?.value;
+  const shares=document.getElementById('cls-shares')?.value;
+  const restrictedVal=document.getElementById('cls-restricted')?.value;
+  const restricted=restrictedVal==='yes';
+  const whitelistEl=document.getElementById('cls-whitelist');
+  const whitelist=restricted&&whitelistEl?Array.from(whitelistEl.selectedOptions).map(o=>o.value):[];
+  const reason=document.getElementById('cls-reason')?.value;
+  submitClassApplication(parentTicker,clsType,votes,shares,price,restricted,whitelist,reason);
+}
+// Toggle whitelist UI
+document.addEventListener('change',function(e){
+  if(e.target&&e.target.id==='cls-restricted'){
+    const wrap=document.getElementById('cls-whitelist-wrap');
+    if(wrap)wrap.style.display=e.target.value==='yes'?'':'none';
+  }
+});
+
+function renderCompanyVotesTab(co){
+  const u=cu();
+  const myVotes=DB.votes.filter(v=>v.parent_ticker===co.ticker);
+  return '<div class="card"><div class="section-title">Post a shareholder vote</div>'
+    +'<div class="ibox ibox-purple">Students vote weighted by shares × votes-per-share across all your share classes.</div>'
+    +'<div class="frow"><label class="flabel">Question</label><input type="text" id="vote-q" placeholder="e.g. Should we expand to renewable energy?"></div>'
+    +'<div class="grid2" style="margin-bottom:12px">'
+    +'<div class="frow" style="margin-bottom:0"><label class="flabel">Option A</label><input type="text" id="vote-a" placeholder="Yes" value="Yes"></div>'
+    +'<div class="frow" style="margin-bottom:0"><label class="flabel">Option B</label><input type="text" id="vote-b" placeholder="No" value="No"></div>'
+    +'</div>'
+    +'<div class="frow"><label class="flabel">Closing date/time (optional, informational)</label><input type="text" id="vote-closes" placeholder="e.g. Friday 3pm"></div>'
+    +'<button class="btn btn-primary" onclick="postVoteForm(&quot;'+co.ticker+'&quot;)">Post vote</button>'
+    +'</div>'
+    +(myVotes.length?'<div class="section-title" style="margin-bottom:10px">Active & past votes</div>'+myVotes.map(v=>renderVoteCard(v,true,false)).join('')
+    :'<div class="card"><div class="empty">No votes posted yet.</div></div>');
 }
 
 function renderCompanyNewsTab(co,myNews){
@@ -910,7 +1186,7 @@ function renderAdmin(){
 
   // President can only see: session, balances, passwords
   const presidentTabs=[['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News']];
-  const chairmanTabs=[['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log']];
+  const chairmanTabs=[['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log']];
   const tabs=chair?chairmanTabs:presidentTabs;
 
   // Ensure president can't access chairman-only tabs by URL-style nav
@@ -926,6 +1202,7 @@ function renderAdmin(){
   :UI.adminTab==='users'?renderAdminUsers(students,companies)
   :UI.adminTab==='news'?renderAdminNews()
   :UI.adminTab==='announcements'?renderAdminAnnouncements()
+  :UI.adminTab==='classes'?renderAdminClasses()
   :UI.adminTab==='activity'?renderActivityLog()
   :renderAdminListed()}`;
 }
@@ -1029,6 +1306,29 @@ function renderAdminUsers(students,companies){
     <table><thead><tr><th>Name</th><th>Email</th><th class="r">Cash</th><th>IPO status</th><th></th></tr></thead>
     <tbody>${companies.map(u=>`<tr><td style="font-weight:500">${u.name}</td><td style="color:var(--text2)">${u.email}</td><td class="r" style="font-family:var(--mono)">${fmt(u.cash)}</td><td><span class="badge ${u.app_status==='approved'?'b-green':u.app_status==='pending'?'b-amber':'b-gray'}">${u.app_status||'—'}</span></td><td><button class="btn btn-sm btn-danger" onclick="removeCompany('${u.id}')">Remove</button></td></tr>`).join('')}
     </tbody></table></div>`:''}`;
+}
+function renderAdminClasses(){
+  const pending=DB.classApps.filter(a=>a.status==='pending');
+  const reviewed=DB.classApps.filter(a=>a.status!=='pending');
+  return '<div class="card"><div class="section-title">Pending share class applications '
+    +(pending.length?'<span class="badge b-amber" style="margin-left:4px">'+pending.length+'</span>':'')+'</div>'
+    +(pending.length?pending.map(a=>'<div class="app-row"><div class="app-info">'
+      +'<div class="app-name">'+a.company_name+' — <span class="badge b-gray" style="font-family:var(--mono)">'+a.proposed_ticker+'</span> Class '+a.class+'</div>'
+      +'<div class="app-meta">'+a.votes_per_share+' vote'+(a.votes_per_share!==1?'s':'')+'/share · '+a.shares.toLocaleString()+' shares @ '+fmt(a.price)
+      +(a.restricted?' · <span class="badge b-red">Restricted</span> to: '+(a.whitelist||[]).map(id=>getUser(id)?.name||id).join(', '):'')+'</div>'
+      +(a.reason?'<div class="app-meta">Reason: '+a.reason+'</div>':'')
+      +'</div><div class="btn-row">'
+      +'<button class="btn btn-success btn-sm" onclick="reviewClassApp(&quot;'+a.id+'&quot;,true)">Approve</button>'
+      +'<button class="btn btn-danger btn-sm" onclick="reviewClassApp(&quot;'+a.id+'&quot;,false)">Reject</button>'
+      +'</div></div>').join('')
+    :'<div class="empty">No pending applications</div>')
+    +'</div>'
+    +(reviewed.length?'<div class="card"><div class="section-title">Reviewed applications</div>'
+      +reviewed.map(a=>'<div class="app-row"><div class="app-info">'
+        +'<div class="app-name">'+a.company_name+' — '+a.proposed_ticker+' Class '+a.class+'</div>'
+        +'<div class="app-meta">'+a.ts+'</div></div>'
+        +'<span class="badge '+(a.status==='approved'?'b-green':'b-red')+'">'+a.status+'</span></div>'
+      ).join('')+'</div>':'');
 }
 function renderAdminNews(){
   const items=DB.news;
