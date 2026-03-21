@@ -156,13 +156,14 @@ const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='
 // ═══════════════════════════════════════════════
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
+  notifications:[],halts:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null}};
 let SHEETS_URL=null;
-let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy'};
+let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview'};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
-  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots]=await Promise.all([
+  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots,notifications,halts]=await Promise.all([
     sb.get('jex_users','order=created_at.asc'),sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_companies','order=created_at.asc'),sb.get('jex_news','order=created_at.desc'),
     sb.get('jex_ipo_applications','order=created_at.asc'),sb.get('jex_dilution_applications','order=created_at.asc'),
@@ -174,11 +175,15 @@ async function loadAll(){
     sb.get('jex_share_classes','order=created_at.asc'),
     sb.get('jex_class_applications','order=created_at.asc'),
     sb.get('jex_votes','order=created_at.desc'),
-    sb.get('jex_vote_ballots','order=created_at.asc')
+    sb.get('jex_vote_ballots','order=created_at.asc'),
+    sb.get('jex_notifications','order=created_at.desc&limit=100'),
+    sb.get('jex_halts','order=created_at.asc'),
+    sb.get('jex_notifications','order=created_at.desc&limit=100'),
+    sb.get('jex_halts','order=created_at.asc')
   ]);
   DB={users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,
     session:session[0]||DB.session,announcements,limitOrders,activity,
-    shareClasses,classApps,votes,ballots};
+    shareClasses,classApps,votes,ballots,notifications,halts};
 }
 
 // ═══════════════════════════════════════════════
@@ -205,7 +210,11 @@ const isChairman=u=>u?.role==='chairman';
 const isPresident=u=>u?.role==='president';
 const isSecTre=u=>(u?.role==='secretary'||u?.role==='treasurer');
 const isOpen=()=>DB.session.status==='open';
-const requireOpen=()=>{if(!isOpen()){toast('Trading is '+DB.session.status+'. Wait for the session to open.');return false;}return true;};
+const requireOpen=(ticker=null)=>{
+  if(!isOpen()){toast('Trading is '+DB.session.status+'. Wait for the session to open.');return false;}
+  if(ticker&&isHalted(ticker)){toast(ticker+' trading is currently halted.');return false;}
+  return true;
+};
 const shareholders=ticker=>DB.users.filter(u=>u.role==='student'&&(holdings(u)[ticker]||0)>0);
 const divTotal=(ticker,ps)=>shareholders(ticker).reduce((s,u)=>s+Math.round(((holdings(u)[ticker])||0)*ps*100)/100,0);
 const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);return Math.max(0.01,Math.round((dir==='buy'?co.price*(1+impact):co.price*(1-impact))*100)/100);};
@@ -251,7 +260,10 @@ async function pushBalances(){
   })).sort((a,b)=>b.nw-a.nw).map((r,i)=>({...r,rank:i+1}));
   await pushToSheets('balances',{rows});
 }
-async function setSession(status){const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';clearInterval(sessionTimer);sessionTimer=null;await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null});const u=cu();await logActivity('session','Session '+status+(u?' by '+u.name:''),{userId:u?.id,userName:u?.name});render();}
+async function setSession(status){const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';clearInterval(sessionTimer);sessionTimer=null;await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null});const u=cu();await logActivity('session','Session '+status+(u?' by '+u.name:''),{userId:u?.id,userName:u?.name});
+  if(status==='open'){await pushNotificationToAll('session','🟢 Trading session is now open!');activateAfterHoursOrders();}
+  if(status==='closed')await pushNotificationToAll('session','🔴 Trading session has closed.');
+  render();}
 async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);render();}
 function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
 async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
@@ -321,6 +333,7 @@ async function postNews(ticker,headline,body){
   const rec={id:uid(),ticker,company_name:co.name,headline:headline.trim(),body:(body||'').trim(),author_id:UI.userId,ts:ts()};
   await sb.post('jex_news',rec);
   DB.news.unshift(rec);
+  await pushNotificationToHolders(ticker,'news','📰 '+co.name+': '+headline.trim());
   toast('News posted');UI.companyTab='news';render();
 }
 async function deleteNews(id){
@@ -360,33 +373,189 @@ async function deleteAnnouncement(id){
 }
 
 // ── Limit orders ────────────────────────────────────────
+// ═══════════════════════════════════════════════
+// NOTIFICATIONS
+// ═══════════════════════════════════════════════
+async function pushNotification(userId, type, message, ticker=null){
+  try{
+    const rec={id:uid(),user_id:userId,type,message,ticker,read:false,ts:ts()};
+    await sb.post('jex_notifications',rec);
+    // Add to local DB if it's for the current user
+    if(userId===UI.userId)DB.notifications.unshift(rec);
+  }catch(e){console.warn('Notification failed:',e);}
+}
+async function pushNotificationToHolders(ticker,type,message){
+  const holders=DB.users.filter(u=>u.role==='student'&&(holdings(u)[ticker]||0)>0);
+  for(const u of holders) await pushNotification(u.id,type,message,ticker);
+}
+async function pushNotificationToAll(type,message){
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+  for(const u of students) await pushNotification(u.id,type,message);
+}
+async function markAllRead(){
+  const unread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read);
+  for(const n of unread){
+    await sb.patch('jex_notifications','id=eq.'+n.id,{read:true});
+    n.read=true;
+  }
+  render();
+}
+function myUnreadCount(){
+  return DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
+}
+function myNotifications(){
+  return DB.notifications.filter(n=>n.user_id===UI.userId).slice(0,50);
+}
+
+// ═══════════════════════════════════════════════
+// MARKET HALTS
+// ═══════════════════════════════════════════════
+function isHalted(ticker){return !!DB.halts.find(h=>h.ticker===ticker);}
+async function haltStock(ticker,reason){
+  if(!ticker)return toast('Select a ticker');
+  if(!reason||reason.trim().length<3)return toast('Enter a reason');
+  if(isHalted(ticker))return toast(ticker+' is already halted');
+  const u=cu();
+  const rec={ticker,reason:reason.trim(),halted_by:u.name,ts:ts()};
+  await sb.post('jex_halts',rec);
+  DB.halts.push(rec);
+  await logActivity('halt',ticker+' trading halted — '+reason.trim(),{ticker,userId:u.id,userName:u.name});
+  // Notify all students who hold this stock
+  await pushNotificationToHolders(ticker,'halt','⚠️ Trading halted on '+ticker+': '+reason.trim());
+  await pushNotificationToAll('halt','⚠️ '+ticker+' trading has been halted: '+reason.trim());
+  toast(ticker+' halted');render();
+}
+async function resumeStock(ticker){
+  if(!confirm('Resume trading on '+ticker+'?'))return;
+  await sb.del('jex_halts','ticker=eq.'+ticker);
+  DB.halts=DB.halts.filter(h=>h.ticker!==ticker);
+  const u=cu();
+  await logActivity('resume',ticker+' trading resumed',{ticker,userId:u.id,userName:u.name});
+  await pushNotificationToAll('resume','✅ '+ticker+' trading has resumed');
+  toast(ticker+' trading resumed');render();
+}
+
+// ═══════════════════════════════════════════════
+// ORDER BOOK HELPERS
+// ═══════════════════════════════════════════════
+function getOrderBook(ticker){
+  const open=DB.limitOrders.filter(o=>o.status==='open'&&o.ticker===ticker);
+  const bids=open.filter(o=>o.side==='buy').sort((a,b)=>b.limit_price-a.limit_price||new Date(a.created_at)-new Date(b.created_at));
+  const asks=open.filter(o=>o.side==='sell').sort((a,b)=>a.limit_price-b.limit_price||new Date(a.created_at)-new Date(b.created_at));
+  const bestBid=bids[0]?.limit_price||null;
+  const bestAsk=asks[0]?.limit_price||null;
+  const spread=bestBid&&bestAsk?Math.round((bestAsk-bestBid)*100)/100:null;
+  return{bids,asks,bestBid,bestAsk,spread};
+}
+
+// ── Place a limit order ───────────────────────────────────
 async function placeLimitOrder(ticker,side,qty,limitPrice){
   if(!requireOpen())return;
   const u=cu(),co=getCo(ticker);if(!u||!co)return;
   qty=parseInt(qty);limitPrice=parseFloat(limitPrice);
   if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(isNaN(limitPrice)||limitPrice<=0)return toast('Enter a valid limit price');
-  // Check if fills immediately
-  const fillsNow=(side==='buy'&&co.price<=limitPrice)||(side==='sell'&&co.price>=limitPrice);
-  if(fillsNow){
-    if(side==='buy')await placeBuy(ticker,qty);
-    else await placeSell(ticker,qty);
-    toast(qty+' × '+ticker+' limit order filled immediately at '+fmt(co.price));
-    return;
+  // After-hours: queue for session open
+  if(!isOpen()){
+    if(side==='buy'){const maxCost=Math.round(limitPrice*qty*100)/100;if(u.cash<maxCost)return toast('Insufficient funds (need '+fmt(maxCost)+' at limit price)');}
+    else{const held=(holdings(u)[ticker])||0;if(held<qty)return toast('You only hold '+held+' shares');}
+    const order={id:uid(),user_id:u.id,ticker,side,qty,limit_price:limitPrice,status:'after_hours',ts:ts()};
+    await sb.post('jex_limit_orders',order);
+    DB.limitOrders.push(order);
+    toast('After-hours order queued: '+qty+'×'+ticker+' @ '+fmt(limitPrice)+' — activates when session opens');
+    render();return;
   }
-  // Check student has enough
   if(side==='buy'){
     const maxCost=Math.round(limitPrice*qty*100)/100;
-    if(u.cash<maxCost)return toast('Insufficient funds to reserve (need '+fmt(maxCost)+' at limit price)');
+    if(u.cash<maxCost)return toast('Insufficient funds (need '+fmt(maxCost)+' at limit price)');
   } else {
     const held=(holdings(u)[ticker])||0;
     if(held<qty)return toast('You only hold '+held+' shares');
   }
-  const order={id:uid(),user_id:u.id,ticker,side,qty,limit_price:limitPrice,status:'open',ts:ts()};
-  await sb.post('jex_limit_orders',order);
-  DB.limitOrders.push(order);
-  await logActivity('limit_order',u.name+' placed limit '+side+' '+qty+'×'+ticker+' @ '+fmt(limitPrice),{ticker,userId:u.id,userName:u.name,amount:limitPrice});
-  toast('Limit '+side+' order placed: '+qty+' × '+ticker+' @ '+fmt(limitPrice));render();
+  // Try to match against existing order book first
+  const remaining=await matchAgainstBook(ticker,side,qty,limitPrice,u);
+  if(remaining<=0){toast('Limit order fully filled from order book!');render();return;}
+  // If anything left over, check if it would fill against JEX pool
+  const co2=getCo(ticker);
+  const fillsVsPool=(side==='buy'&&co2.price<=limitPrice)||(side==='sell'&&co2.price>=limitPrice);
+  if(fillsVsPool&&remaining>0){
+    if(side==='buy')await placeBuy(ticker,remaining);
+    else await placeSell(ticker,remaining);
+    if(remaining<qty)toast((qty-remaining)+' filled from book, '+remaining+' filled vs JEX pool');
+    else toast(remaining+' × '+ticker+' filled immediately vs JEX pool @ '+fmt(co2.price));
+    render();return;
+  }
+  // Queue remainder in order book
+  if(remaining>0){
+    const order={id:uid(),user_id:u.id,ticker,side,qty:remaining,limit_price:limitPrice,status:'open',ts:ts()};
+    await sb.post('jex_limit_orders',order);
+    DB.limitOrders.push(order);
+    await logActivity('limit_order',u.name+' placed limit '+side+' '+remaining+'×'+ticker+' @ '+fmt(limitPrice),{ticker,userId:u.id,userName:u.name,amount:limitPrice});
+    const msg=remaining<qty?'Partial fill: '+(qty-remaining)+' matched, '+remaining+' queued @ '+fmt(limitPrice):'Limit '+side+': '+remaining+'×'+ticker+' @ '+fmt(limitPrice)+' — waiting for match';
+    toast(msg);
+  }
+  render();
+}
+
+// ── Match an incoming order against the existing book ─────
+async function matchAgainstBook(ticker,side,qty,price,taker){
+  const book=getOrderBook(ticker);
+  const matches=side==='buy'?book.asks.filter(o=>o.limit_price<=price&&o.user_id!==taker.id):book.bids.filter(o=>o.limit_price>=price&&o.user_id!==taker.id);
+  let remaining=qty;
+  for(const maker of matches){
+    if(remaining<=0)break;
+    const fillQty=Math.min(remaining,maker.qty);
+    const fillPrice=maker.limit_price; // maker's price wins (price improvement for taker)
+    const makerUser=getUser(maker.user_id);if(!makerUser)continue;
+    const co=getCo(ticker);if(!co)continue;
+    if(side==='buy'){
+      // Taker buys from maker (maker is seller)
+      const cost=Math.round(fillPrice*fillQty*100)/100;
+      if(taker.cash<cost)break;
+      const tH={...holdings(taker)};tH[ticker]=(tH[ticker]||0)+fillQty;
+      await updateUser(taker.id,{cash:Math.round((taker.cash-cost)*100)/100,holdings:tH});
+      const mH={...holdings(makerUser)};mH[ticker]=(mH[ticker]||0)-fillQty;if(mH[ticker]<=0)delete mH[ticker];
+      await updateUser(makerUser.id,{cash:Math.round((makerUser.cash+cost)*100)/100,holdings:mH});
+    } else {
+      // Taker sells to maker (maker is buyer)
+      const proceeds=Math.round(fillPrice*fillQty*100)/100;
+      if(makerUser.cash<proceeds)continue;
+      const tH={...holdings(taker)};tH[ticker]=(tH[ticker]||0)-fillQty;if(tH[ticker]<=0)delete tH[ticker];
+      await updateUser(taker.id,{cash:Math.round((taker.cash+proceeds)*100)/100,holdings:tH});
+      const mH={...holdings(makerUser)};mH[ticker]=(mH[ticker]||0)+fillQty;
+      await updateUser(makerUser.id,{cash:Math.round((makerUser.cash-proceeds)*100)/100,holdings:mH});
+    }
+    // Update maker order (partial or full fill)
+    const newQty=maker.qty-fillQty;
+    if(newQty<=0){
+      await sb.patch('jex_limit_orders','id=eq.'+maker.id,{status:'filled',filled_price:fillPrice,filled_at:ts()});
+      maker.status='filled';maker.filled_price=fillPrice;
+    } else {
+      await sb.patch('jex_limit_orders','id=eq.'+maker.id,{qty:newQty});
+      maker.qty=newQty;
+    }
+    // Update price chart
+    const newHistory=[...co.price_history,{p:fillPrice,t:ts()}];
+    await updateCo(ticker,{price:fillPrice,price_history:newHistory});
+    await recordTrade(ticker,fillQty,fillPrice,side==='buy'?taker.id:makerUser.id,side==='buy'?makerUser.id:taker.id,'book_match');
+    await logActivity('limit_fill',taker.name+' matched '+fillQty+'×'+ticker+' @ '+fmt(fillPrice)+' with '+makerUser.name,{ticker,userId:taker.id,userName:taker.name,amount:fillPrice});
+    toast(fillQty+'×'+ticker+' matched with '+makerUser.name+' @ '+fmt(fillPrice)+'!');
+    remaining-=fillQty;
+  }
+  return remaining;
+}
+
+async function activateAfterHoursOrders(){
+  const ahOrders=DB.limitOrders.filter(o=>o.status==='after_hours');
+  if(!ahOrders.length)return;
+  for(const o of ahOrders){
+    await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'open'});
+    o.status='open';
+    const u=getUser(o.user_id);
+    if(u)await pushNotification(u.id,'after_hours','⏰ Your after-hours '+o.side+' order for '+o.qty+'×'+o.ticker+' @ '+fmt(o.limit_price)+' is now active',o.ticker);
+  }
+  toast(ahOrders.length+' after-hours order'+(ahOrders.length!==1?'s':'')+' activated');
+  render();
 }
 async function cancelLimitOrder(id){
   const o=DB.limitOrders.find(x=>x.id===id);if(!o)return;
@@ -394,38 +563,75 @@ async function cancelLimitOrder(id){
   o.status='cancelled';
   toast('Order cancelled');render();
 }
+
+// ── Periodic check: match crossed orders & fill vs pool ───
 async function checkLimitOrders(){
+  if(!isOpen())return;
   const openOrders=DB.limitOrders.filter(o=>o.status==='open');
-  if(!openOrders.length||!isOpen())return;
-  for(const o of openOrders){
-    const co=getCo(o.ticker);if(!co)continue;
-    const u=getUser(o.user_id);if(!u)continue;
-    const shouldFill=(o.side==='buy'&&co.price<=o.limit_price)||(o.side==='sell'&&co.price>=o.limit_price);
-    if(!shouldFill)continue;
-    // Fill it
-    if(o.side==='buy'){
-      if(co.shares_avail<o.qty||u.cash<co.price*o.qty)continue;
-      const np=impactPrice(co,o.qty,'buy'),cost=Math.round(np*o.qty*100)/100;
-      if(u.cash<cost)continue;
-      const bH={...holdings(u)};bH[o.ticker]=(bH[o.ticker]||0)+o.qty;
-      await updateUser(u.id,{cash:Math.round((u.cash-cost)*100)/100,holdings:bH});
-      await updateCo(o.ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-o.qty),price_history:[...co.price_history,{p:np,t:ts()}]});
-      await recordTrade(o.ticker,o.qty,np,u.id,'exchange','limit_buy');
-    } else {
-      const held=(holdings(u)[o.ticker])||0;if(held<o.qty)continue;
-      const np=impactPrice(co,o.qty,'sell');
-      const nH={...holdings(u)};nH[o.ticker]=held-o.qty;if(nH[o.ticker]<=0)delete nH[o.ticker];
-      await updateUser(u.id,{cash:Math.round((u.cash+o.qty*np)*100)/100,holdings:nH});
-      await updateCo(o.ticker,{price:np,shares_avail:co.shares_avail+o.qty,price_history:[...co.price_history,{p:np,t:ts()}]});
-      await recordTrade(o.ticker,o.qty,np,'exchange',u.id,'limit_sell');
+  if(!openOrders.length)return;
+  // Group by ticker and check for crosses
+  const tickers=[...new Set(openOrders.map(o=>o.ticker))];
+  for(const ticker of tickers){
+    const book=getOrderBook(ticker);
+    // Match any crossed orders (bid >= ask)
+    if(book.bestBid&&book.bestAsk&&book.bestBid>=book.bestAsk){
+      const bid=book.bids[0],ask=book.asks[0];
+      const buyer=getUser(bid.user_id),seller=getUser(ask.user_id);
+      if(!buyer||!seller||buyer.id===seller.id)continue;
+      const fillQty=Math.min(bid.qty,ask.qty);
+      const fillPrice=ask.limit_price; // ask price (earlier order wins)
+      const co=getCo(ticker);if(!co)continue;
+      const cost=Math.round(fillPrice*fillQty*100)/100;
+      if(buyer.cash<cost)continue;
+      const held=(holdings(seller)[ticker])||0;if(held<fillQty)continue;
+      // Execute
+      const bH={...holdings(buyer)};bH[ticker]=(bH[ticker]||0)+fillQty;
+      await updateUser(buyer.id,{cash:Math.round((buyer.cash-cost)*100)/100,holdings:bH});
+      const sH={...holdings(seller)};sH[ticker]=held-fillQty;if(sH[ticker]<=0)delete sH[ticker];
+      await updateUser(seller.id,{cash:Math.round((seller.cash+cost)*100)/100,holdings:sH});
+      // Update orders
+      const bQty=bid.qty-fillQty,sQty=ask.qty-fillQty;
+      if(bQty<=0){await sb.patch('jex_limit_orders','id=eq.'+bid.id,{status:'filled',filled_price:fillPrice,filled_at:ts()});bid.status='filled';}
+      else{await sb.patch('jex_limit_orders','id=eq.'+bid.id,{qty:bQty});bid.qty=bQty;}
+      if(sQty<=0){await sb.patch('jex_limit_orders','id=eq.'+ask.id,{status:'filled',filled_price:fillPrice,filled_at:ts()});ask.status='filled';}
+      else{await sb.patch('jex_limit_orders','id=eq.'+ask.id,{qty:sQty});ask.qty=sQty;}
+      // Update price
+      const newHistory=[...co.price_history,{p:fillPrice,t:ts()}];
+      await updateCo(ticker,{price:fillPrice,price_history:newHistory});
+      await recordTrade(ticker,fillQty,fillPrice,buyer.id,seller.id,'book_match');
+      await logActivity('limit_fill',buyer.name+' ↔ '+seller.name+': '+fillQty+'×'+ticker+' @ '+fmt(fillPrice),{ticker,amount:fillPrice});
+      toast(fillQty+'×'+ticker+' matched: '+buyer.name+' bought from '+seller.name+' @ '+fmt(fillPrice));
     }
-    await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'filled',filled_price:getCo(o.ticker)?.price,filled_at:ts()});
-    o.status='filled';o.filled_price=getCo(o.ticker)?.price;
-    await logActivity('limit_fill',u.name+"'s limit "+o.side+" "+o.qty+"×"+o.ticker+" filled @ "+fmt(o.filled_price||o.limit_price),{ticker:o.ticker,userId:u.id,userName:u.name,amount:o.filled_price});
-    toast('Limit order filled: '+o.qty+' × '+o.ticker+' for '+u.name);
+    // Also fill limit orders that are now within JEX pool price
+    for(const o of openOrders.filter(ord=>ord.ticker===ticker)){
+      const co=getCo(ticker);if(!co)continue;
+      const u=getUser(o.user_id);if(!u)continue;
+      const shouldFill=(o.side==='buy'&&co.price<=o.limit_price)||(o.side==='sell'&&co.price>=o.limit_price);
+      if(!shouldFill)continue;
+      if(o.side==='buy'){
+        if(co.shares_avail<o.qty)continue;
+        const np=impactPrice(co,o.qty,'buy'),cost=Math.round(np*o.qty*100)/100;
+        if(u.cash<cost)continue;
+        const bH={...holdings(u)};bH[o.ticker]=(bH[o.ticker]||0)+o.qty;
+        await updateUser(u.id,{cash:Math.round((u.cash-cost)*100)/100,holdings:bH});
+        await updateCo(ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-o.qty),price_history:[...co.price_history,{p:np,t:ts()}]});
+        await recordTrade(ticker,o.qty,np,u.id,'exchange','limit_buy');
+      } else {
+        const held=(holdings(u)[ticker])||0;if(held<o.qty)continue;
+        const np=impactPrice(co,o.qty,'sell');
+        const nH={...holdings(u)};nH[ticker]=held-o.qty;if(nH[ticker]<=0)delete nH[ticker];
+        await updateUser(u.id,{cash:Math.round((u.cash+o.qty*np)*100)/100,holdings:nH});
+        await updateCo(ticker,{price:np,shares_avail:co.shares_avail+o.qty,price_history:[...co.price_history,{p:np,t:ts()}]});
+        await recordTrade(ticker,o.qty,np,'exchange',u.id,'limit_sell');
+      }
+      await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'filled',filled_price:getCo(ticker)?.price,filled_at:ts()});
+      o.status='filled';o.filled_price=getCo(ticker)?.price;
+      await logActivity('limit_fill',u.name+"'s limit "+o.side+" "+o.qty+"×"+ticker+" filled vs JEX pool @ "+fmt(o.filled_price),{ticker,userId:u.id,userName:u.name,amount:o.filled_price});
+      await pushNotification(u.id,'limit_fill','⚡ Limit '+o.side+' filled: '+o.qty+'×'+ticker+' @ '+fmt(o.filled_price),ticker);
+      toast(u.name+"'s limit order filled: "+o.qty+"×"+ticker+" @ "+fmt(o.filled_price));
+    }
   }
 }
-// Check limit orders every 15 seconds
 setInterval(checkLimitOrders,15000);
 
 // ═══════════════════════════════════════════════
@@ -445,7 +651,7 @@ async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
 }
 
 async function placeBuy(ticker,qty){
-  if(!requireOpen())return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   if(u.role==='company'&&co.owner_id===u.id)return toast("You can't buy your own company's stock — use Buyback instead.");
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
@@ -459,7 +665,7 @@ async function placeBuy(ticker,qty){
   toast('Bought '+qty+' × '+ticker+' @ '+fmt(np));openPanel(ticker);
 }
 async function placeSell(ticker,qty){
-  if(!requireOpen())return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const held=(holdings(u)[ticker])||0;if(held<qty)return toast('You only hold '+held+' shares');
   const np=impactPrice(co,qty,'sell');
@@ -471,7 +677,7 @@ async function placeSell(ticker,qty){
   toast('Sold '+qty+' × '+ticker+' @ '+fmt(np));openPanel(ticker);
 }
 async function placeShort(ticker,qty){
-  if(!requireOpen())return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const price=co.price,coll=Math.round(price*qty*1.5*100)/100;
   if(u.cash<coll)return toast('Need '+fmt(coll)+' collateral');
@@ -485,7 +691,7 @@ async function placeShort(ticker,qty){
   toast('Shorted '+qty+' × '+ticker+' @ '+fmt(price));openPanel(ticker);
 }
 async function coverShort(ticker,qty){
-  if(!requireOpen())return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const sh={...shorts(u)},short=sh[ticker];if(!short||short.qty<qty)return toast('You only have '+(short?.qty||0)+' shorted');
   const cp=impactPrice(co,qty,'buy'),pnl=Math.round((short.avgPrice-cp)*qty*100)/100;
@@ -525,6 +731,7 @@ async function issueDividend(ticker,perShare,note){
   const div={id:uid(),ticker,company_name:co.name,per_share:perShare,total,note:note.trim(),payouts,ts:ts()};
   await sb.post('jex_dividends',div);DB.dividends.push(div);
   await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(total),{ticker,userId:owner.id,userName:owner.name,amount:total});
+  await pushNotificationToHolders(ticker,'dividend','💰 '+co.name+' paid a dividend of '+fmt(perShare)+'/share');
   pushBalances();
   toast(co.name+' paid '+fmt(perShare)+'/share');UI.companyTab='dividends';render();
 }
@@ -557,9 +764,11 @@ async function reviewIPO(id,approve){
     await sb.post('jex_companies',co);DB.companies.push(co);
     await updateUser(app.user_id,{app_status:'approved'});
     await logActivity('ipo',app.name+' ('+app.ticker+') listed on JEX @ '+fmt(app.price),{ticker:app.ticker,userId:app.user_id,amount:app.price});
+    await pushNotification(app.user_id,'ipo','🎉 Your IPO has been approved! '+app.name+' ('+app.ticker+') is now listed on JEX.',app.ticker);
     toast('✓ '+app.name+' ('+app.ticker+') is now listed on JEX!');
   } else {
     await updateUser(app.user_id,{app_status:'rejected'});
+    await pushNotification(app.user_id,'ipo','❌ Your IPO application for '+app.name+' was rejected.');
     toast('IPO application rejected');
   }
   render();
@@ -586,7 +795,9 @@ async function postFinancials(ticker,rev,profit,summary){
   const co=getCo(ticker);if(!co)return;
   if(!rev||!profit||!summary||summary.trim().length<10)return toast('Fill in all fields');
   const fins=[{revenue:parseFloat(rev),profit:parseFloat(profit),summary:summary.trim(),ts:ts(),period:'Report '+(co.financials.length+1)},...co.financials];
-  await updateCo(ticker,{financials:fins});toast('Financials posted');render();
+  await updateCo(ticker,{financials:fins});
+  await pushNotificationToHolders(ticker,'earnings','📊 '+co.name+' posted earnings: Rev '+fmt(parseFloat(rev))+', Profit '+fmt(parseFloat(profit)));
+  toast('Financials posted');render();
 }
 async function removeUser(uid2){
   const u=getUser(uid2);if(!u)return;
@@ -769,6 +980,7 @@ async function postVote(parentTicker,question,optA,optB,closesAt){
     status:'open',created_by:u.id,ts:ts(),closes_at:closesAt||null};
   await sb.post('jex_votes',v);DB.votes.push(v);
   await logActivity('vote',co.name+' posted vote: '+question.trim(),{ticker:parentTicker,userId:u.id,userName:u.name});
+  await pushNotificationToHolders(parentTicker,'vote','🗳️ '+co.name+' posted a vote: '+question.trim());
   toast('Vote posted');UI.companyTab='votes';render();
 }
 async function castVote(voteId,choice){
@@ -784,7 +996,12 @@ async function castVote(voteId,choice){
 async function closeVote(voteId){
   if(!confirm('Close this vote?'))return;
   await sb.patch('jex_votes','id=eq.'+voteId,{status:'closed'});
-  const v=DB.votes.find(x=>x.id===voteId);if(v)v.status='closed';
+  const v=DB.votes.find(x=>x.id===voteId);if(v){
+    v.status='closed';
+    // Notify all who voted
+    const voters=[...new Set(DB.ballots.filter(b=>b.vote_id===voteId).map(b=>b.voter_id))];
+    for(const vid of voters) await pushNotification(vid,'vote_closed','🗳️ Vote closed: "'+v.question+'" — '+v.company_name,v.parent_ticker);
+  }
   toast('Vote closed');render();
 }
 function postVoteForm(parentTicker){
@@ -879,7 +1096,14 @@ function doRegister(){const active=document.querySelector('.reg-tab.active');con
 // ═══════════════════════════════════════════════
 // RENDER: CHROME
 // ═══════════════════════════════════════════════
-function renderTopbar(){const u=cu();return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><span>${u.name}</span>${roleBadge(u.role)}<button class="logout-btn" onclick="logout()">sign out</button></div></div>`;}
+function renderTopbar(){
+  const u=cu();
+  const unread=myUnreadCount();
+  const bellBtn=u.role==='student'||u.role==='company'?`<button class="logout-btn" style="position:relative;padding:3px 10px" onclick="UI.navTab='notifications';render()">
+    🔔${unread?`<span style="position:absolute;top:-4px;right:-4px;background:var(--red);color:white;font-size:10px;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:600">${unread}</span>`:''}
+  </button>`:'';
+  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><span>${u.name}</span>${roleBadge(u.role)}${bellBtn}<button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
+}
 function renderBanner(){
   const s=DB.session,cls=s.status==='open'?'s-open':s.status==='paused'?'s-paused':'s-closed';
   const timer=s.ends_at?'<span id="timer-el" class="timer">...</span>':'';
@@ -905,8 +1129,8 @@ function renderNav(){
   let tabs;
   if(isChairman(u))tabs=[['admin','Admin'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
   else if(isAdmin(u))tabs=[['admin','Admin'],['market','Market'],['settings','Settings']];
-  else if(u.role==='company')tabs=[['market','Market'],['portfolio','Portfolio'],['news','News'],['apply','IPO'],['mystock','My stock'],['settings','Settings']];
-  else tabs=[['market','Market'],['portfolio','Portfolio'],['leaderboard','Leaderboard'],['orders','Orders'],['trades','Trades'],['settings','Settings']];
+  else if(u.role==='company')tabs=[['market','Market'],['portfolio','Portfolio'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
+  else tabs=[['market','Market'],['portfolio','Portfolio'],['leaderboard','Leaderboard'],['orders','Orders'],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   return `<div class="nav">${tabs.map(([k,v])=>`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
 }
 
@@ -934,7 +1158,278 @@ function renderNewsFeed(){
 // ═══════════════════════════════════════════════
 // RENDER: MARKET
 // ═══════════════════════════════════════════════
-function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)).map(c=>{const chg=priceChg(c),w=isWatched(c.ticker);return `<div class="ticker-item ${UI.panelTicker===c.ticker?'active-t':''} ${w?'watched':''}" onclick="openPanel('${c.ticker}')"><div class="tsym">${c.ticker}${w?' ★':''}</div><div class="tprice">${fmt(c.price)}</div><div class="tchg ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</div></div>`;}).join('')}</div>`;}
+function renderCompanyPage(parentTicker){
+  const co=getCo(parentTicker);if(!co)return'<div class="empty">Company not found</div>';
+  const u=cu();
+  const allTickers=getCompanyTickers(parentTicker);
+  const held=(holdings(u)[parentTicker])||0;
+  const short=(shorts(u))[parentTicker];
+  const chg=priceChg(co);
+  const canTrade=u.role==='student'||u.role==='company';
+  const isOwner=co.owner_id===u.id;
+  const baseMeta=DB.shareClasses.find(c=>c.ticker===parentTicker);
+  const companyVotes=DB.votes.filter(v=>v.parent_ticker===parentTicker);
+  const companyNews=DB.news.filter(n=>n.ticker===parentTicker).slice(0,10);
+  const companyDivs=DB.dividends.filter(d=>d.ticker===parentTicker).reverse();
+  const companyTrades=[...DB.trades].filter(t=>allTickers.includes(t.ticker)).reverse().slice(0,30);
+  // Shareholders
+  const shareholderMap={};
+  allTickers.forEach(ticker=>{
+    DB.users.filter(u2=>u2.role==='student'&&(holdings(u2)[ticker]||0)>0).forEach(u2=>{
+      if(!shareholderMap[u2.id])shareholderMap[u2.id]={name:u2.name,shares:{}};
+      shareholderMap[u2.id].shares[ticker]=(holdings(u2)[ticker]||0);
+    });
+  });
+  const shareholders=Object.values(shareholderMap);
+  const totalCirculating=allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares-c.shares_avail:0);},0);
+
+  const tab=UI.companyPageTab;
+
+  let html=`
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
+    <button class="btn btn-sm" onclick="closeCompanyPage()">← Back to market</button>
+    <div style="flex:1">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:22px;font-weight:500">${co.name}</span>
+        ${baseMeta?'<span class="badge b-amber">Class '+baseMeta.class+' · '+baseMeta.votes_per_share+'v</span>':''}
+        <span class="badge b-gray" style="font-family:var(--mono)">${parentTicker}</span>
+        ${canTrade?'<button class="wstar '+(isWatched(parentTicker)?'on':'')+'" onclick="toggleWatchAndRefresh(&quot;'+parentTicker+'&quot;)">'+(isWatched(parentTicker)?'★':'☆')+'</button>':''}
+      </div>
+      <div style="font-size:13px;color:var(--text2);margin-top:2px">${co.description||''}</div>
+    </div>
+    <div style="text-align:right">
+      <div style="font-size:28px;font-weight:500;font-family:var(--mono)">${fmt(co.price)}</div>
+      <div class="${chg>=0?'price-up':'price-down'}" style="font-size:14px">${fmtChg(chg)}</div>
+    </div>
+  </div>
+
+  <div class="tab-row" style="margin-bottom:16px">
+    <button class="tab ${tab==='overview'?'active':''}" onclick="UI.companyPageTab='overview';render()">Overview</button>
+    <button class="tab ${tab==='trade'?'active':''}" onclick="UI.companyPageTab='trade';render()">${canTrade?'Trade':'Trade'}</button>
+    <button class="tab ${tab==='financials'?'active':''}" onclick="UI.companyPageTab='financials';render()">Financials</button>
+    <button class="tab ${tab==='news'?'active':''}" onclick="UI.companyPageTab='news';render()">News ${companyNews.length?'<span class="badge b-amber" style="margin-left:4px">'+companyNews.length+'</span>':''}</button>
+    <button class="tab ${tab==='votes'?'active':''}" onclick="UI.companyPageTab='votes';render()">Votes ${companyVotes.filter(v=>v.status==='open').length?'<span class="badge b-green" style="margin-left:4px">'+companyVotes.filter(v=>v.status==='open').length+'</span>':''}</button>
+    <button class="tab ${tab==='shareholders'?'active':''}" onclick="UI.companyPageTab='shareholders';render()">Shareholders</button>
+    <button class="tab ${tab==='dividends'?'active':''}" onclick="UI.companyPageTab='dividends';render()">Dividends</button>
+    <button class="tab ${tab==='trades'?'active':''}" onclick="UI.companyPageTab='trades';render()">Trade history</button>
+  </div>`;
+
+  if(tab==='overview'){
+    // Key stats
+    const totalMktCap=allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.price*c.shares:0);},0);
+    html+='<div class="grid4" style="margin-bottom:14px">'
+      +'<div class="mcard"><div class="mlabel">Price</div><div class="mval" style="font-family:var(--mono)">'+fmt(co.price)+'</div></div>'
+      +'<div class="mcard"><div class="mlabel">Total market cap</div><div class="mval" style="font-family:var(--mono)">'+fmt(totalMktCap)+'</div></div>'
+      +'<div class="mcard"><div class="mlabel">Shareholders</div><div class="mval">'+shareholders.length+'</div></div>'
+      +'<div class="mcard"><div class="mlabel">In circulation</div><div class="mval">'+totalCirculating.toLocaleString()+'</div></div>'
+      +'</div>';
+
+    // All share classes
+    html+='<div class="card"><div class="section-title">Share classes</div>';
+    allTickers.forEach(ticker=>{
+      const stock=getCo(ticker);if(!stock)return;
+      const meta=getClassMeta(ticker);
+      const stockChg=priceChg(stock);
+      const classLabel=meta?'Class '+meta.class:'Common';
+      const classColor=meta?(meta.class==='A'?'b-blue':meta.class==='B'?'b-amber':'b-teal'):'b-gray';
+      html+='<div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">'
+        +'<div><div style="display:flex;align-items:center;gap:6px;margin-bottom:2px"><span style="font-family:var(--mono);font-weight:500">'+ticker+'</span><span class="badge '+classColor+'">'+classLabel+'</span>'+(meta&&meta.restricted?'<span class="badge b-red">Restricted</span>':'')+'</div>'
+        +'<div style="font-size:11px;color:var(--text2)">'+(meta?meta.votes_per_share+' vote'+(meta.votes_per_share!==1?'s':'')+'/share':'1 vote/share')+'</div></div>'
+        +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Price</div><div style="font-family:var(--mono);font-weight:500">'+fmt(stock.price)+'</div></div>'
+        +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Change</div><div class="'+(stockChg>=0?'price-up':'price-down')+'" style="font-family:var(--mono)">'+fmtChg(stockChg)+'</div></div>'
+        +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Available</div><div style="font-size:13px">'+stock.shares_avail.toLocaleString()+' / '+stock.shares.toLocaleString()+'</div></div>'
+        +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Mkt cap</div><div style="font-family:var(--mono);font-size:13px">'+fmt(stock.price*stock.shares)+'</div></div>'
+        +'</div>';
+    });
+    html+='</div>';
+
+    // Price charts
+    html+='<div class="card"><div class="section-title">Price charts</div>'
+      +'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px">';
+    allTickers.forEach(ticker=>{
+      const stock=getCo(ticker);if(!stock)return;
+      const meta=getClassMeta(ticker);
+      html+='<div><div style="font-size:12px;font-weight:500;font-family:var(--mono);color:var(--text2);margin-bottom:6px">'+ticker+(meta?' Class '+meta.class:'')+'</div>'
+        +'<div style="position:relative;height:140px"><canvas id="cp-chart-'+ticker+'"></canvas></div></div>';
+    });
+    html+='</div></div>';
+
+    // Latest financials summary
+    if(co.financials&&co.financials.length){
+      const f=co.financials[0];
+      html+='<div class="card"><div class="section-title">Latest earnings — '+f.period+'</div>'
+        +'<div class="grid3" style="margin-bottom:10px">'
+        +'<div class="mcard"><div class="mlabel">Revenue</div><div class="mval" style="font-family:var(--mono)">'+fmt(f.revenue)+'</div></div>'
+        +'<div class="mcard"><div class="mlabel">Profit</div><div class="mval '+(f.profit>=0?'green':'red')+'" style="font-family:var(--mono)">'+fmt(f.profit)+'</div></div>'
+        +'<div class="mcard"><div class="mlabel">Margin</div><div class="mval">'+(f.revenue>0?Math.round((f.profit/f.revenue)*100)+'%':'—')+'</div></div>'
+        +'</div><div style="font-size:13px;color:var(--text2)">'+f.summary+'</div></div>';
+    }
+  }
+
+  else if(tab==='trade'){
+    if(!canTrade){html+='<div class="card"><div class="empty">Sign in as a student or company to trade.</div></div>';}
+    else{
+      const mode=UI.panelMode;
+      const book=getOrderBook(parentTicker);
+      // Order book display
+      html+='<div class="card" style="margin-bottom:14px"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Order book <span style="font-size:12px;font-weight:400;color:var(--text2)">'+parentTicker+'</span></div>';
+      if(!book.bids.length&&!book.asks.length){
+        html+='<div style="font-size:12px;color:var(--text2);padding:8px 0">No open limit orders — all trades go directly to JEX pool.</div>';
+      } else {
+        html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">';
+        // Asks (sells) - shown in red, best ask at top
+        html+='<div><div style="font-size:11px;font-weight:600;color:var(--red);margin-bottom:6px;letter-spacing:0.5px">ASKS (sellers)</div>';
+        if(book.asks.length){
+          // Show up to 5 best asks
+          book.asks.slice(0,5).forEach(o=>{
+            const pct=book.asks[0]?Math.round((o.limit_price/book.asks[0].limit_price)*100):100;
+            html+='<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;margin-bottom:3px;border-radius:4px;position:relative;overflow:hidden">'
+              +'<div style="position:absolute;right:0;top:0;bottom:0;background:rgba(255,77,106,0.08);width:'+pct+'%"></div>'
+              +'<span style="font-family:var(--mono);font-size:13px;font-weight:500;color:var(--red);position:relative">'+fmt(o.limit_price)+'</span>'
+              +'<span style="font-size:12px;color:var(--text2);position:relative">'+o.qty+' shares</span>'
+              +'</div>';
+          });
+          if(book.asks.length>5)html+='<div style="font-size:11px;color:var(--text3);padding:2px 8px">+' +(book.asks.length-5)+' more</div>';
+        } else html+='<div style="font-size:12px;color:var(--text3);padding:4px 8px">No asks</div>';
+        html+='</div>';
+        // Bids (buys) - shown in green, best bid at top
+        html+='<div><div style="font-size:11px;font-weight:600;color:var(--green);margin-bottom:6px;letter-spacing:0.5px">BIDS (buyers)</div>';
+        if(book.bids.length){
+          book.bids.slice(0,5).forEach(o=>{
+            const pct=book.bids[0]?Math.round((o.limit_price/book.bids[0].limit_price)*100):100;
+            html+='<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;margin-bottom:3px;border-radius:4px;position:relative;overflow:hidden">'
+              +'<div style="position:absolute;left:0;top:0;bottom:0;background:rgba(0,200,150,0.08);width:'+pct+'%"></div>'
+              +'<span style="font-family:var(--mono);font-size:13px;font-weight:500;color:var(--green);position:relative">'+fmt(o.limit_price)+'</span>'
+              +'<span style="font-size:12px;color:var(--text2);position:relative">'+o.qty+' shares</span>'
+              +'</div>';
+          });
+          if(book.bids.length>5)html+='<div style="font-size:11px;color:var(--text3);padding:2px 8px">+' +(book.bids.length-5)+' more</div>';
+        } else html+='<div style="font-size:12px;color:var(--text3);padding:4px 8px">No bids</div>';
+        html+='</div></div>';
+        // Spread
+        if(book.spread!==null){
+          html+='<div style="display:flex;gap:16px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:12px">'
+            +'<span style="color:var(--text2)">Best bid: <strong style="color:var(--green);font-family:var(--mono)">'+fmt(book.bestBid)+'</strong></span>'
+            +'<span style="color:var(--text2)">Best ask: <strong style="color:var(--red);font-family:var(--mono)">'+fmt(book.bestAsk)+'</strong></span>'
+            +'<span style="color:var(--text2)">Spread: <strong style="font-family:var(--mono)">'+fmt(book.spread)+'</strong></span>'
+            +'</div>';
+        }
+      }
+      html+='</div>';
+      html+='<div class="grid4" style="margin-bottom:14px">'
+        +'<div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">'+fmt(co.price)+'</div></div>'
+        +'<div class="mcard"><div class="mlabel">Your cash</div><div class="mval" style="font-family:var(--mono)">'+fmt(u.cash)+'</div></div>'
+        +'<div class="mcard"><div class="mlabel">You hold</div><div class="mval">'+held+' shares</div></div>'
+        +'<div class="mcard"><div class="mlabel">Short position</div><div class="mval '+(short?'red':'')+'">'+( short?short.qty+' @ '+fmt(short.avgPrice):'—')+'</div></div>'
+        +'</div>';
+      html+='<div class="card"><div class="ot-toggle">'
+        +'<button class="ot-btn '+(mode==='buy'?'ot-buy':'')+'" onclick="UI.panelMode=&quot;buy&quot;;render()">Buy</button>'
+        +'<button class="ot-btn '+(mode==='sell'?'ot-sell':'')+'" onclick="UI.panelMode=&quot;sell&quot;;render()">Sell</button>'
+        +'<button class="ot-btn '+(mode==='short'?'ot-short':'')+'" onclick="UI.panelMode=&quot;short&quot;;render()">Short</button>'
+        +(short?'<button class="ot-btn '+(mode==='cover'?'ot-cover':'')+'" onclick="UI.panelMode=&quot;cover&quot;;render()">Cover</button>':'')
+        +'</div>';
+      if(mode==='buy'){
+        html+='<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Available: <strong>'+co.shares_avail+'</strong> of '+co.shares.toLocaleString()+'</p>'
+          +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="cp-qty" value="1" min="1" max="'+co.shares_avail+'"></div>'
+          +'<div style="padding-bottom:12px"><button class="btn btn-success" onclick="cpTrade(&quot;buy&quot;)">Buy now</button></div></div>'
+          +'<div id="cp-preview">'+impactPreview(co,1,'buy')+'</div>'
+          +'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy</div>'
+          +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-qty" value="1" min="1"></div>'
+          +'<div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="cp-lmt-price" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
+          +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="cpLimit(&quot;buy&quot;)">Place limit</button></div></div>';
+      } else if(mode==='sell'){
+        html+='<p style="font-size:12px;color:var(--text2);margin-bottom:8px">You hold: <strong>'+held+'</strong></p>';
+        if(held>0){
+          html+='<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="cp-qty" value="1" min="1" max="'+held+'"></div>'
+            +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="cpTrade(&quot;sell&quot;)">Sell now</button></div></div>'
+            +'<div id="cp-preview">'+impactPreview(co,1,'sell')+'</div>'
+            +'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell</div>'
+            +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-qty" value="1" min="1" max="'+held+'"></div>'
+            +'<div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="cp-lmt-price" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
+            +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="cpLimit(&quot;sell&quot;)">Place limit</button></div></div>';
+        } else {
+          html+='<div class="empty" style="padding:16px">You don&#39;t hold any '+parentTicker+'.</div>';
+        }
+      } else if(mode==='short'){
+        html+='<div class="ibox ibox-purple">Borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div>'
+          +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="cp-qty" value="1" min="1"></div>'
+          +'<div style="padding-bottom:12px"><button class="btn btn-purple" onclick="cpTrade(&quot;short&quot;)">Short sell</button></div></div>'
+          +'<div id="cp-preview">'+shortPrev(co,1)+'</div>';
+      } else if(short){
+        html+='<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div>'
+          +'<div style="font-size:13px;margin-bottom:10px">Open: <strong>'+short.qty+' shares</strong> @ avg '+fmt(short.avgPrice)+' | P&L: <span class="'+(( short.avgPrice-co.price)*short.qty>=0?'price-up':'price-down')+'">'+fmt((short.avgPrice-co.price)*short.qty)+'</span></div>'
+          +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="cp-qty" value="'+short.qty+'" min="1" max="'+short.qty+'"></div>'
+          +'<div style="padding-bottom:12px"><button class="btn btn-warning" onclick="cpTrade(&quot;cover&quot;)">Cover short</button></div></div>'
+          +'<div id="cp-preview">'+impactPreview(co,short.qty,'buy')+'</div>';
+      }
+      html+='</div>';
+    }
+  }
+
+  else if(tab==='financials'){
+    if(!co.financials||!co.financials.length){html+='<div class="card"><div class="empty">No earnings reports posted yet.</div></div>';}
+    else{
+      html+='<div class="card"><div class="section-title">Earnings reports</div>'
+        +'<table><thead><tr><th>Period</th><th>Revenue</th><th>Profit</th><th>Margin</th><th>Summary</th></tr></thead><tbody>'
+        +co.financials.map(f=>'<tr><td style="color:var(--text2)">'+f.period+'</td><td style="font-family:var(--mono)">'+fmt(f.revenue)+'</td><td style="font-family:var(--mono);color:'+(f.profit>=0?'var(--green)':'var(--red)')+'">'+fmt(f.profit)+'</td><td>'+(f.revenue>0?Math.round((f.profit/f.revenue)*100)+'%':'—')+'</td><td style="font-size:12px;color:var(--text2)">'+f.summary+'</td></tr>').join('')
+        +'</tbody></table></div>';
+    }
+  }
+
+  else if(tab==='news'){
+    if(!companyNews.length){html+='<div class="card"><div class="empty">No news posted yet.</div></div>';}
+    else{html+=companyNews.map(n=>'<div class="news-item"><div class="news-headline">'+n.headline+'</div>'+(n.body?'<div class="news-body">'+n.body+'</div>':'')+'<div class="news-meta"><span class="news-ticker">'+n.ticker+'</span><span>'+n.company_name+'</span><span>'+(n.ts||'')+'</span></div></div>').join('');}
+  }
+
+  else if(tab==='votes'){
+    if(!companyVotes.length){html+='<div class="card"><div class="empty">No votes posted yet.</div></div>';}
+    else{html+=companyVotes.map(v=>renderVoteCard(v,isOwner,isAdmin(u))).join('');}
+  }
+
+  else if(tab==='shareholders'){
+    html+='<div class="card"><div class="section-title">Shareholders</div>';
+    if(!shareholders.length){html+='<div class="empty">No shareholders yet.</div>';}
+    else{
+      html+='<table><thead><tr><th>Student</th>'
+        +allTickers.map(t=>'<th class="r">'+t+'</th>').join('')
+        +'<th class="r">Total shares</th><th class="r">Voting power</th></tr></thead><tbody>'
+        +shareholders.map(sh=>{
+          const total=Object.values(sh.shares).reduce((s,q)=>s+q,0);
+          const vp=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);
+          return '<tr><td style="font-weight:500">'+sh.name+'</td>'
+            +allTickers.map(t=>'<td class="r" style="font-family:var(--mono)">'+(sh.shares[t]||0)+'</td>').join('')
+            +'<td class="r" style="font-weight:500">'+total+'</td>'
+            +'<td class="r" style="color:var(--amber)">'+vp+'</td></tr>';
+        }).join('')
+        +'</tbody></table>';
+    }
+    html+='</div>';
+  }
+
+  else if(tab==='dividends'){
+    if(!companyDivs.length){html+='<div class="card"><div class="empty">No dividends paid yet.</div></div>';}
+    else{
+      html+='<div class="card"><div class="section-title">Dividend history</div>'
+        +'<table><thead><tr><th>Time</th><th>Per share</th><th>Total paid</th><th>Recipients</th><th>Note</th></tr></thead><tbody>'
+        +companyDivs.map(d=>'<tr><td style="color:var(--text2)">'+d.ts+'</td><td style="font-family:var(--mono)">'+fmt(d.per_share)+'</td><td style="color:var(--green);font-family:var(--mono)">'+fmt(d.total)+'</td><td>'+(d.payouts||[]).length+'</td><td style="font-size:12px;color:var(--text2)">'+d.note+'</td></tr>').join('')
+        +'</tbody></table></div>';
+    }
+  }
+
+  else if(tab==='trades'){
+    if(!companyTrades.length){html+='<div class="card"><div class="empty">No trades yet.</div></div>';}
+    else{
+      html+='<div class="card"><div class="section-title">Recent trades</div>'
+        +'<table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Value</th><th>Type</th></tr></thead><tbody>'
+        +companyTrades.map(t=>'<tr><td style="color:var(--text2)">'+t.ts+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+t.ticker+'</span></td><td style="font-family:var(--mono)">'+fmt(t.price)+'</td><td>'+t.qty+'</td><td style="font-family:var(--mono)">'+fmt(t.price*t.qty)+'</td><td><span class="badge '+(t.type==='short'?'b-purple':t.type==='cover'?'b-amber':'b-gray')+'">'+( t.type||'market')+'</span></td></tr>').join('')
+        +'</tbody></table></div>';
+    }
+  }
+
+  return html;
+}
+
+function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)).map(c=>{const chg=priceChg(c),w=isWatched(c.ticker),halted=isHalted(c.ticker);return `<div class="ticker-item ${UI.panelTicker===c.ticker?'active-t':''} ${w?'watched':''} ${halted?'halted-ticker':''}" onclick="openCompanyPage('${c.ticker}')"><div class="tsym">${c.ticker}${w?' ★':''}${halted?' ⚠️':''}</div><div class="tprice" style="${halted?'color:var(--red)':''}">${fmt(c.price)}</div><div class="tchg ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</div></div>`;}).join('')}</div>`;}
 function renderMarket(){
   const u=cu();const listed=DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id));
   const recentNews=DB.news.slice(0,5);
@@ -944,7 +1439,7 @@ function renderMarket(){
       <tbody>${listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
     const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
-    return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openPanel('${c.ticker}')">Trade</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
+    return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
     </div>
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
       +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
@@ -967,6 +1462,26 @@ function buildSparklines(){
   },80);
 }
 
+function openCompanyPage(ticker){
+  UI.companyPage=ticker;UI.companyPageTab='overview';UI.panelMode='buy';
+  destroyCharts();render();
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+function cpTrade(mode){
+  const t=UI.companyPage;const q=get('cp-qty')?.value;
+  if(mode==='buy')placeBuy(t,q);
+  else if(mode==='sell')placeSell(t,q);
+  else if(mode==='short')placeShort(t,q);
+  else if(mode==='cover')coverShort(t,q);
+}
+function cpLimit(side){
+  const t=UI.companyPage;
+  placeLimitOrder(t,side,get('cp-lmt-qty')?.value,get('cp-lmt-price')?.value);
+}
+function toggleWatchAndRefresh(ticker){toggleWatch(ticker).then(()=>openCompanyPage(ticker));}
+function closeCompanyPage(){
+  UI.companyPage=null;destroyCharts();render();
+}
 function openPanel(ticker){
   UI.panelTicker=ticker;const c=getCo(ticker),u=cu();
   const held=(holdings(u)[ticker])||0,chg=priceChg(c),short=(shorts(u))[ticker];
@@ -1082,7 +1597,7 @@ function renderPortfolio(){
 // ═══════════════════════════════════════════════
 function renderTrades(adminView){
   const u=cu();const trades=adminView?DB.trades:[...DB.trades].filter(t=>t.buyer_id===u.id||t.seller_id===u.id);
-  return `<div class="card"><div class="section-title">${adminView?'All trades':'Your trades'}</div><table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th>${adminView?'<th>Buyer</th><th>Seller</th>':''}</tr></thead><tbody>${trades.length?[...trades].reverse().map(t=>`<tr><td style="color:var(--text2)">${t.ts}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.price)}</td><td>${t.qty}</td><td><span class="badge ${t.type==='short'?'b-purple':t.type==='cover'?'b-amber':'b-gray'}">${t.type||'market'}</span></td>${adminView?`<td>${['exchange','short'].includes(t.buyer_id)?'JEX':getUser(t.buyer_id)?.name||'?'}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':getUser(t.seller_id)?.name||'?'}</td>`:''}</tr>`).join(''):`<tr><td colspan="7"><div class="empty">No trades yet</div></td></tr>`}</tbody></table></div>`;
+  return `<div class="card"><div class="section-title">${adminView?'All trades':'Your trades'}</div><table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th>${adminView?'<th>Buyer</th><th>Seller</th>':''}</tr></thead><tbody>${trades.length?[...trades].reverse().map(t=>`<tr><td style="color:var(--text2)">${t.ts}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.price)}</td><td>${t.qty}</td><td><span class="badge ${t.type==='short'?'b-purple':t.type==='cover'?'b-amber':t.type==='book_match'?'b-teal':t.type==='limit_buy'||t.type==='limit_sell'?'b-blue':'b-gray'}">${t.type==='book_match'?'matched':t.type==='limit_buy'?'limit buy':t.type==='limit_sell'?'limit sell':t.type||'market'}</span></td>${adminView?`<td>${['exchange','short'].includes(t.buyer_id)?'JEX':getUser(t.buyer_id)?.name||'?'}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':getUser(t.seller_id)?.name||'?'}</td>`:''}</tr>`).join(''):`<tr><td colspan="7"><div class="empty">No trades yet</div></td></tr>`}</tbody></table></div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -1534,6 +2049,16 @@ function renderAdminSession(students){
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">Manual override</div>
     <div style="display:flex;gap:8px"><button class="btn btn-success" onclick="setSession('open')">Open now</button><button class="btn btn-warning" onclick="setSession('paused')">Pause</button><button class="btn btn-danger" onclick="setSession('closed')">Close now</button></div>
+    <div class="divider"></div>
+    <div class="section-title" style="font-size:13px;margin-bottom:10px">Stock halts</div>
+    ${DB.halts.length?`<div style="margin-bottom:10px">${DB.halts.map(h=>`<div class="app-row" style="margin-bottom:6px"><div class="app-info"><div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">${h.ticker}</span> <span class="badge b-red">Halted</span></div><div class="app-meta">${h.reason} — by ${h.halted_by} at ${h.ts}</div></div><button class="btn btn-sm btn-success" onclick="resumeStock('${h.ticker}')">Resume</button></div>`).join('')}</div>`:'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">No stocks currently halted.</div>'}
+    <div class="row" style="align-items:flex-end">
+      <div class="frow" style="flex:1"><label class="flabel">Halt a stock</label>
+        <select id="halt-ticker"><option value="">— Select ticker —</option>${DB.companies.map(c=>`<option value="${c.ticker}">${c.ticker} — ${c.name}</option>`).join('')}</select>
+      </div>
+      <div class="frow" style="flex:2"><label class="flabel">Reason</label><input type="text" id="halt-reason" placeholder="e.g. Under investigation for false earnings"></div>
+      <div style="padding-bottom:12px"><button class="btn btn-danger" onclick="haltStock(get('halt-ticker')?.value,get('halt-reason')?.value)">Halt</button></div>
+    </div>
   </div>`;
 }
 function renderAdminRegs(pS,pC,students,companies){
@@ -1692,12 +2217,37 @@ function renderAdminListed(){
 // ═══════════════════════════════════════════════
 // RENDER: STUDENT ORDERS (limit orders)
 // ═══════════════════════════════════════════════
+function renderNotifications(){
+  const notifs=myNotifications();
+  const unread=notifs.filter(n=>!n.read).length;
+  const typeIcon={dividend:'💰',news:'📰',earnings:'📊',vote:'🗳️',vote_closed:'🗳️',ipo:'🏢',session:'🟢',limit_fill:'⚡',after_hours:'⏰',halt:'⚠️',resume:'✅'};
+  const typeBg={dividend:'b-teal',news:'b-amber',earnings:'b-blue',vote:'b-purple',ipo:'b-green',session:'b-gray',limit_fill:'b-teal',after_hours:'b-amber',halt:'b-red',resume:'b-green'};
+  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+    Notifications ${unread?`<span class="badge b-red">${unread} unread</span>`:''}
+    ${notifs.length?`<button class="btn btn-sm" onclick="markAllRead()">Mark all read</button>`:''}
+  </div>
+  ${notifs.length?notifs.map(n=>`<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);opacity:${n.read?'0.55':'1'}">
+    <div style="font-size:18px;min-width:28px">${typeIcon[n.type]||'•'}</div>
+    <div style="flex:1"><div style="font-size:13px${n.read?'':';font-weight:500'}">${n.message}</div>
+    <div style="font-size:11px;color:var(--text3);margin-top:2px">${n.ts||''}</div></div>
+    ${n.ticker&&n.ticker!==null?`<span class="badge b-gray" style="font-family:var(--mono);font-size:10px">${n.ticker}</span>`:''}
+  </div>`).join(''):`<div class="empty">No notifications yet</div>`}
+  </div>`;
+}
 function renderStudentOrders(){
   const u=cu();
   const myOrders=DB.limitOrders.filter(o=>o.user_id===u.id).reverse();
   const open=myOrders.filter(o=>o.status==='open');
-  const closed=myOrders.filter(o=>o.status!=='open');
-  return`<div class="card"><div class="section-title">Open limit orders</div>
+  const afterHours=myOrders.filter(o=>o.status==='after_hours');
+  const closed=myOrders.filter(o=>o.status!=='open'&&o.status!=='after_hours');
+  const openBook=DB.limitOrders.filter(o=>o.status==='open'&&o.user_id===u.id);
+  const bookByTicker={};
+  openBook.forEach(o=>{if(!bookByTicker[o.ticker])bookByTicker[o.ticker]=[];bookByTicker[o.ticker].push(o);});
+  const ahSection=afterHours.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">After-hours orders <span class="badge b-amber">${afterHours.length} queued</span></div>
+    <div class="ibox ibox-amber">These orders activate automatically when the next session opens.</div>
+    <table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>Limit price</th><th>Placed</th><th></th></tr></thead>
+    <tbody>${afterHours.map(o=>`<tr><td><span class="badge b-gray" style="font-family:var(--mono)">${o.ticker}</span></td><td><span class="badge ${o.side==='buy'?'b-teal':'b-red'}">${o.side}</span></td><td>${o.qty}</td><td style="font-family:var(--mono);font-weight:500">${fmt(o.limit_price)}</td><td style="color:var(--text2)">${o.ts}</td><td><button class="btn btn-sm btn-danger" onclick="cancelLimitOrder('${o.id}')">Cancel</button></td></tr>`).join('')}</tbody></table></div>`:'';
+  return ahSection+`<div class="card"><div class="section-title">Open limit orders</div>
     ${open.length?`<table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>Limit price</th><th>Current price</th><th>Placed</th><th></th></tr></thead>
     <tbody>${open.map(o=>{const co=getCo(o.ticker);return`<tr>
       <td><span class="badge b-gray" style="font-family:var(--mono)">${o.ticker}</span></td>
@@ -1878,11 +2428,15 @@ function generatePDFReport(){
 // ═══════════════════════════════════════════════
 function getPageContent(){
   const t=UI.navTab,u=cu();
-  if(t==='market')return`<div id="market-content">${renderMarket()}</div>`;
+  if(t==='market'){
+    if(UI.companyPage)return renderCompanyPage(UI.companyPage);
+    return`<div id="market-content">${renderMarket()}</div>`;
+  }
   if(t==='news')return u.role==='company'?renderNewsPage():renderNewsFeed();
   if(t==='portfolio')return renderPortfolio();
   if(t==='leaderboard')return renderLeaderboard();
   if(t==='orders')return renderStudentOrders();
+  if(t==='notifications')return renderNotifications();
   if(t==='trades')return renderTrades(isAdmin(u));
   if(t==='apply')return renderApply();
   if(t==='mystock')return renderMyStock();
@@ -1907,7 +2461,11 @@ function render(){
         });
       }
     }
-    if(UI.navTab==='market')buildSparklines();
+    if(UI.navTab==='market'&&!UI.companyPage)buildSparklines();
+    if(UI.navTab==='market'&&UI.companyPage){
+      const allT=getCompanyTickers(UI.companyPage);
+      allT.forEach(t=>{const co=getCo(t);if(co)buildChart('cp-chart-'+t,co);});
+    }
   },60);
 }
 function setTab(t){UI.navTab=t;UI.panelTicker=null;destroyCharts();render();}
