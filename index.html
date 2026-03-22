@@ -157,13 +157,15 @@ const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],nwHistory:[],earningsTargets:[],
+  founderShares:[],companyInvites:[],priceAdjustments:[],
+  founders:[],founderAllocs:[],priceAdjustments:[],companyMembers:[],founderAllocations:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,earnings_surprise_pct:10,session_open_prices:{}}};
 let SHEETS_URL=null;
 let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview'};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
-  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets]=await Promise.all([
+  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,priceAdjustments]=await Promise.all([
     sb.get('jex_users','order=created_at.asc'),sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_companies','order=created_at.asc'),sb.get('jex_news','order=created_at.desc'),
     sb.get('jex_ipo_applications','order=created_at.asc'),sb.get('jex_dilution_applications','order=created_at.asc'),
@@ -182,11 +184,13 @@ async function loadAll(){
     sb.get('jex_halts','order=created_at.asc'),
     sb.get('jex_price_alerts','order=created_at.asc'),
     sb.get('jex_nw_history','order=created_at.asc'),
-    sb.get('jex_earnings_targets','order=created_at.desc')
+    sb.get('jex_earnings_targets','order=created_at.desc'),
+    sb.get('jex_company_members','order=created_at.asc'),
+    sb.get('jex_founder_allocations','order=created_at.desc')
   ]);
   DB={users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,
     session:session[0]||DB.session,announcements,limitOrders,activity,
-    shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets};
+    shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations};
 }
 
 // ═══════════════════════════════════════════════
@@ -236,6 +240,13 @@ const pad=n=>n<10?'0'+n:String(n);
 function getAZTime(){return new Date(new Date().toLocaleString('en-US',{timeZone:'America/Phoenix'}));}
 function fmtAZTime(d){return d.toLocaleString('en-US',{timeZone:'America/Phoenix',weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true})+' MST';}
 async function saveSession(data){Object.assign(DB.session,data);await sb.patch('jex_session','id=eq.1',data);}
+function adjStockForm(){
+  adjustStockPrice(
+    document.getElementById('adj-ticker')?.value,
+    document.getElementById('adj-pct')?.value,
+    document.getElementById('adj-reason')?.value
+  );
+}
 async function saveCBPct(){
   const pct=parseInt(document.getElementById('cb-pct')?.value);
   if(isNaN(pct)||pct<1||pct>100)return toast('Enter a value between 1 and 100');
@@ -304,7 +315,7 @@ async function registerStudent(name,email,pw,secQ,secA){
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';render();
 }
-async function registerCompany(name,email,pw,desc,secQ,secA){
+async function registerCompany(name,email,pw,desc,secQ,secA,cofounders=[]){
   if(!name||name.trim().length<2)return toast('Enter a valid company name');
   if(!validEmail(email))return toast('Enter a valid email');
   if(!pw||pw.length<4)return toast('Password must be at least 4 characters');
@@ -313,7 +324,7 @@ async function registerCompany(name,email,pw,desc,secQ,secA){
   if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
-  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),ts:ts()};
+  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),cofounders,ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';render();
 }
@@ -327,6 +338,15 @@ async function approveReg(id,startCash){
   await sb.post('jex_users',u);await sb.del('jex_pending','id=eq.'+id);
   DB.users.push(u);DB.pending=DB.pending.filter(x=>x.id!==id);
   await logActivity('registration',r.name+' approved ('+r.role+') with '+fmt(startCash),{userId:r.id,userName:r.name,amount:startCash});
+  // Create co-founder invitations if company specified cofounders
+  if(r.role==='company'&&r.cofounders&&r.cofounders.length){
+    for(const cfName of r.cofounders){
+      const student=DB.users.find(s=>s.role==='student'&&norm(s.name)===norm(cfName));
+      if(student){
+        await pushNotification(student.id,'invite','🤝 '+r.name+' listed you as a co-founder. You will be able to manage this company once their IPO is approved.');
+      }
+    }
+  }
   toast(r.name+' approved with '+fmt(startCash));render();
 }
 async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');render();}
@@ -388,6 +408,328 @@ async function deleteAnnouncement(id){
 }
 
 // ── Limit orders ────────────────────────────────────────
+// ═══════════════════════════════════════════════
+// COMPANY MEMBERSHIP (CO-FOUNDERS)
+// ═══════════════════════════════════════════════
+function getCompanyOwners(companyUserId){
+  // Returns all student IDs who can manage this company (lead + accepted co-founders)
+  const accepted=DB.companyMembers.filter(m=>m.company_user_id===companyUserId&&m.status==='accepted').map(m=>m.student_id);
+  return [companyUserId,...accepted];
+}
+function canManageCompany(companyUserId,userId){
+  if(companyUserId===userId)return true;
+  return DB.companyMembers.some(m=>m.company_user_id===companyUserId&&m.student_id===userId&&m.status==='accepted');
+}
+function getMyCompany(userId){
+  // Find company where user is lead owner or accepted co-founder
+  const asLead=DB.companies.find(c=>c.owner_id===userId);
+  if(asLead)return asLead;
+  const asMember=DB.companyMembers.find(m=>m.student_id===userId&&m.status==='accepted');
+  if(asMember)return DB.companies.find(c=>c.owner_id===asMember.company_user_id);
+  return null;
+}
+function isLeadFounder(companyUserId,userId){return companyUserId===userId;}
+
+function inviteCoFounderForm(companyUserId){
+  inviteCoFounder(companyUserId,document.getElementById('invite-student')?.value);
+}
+async function inviteCoFounder(companyUserId,studentId){
+  if(!studentId)return toast('Select a student to invite');
+  const existing=DB.companyMembers.filter(m=>m.company_user_id===companyUserId&&m.status!=='declined');
+  if(existing.length>=2)return toast('Maximum 2 co-founders allowed (3 total including lead)');
+  if(existing.find(m=>m.student_id===studentId))return toast('Already invited or a member');
+  const u=cu();
+  const student=getUser(studentId);if(!student)return;
+  const rec={id:uid(),company_user_id:companyUserId,student_id:studentId,role:'co-founder',status:'pending',invited_by:u.name,ts:ts()};
+  await sb.post('jex_company_members',rec);
+  DB.companyMembers.push(rec);
+  await pushNotification(studentId,'invite','🤝 '+u.name+' invited you to co-found their company. Check My Stock to accept.');
+  toast(student.name+' invited as co-founder');render();
+}
+async function respondToInvite(memberId,accept){
+  const m=DB.companyMembers.find(x=>x.id===memberId);if(!m)return;
+  await sb.patch('jex_company_members','id=eq.'+memberId,{status:accept?'accepted':'declined'});
+  m.status=accept?'accepted':'declined';
+  const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
+  if(accept&&co){
+    await logActivity('cofound',getUser(m.student_id)?.name+' joined '+co.name+' as co-founder',{ticker:co.ticker});
+    await pushNotification(m.company_user_id,'invite','✅ '+getUser(m.student_id)?.name+' accepted your co-founder invitation!');
+  }
+  toast(accept?'You joined the company!':'Invitation declined');render();
+}
+
+// ── Founder share allocations ─────────────────────────────
+async function requestFounderAllocation(ticker,studentId,shares,reason){
+  const co=getCo(ticker);if(!co)return;
+  const student=getUser(studentId);if(!student)return;
+  shares=parseInt(shares);if(isNaN(shares)||shares<=0)return toast('Enter valid share count');
+  if(shares>co.shares_avail)return toast('Only '+co.shares_avail+' shares available');
+  if(DB.founderAllocations.find(a=>a.ticker===ticker&&a.student_id===studentId&&a.status==='pending'))return toast('Already a pending allocation for this student');
+  const rec={id:uid(),ticker,company_name:co.name,student_id:studentId,student_name:student.name,shares,status:'pending',reason:(reason||'').trim(),ts:ts()};
+  await sb.post('jex_founder_allocations',rec);
+  DB.founderAllocations.push(rec);
+  await logActivity('founder_alloc',co.name+' requested '+shares+' founder shares for '+student.name,{ticker});
+  toast('Allocation request submitted for '+student.name);render();
+}
+async function reviewFounderAllocation(id,approve){
+  const a=DB.founderAllocations.find(x=>x.id===id);if(!a)return;
+  await sb.patch('jex_founder_allocations','id=eq.'+id,{status:approve?'approved':'rejected'});
+  a.status=approve?'approved':'rejected';
+  if(approve){
+    const co=getCo(a.ticker);const student=getUser(a.student_id);
+    if(!co||!student)return;
+    if(co.shares_avail<a.shares){toast('Insufficient shares available');return;}
+    const h={...holdings(student)};h[a.ticker]=(h[a.ticker]||0)+a.shares;
+    await updateUser(a.student_id,{holdings:h});
+    await updateCo(a.ticker,{shares_avail:co.shares_avail-a.shares});
+    await pushNotification(a.student_id,'founder_alloc','🎁 '+a.shares+' founder shares of '+a.company_name+' ('+a.ticker+') granted to you!',a.ticker);
+    await logActivity('founder_alloc',a.student_name+' granted '+a.shares+' founder shares of '+a.company_name,{ticker:a.ticker,amount:a.shares});
+    toast(a.student_name+' granted '+a.shares+' shares of '+a.ticker);
+  } else {
+    await pushNotification(a.student_id,'founder_alloc','❌ Founder share request for '+a.company_name+' was rejected.');
+    toast('Allocation rejected');
+  }
+  render();
+}
+
+// ═══════════════════════════════════════════════
+// STOCK PRICE ADJUSTMENT (Chairman)
+// ═══════════════════════════════════════════════
+async function adjustStockPrice(ticker,pct,reason){
+  if(!ticker)return toast('Select a ticker');
+  pct=parseFloat(pct);
+  if(isNaN(pct)||pct===0)return toast('Enter a non-zero percentage');
+  if(Math.abs(pct)>100)return toast('Max adjustment is ±100%');
+  const co=getCo(ticker);if(!co)return;
+  const u=cu();
+  const oldPrice=co.price;
+  const newPrice=Math.max(0.01,Math.round(oldPrice*(1+pct/100)*100)/100);
+  const label=pct>=0?'Boost +'+pct+'%':'Drop '+pct+'%';
+  const newHistory=[...co.price_history,{p:newPrice,t:label}];
+  await updateCo(ticker,{price:newPrice,price_history:newHistory});
+  // Store in price adjustments log
+  const rec={id:uid(),ticker,company_name:co.name,pct,old_price:oldPrice,new_price:newPrice,reason:(reason||'').trim(),applied_by:u.name,ts:ts()};
+  try{await sb.post('jex_price_adjustments',rec);if(!DB.priceAdjustments)DB.priceAdjustments=[];DB.priceAdjustments.unshift(rec);}catch(e){}
+  const msg=(pct>=0?'📈':'📉')+' '+co.name+' ('+ticker+') price '+(pct>=0?'boosted by +':'cut by ')+Math.abs(pct)+'%'+(reason?' — '+reason.trim():'');
+  await pushNotificationToHolders(ticker,'price_adj',msg);
+  await pushNotificationToAll('price_adj',msg);
+  await logActivity('price_adj',msg,{ticker,userId:u.id,userName:u.name,amount:newPrice-oldPrice});
+  toast(ticker+' '+(pct>=0?'boosted':'cut')+' by '+Math.abs(pct)+'% → '+fmt(newPrice));render();
+}
+
+// ═══════════════════════════════════════════════
+// FOUNDERS & CO-FOUNDERS
+// ═══════════════════════════════════════════════
+function getCompanyFounders(ticker){return DB.founders.filter(f=>f.company_ticker===ticker&&f.status==='active');}
+function isFounder(ticker,userId){return !!DB.founders.find(f=>f.company_ticker===ticker&&f.student_id===userId&&f.status==='active');}
+function canManageCompany(co){
+  const u=cu();if(!u)return false;
+  if(co.owner_id===u.id)return true; // original owner (company account)
+  return isFounder(co.ticker,u.id);  // or a founder student
+}
+
+async function addFounderAtRegistration(companyId,ticker,companyName,studentNames){
+  // Called when company is approved — seeds founder records for named co-founders
+  for(const name of studentNames){
+    if(!name||!name.trim())continue;
+    const student=DB.users.find(u=>u.role==='student'&&u.name.toLowerCase()===name.trim().toLowerCase());
+    if(!student){toast('Co-founder not found: '+name.trim()+' — skipped');continue;}
+    if(DB.founders.find(f=>f.company_ticker===ticker&&f.student_id===student.id))continue;
+    if(getCompanyFounders(ticker).length>=3){toast('Maximum 3 founders reached');break;}
+    const rec={id:uid(),company_ticker:ticker,company_name:companyName,student_id:student.id,student_name:student.name,role:'co-founder',status:'active',invited_by:'registration',ts:ts()};
+    await sb.post('jex_founders',rec);DB.founders.push(rec);
+    await pushNotification(student.id,'founder','🏢 You have been added as a co-founder of '+companyName+'!',ticker);
+  }
+}
+
+async function inviteFounder(ticker,studentName){
+  if(!studentName||!studentName.trim())return toast('Enter a student name');
+  const co=getCo(ticker);if(!co)return;
+  const founders=getCompanyFounders(ticker);
+  if(founders.length>=3)return toast('Maximum 3 founders — remove one first');
+  const student=DB.users.find(u=>u.role==='student'&&u.status==='approved'&&u.name.toLowerCase()===studentName.trim().toLowerCase());
+  if(!student)return toast('Student not found: '+studentName.trim());
+  if(DB.founders.find(f=>f.company_ticker===ticker&&f.student_id===student.id))return toast(student.name+' is already a founder');
+  const rec={id:uid(),company_ticker:ticker,company_name:co.name,student_id:student.id,student_name:student.name,role:'co-founder',status:'active',invited_by:cu()?.name,ts:ts()};
+  await sb.post('jex_founders',rec);DB.founders.push(rec);
+  await logActivity('founder',student.name+' added as co-founder of '+co.name,{ticker,userId:student.id,userName:student.name});
+  await pushNotification(student.id,'founder','🏢 You have been added as a co-founder of '+co.name+'!',ticker);
+  toast(student.name+' added as co-founder');render();
+}
+
+async function removeFounder(ticker,studentId){
+  if(!confirm('Remove this co-founder from the company?'))return;
+  const f=DB.founders.find(x=>x.company_ticker===ticker&&x.student_id===studentId);
+  if(!f)return;
+  await sb.patch('jex_founders','id=eq.'+f.id,{status:'removed'});
+  f.status='removed';
+  await pushNotification(studentId,'founder','You have been removed as a co-founder of '+f.company_name+'.',ticker);
+  toast('Co-founder removed');render();
+}
+
+async function requestFounderAlloc(ticker,shares,reason){
+  const u=cu();if(!u)return;
+  const co=getCo(ticker);if(!co)return;
+  shares=parseInt(shares);
+  if(isNaN(shares)||shares<=0)return toast('Enter a valid share count');
+  if(!reason||reason.trim().length<5)return toast('Please add a reason');
+  if(shares>co.shares_avail)return toast('Only '+co.shares_avail+' shares available');
+  if(DB.founderAllocs.find(a=>a.company_ticker===ticker&&a.student_id===u.id&&a.status==='pending'))return toast('You already have a pending allocation request');
+  const rec={id:uid(),company_ticker:ticker,company_name:co.name,student_id:u.id,student_name:u.name,shares,reason:reason.trim(),status:'pending',ts:ts()};
+  await sb.post('jex_founder_allocs',rec);DB.founderAllocs.push(rec);
+  toast('Share allocation request submitted — awaiting Chairman approval');render();
+}
+
+async function reviewFounderAlloc(id,approve){
+  const a=DB.founderAllocs.find(x=>x.id===id);if(!a)return;
+  await sb.patch('jex_founder_allocs','id=eq.'+id,{status:approve?'approved':'rejected'});
+  a.status=approve?'approved':'rejected';
+  if(approve){
+    const co=getCo(a.company_ticker);const student=getUser(a.student_id);
+    if(co&&student&&co.shares_avail>=a.shares){
+      // Transfer shares from pool to student
+      const h={...holdings(student)};h[a.company_ticker]=(h[a.company_ticker]||0)+a.shares;
+      await updateUser(a.student_id,{holdings:h});
+      await updateCo(a.company_ticker,{shares_avail:co.shares_avail-a.shares});
+      await logActivity('founder_alloc',a.student_name+' received '+a.shares+' founder shares in '+a.company_name,{ticker:a.company_ticker,userId:a.student_id,userName:a.student_name,amount:a.shares});
+      await pushNotification(a.student_id,'founder','✅ Your founder share allocation of '+a.shares+' shares in '+a.company_name+' was approved!',a.company_ticker);
+      toast(a.student_name+' allocated '+a.shares+' shares in '+a.company_name);
+    } else toast('Could not allocate — insufficient available shares');
+  } else {
+    await pushNotification(a.student_id,'founder','❌ Your founder share allocation request for '+a.company_name+' was rejected.',a.company_ticker);
+    toast('Allocation rejected');
+  }
+  render();
+}
+
+// ═══════════════════════════════════════════════
+// PRICE ADJUSTMENTS (Chairman tool)
+// ═══════════════════════════════════════════════
+async function applyPriceAdjustment(ticker,pct,reason){
+  if(!ticker)return toast('Select a ticker');
+  pct=parseFloat(pct);
+  if(isNaN(pct)||pct===0)return toast('Enter a non-zero percentage');
+  if(Math.abs(pct)>100)return toast('Max adjustment is ±100%');
+  const co=getCo(ticker);if(!co)return;
+  const oldPrice=co.price;
+  const newPrice=Math.max(0.01,Math.round(oldPrice*(1+pct/100)*100)/100);
+  const newHistory=[...co.price_history,{p:newPrice,t:(pct>0?'+':'')+pct+'% adj'}];
+  await updateCo(ticker,{price:newPrice,price_history:newHistory});
+  const rec={id:uid(),ticker,company_name:co.name,pct,old_price:oldPrice,new_price:newPrice,reason:(reason||'').trim(),applied_by:cu()?.name,ts:ts()};
+  await sb.post('jex_price_adjustments',rec);DB.priceAdjustments.unshift(rec);
+  await logActivity('price_adj',(pct>0?'+':'')+pct+'% price adjustment on '+ticker+' by '+cu()?.name+(reason?' — '+reason:''),{ticker,amount:newPrice-oldPrice});
+  await pushNotificationToHolders(ticker,'price_adj',(pct>0?'📈':'📉')+' '+co.name+' price '+(pct>0?'boosted':'reduced')+' by '+Math.abs(pct)+'%'+(reason?' — '+reason.trim():''));
+  await pushNotificationToAll('price_adj',(pct>0?'📈':'📉')+' '+co.name+' ('+ticker+'): '+(pct>0?'+':'')+pct+'%'+(reason?' — '+reason.trim():''));
+  toast(ticker+' price '+(pct>0?'boosted':'reduced')+' by '+Math.abs(pct)+'% → '+fmt(newPrice));render();
+}
+
+// ═══════════════════════════════════════════════
+// CO-FOUNDER SYSTEM
+// ═══════════════════════════════════════════════
+function getCompanyMembers(co){
+  const members=[{userId:co.owner_id,name:getUser(co.owner_id)?.name||'Owner',role:'Owner'}];
+  (co.founders||[]).forEach(f=>{
+    if(f.userId!==co.owner_id)members.push({userId:f.userId,name:f.name,role:'Co-founder'});
+  });
+  return members;
+}
+function isCompanyMember(co,userId){
+  return co.owner_id===userId||(co.founders||[]).some(f=>f.userId===userId);
+}
+
+async function inviteCoFounder(ticker,studentId){
+  const co=getCo(ticker);if(!co)return;
+  const student=getUser(studentId);if(!student)return toast('Student not found');
+  const members=getCompanyMembers(co);
+  if(members.length>=3)return toast('Maximum 3 founders per company');
+  if(isCompanyMember(co,studentId))return toast(student.name+' is already a member');
+  if(DB.companyInvites.find(i=>i.ticker===ticker&&i.invited_user_id===studentId&&i.status==='pending'))
+    return toast('Invite already pending for '+student.name);
+  const u=cu();
+  const rec={id:uid(),ticker,company_name:co.name,invited_user_id:studentId,invited_by:u.name,status:'pending',ts:ts()};
+  await sb.post('jex_company_invites',rec);
+  DB.companyInvites.push(rec);
+  await pushNotification(studentId,'invite','🤝 '+u.name+' invited you to join '+co.name+' ('+ticker+') as a co-founder',ticker);
+  toast('Invite sent to '+student.name);render();
+}
+
+async function respondToInvite(inviteId,accept){
+  const inv=DB.companyInvites.find(i=>i.id===inviteId);if(!inv)return;
+  const u=cu();const co=getCo(inv.ticker);if(!co)return;
+  await sb.patch('jex_company_invites','id=eq.'+inviteId,{status:accept?'accepted':'declined'});
+  inv.status=accept?'accepted':'declined';
+  if(accept){
+    const members=getCompanyMembers(co);
+    if(members.length>=3){toast('Company is now full');return;}
+    const newFounders=[...(co.founders||[]),{userId:u.id,name:u.name}];
+    await updateCo(inv.ticker,{founders:newFounders});
+    await logActivity('co_founder',u.name+' joined '+co.name+' as co-founder',{ticker:inv.ticker,userId:u.id,userName:u.name});
+    toast('You joined '+co.name+' as co-founder!');
+  } else {
+    toast('Invite declined');
+  }
+  render();
+}
+
+async function requestFounderShares(ticker,sharesReq){
+  const co=getCo(ticker);if(!co)return;
+  const u=cu();
+  sharesReq=parseInt(sharesReq);
+  if(isNaN(sharesReq)||sharesReq<=0)return toast('Enter a valid share count');
+  if(sharesReq>co.shares_avail)return toast('Only '+co.shares_avail+' shares available');
+  if(DB.founderShares.find(f=>f.ticker===ticker&&f.user_id===u.id&&f.status==='pending'))
+    return toast('You already have a pending founder share request');
+  const rec={id:uid(),ticker,company_name:co.name,user_id:u.id,user_name:u.name,shares_requested:sharesReq,status:'pending',ts:ts()};
+  await sb.post('jex_founder_shares',rec);
+  DB.founderShares.push(rec);
+  toast('Founder share request submitted for '+sharesReq+' shares');render();
+}
+
+async function reviewFounderShares(id,approve){
+  const req=DB.founderShares.find(f=>f.id===id);if(!req)return;
+  await sb.patch('jex_founder_shares','id=eq.'+id,{status:approve?'approved':'rejected'});
+  req.status=approve?'approved':'rejected';
+  if(approve){
+    const co=getCo(req.ticker);if(!co)return;
+    const u=getUser(req.user_id);if(!u)return;
+    if(req.shares_requested>co.shares_avail){toast('Not enough shares available');return;}
+    // Give shares to founder at no cost
+    const bH={...holdings(u)};bH[req.ticker]=(bH[req.ticker]||0)+req.shares_requested;
+    await updateUser(req.user_id,{holdings:bH});
+    await updateCo(req.ticker,{shares_avail:co.shares_avail-req.shares_requested});
+    await pushNotification(req.user_id,'founder_shares','✅ Your founder share request was approved: '+req.shares_requested+'×'+req.ticker,req.ticker);
+    await logActivity('founder_shares',req.user_name+' received '+req.shares_requested+' founder shares in '+req.ticker,{ticker:req.ticker,userId:req.user_id});
+    toast(req.user_name+' received '+req.shares_requested+' founder shares');
+  } else {
+    await pushNotification(req.user_id,'founder_shares','❌ Your founder share request for '+req.shares_requested+'×'+req.ticker+' was rejected',req.ticker);
+    toast('Founder share request rejected');
+  }
+  render();
+}
+
+// ═══════════════════════════════════════════════
+// PRICE ADJUSTMENT (Chairman)
+// ═══════════════════════════════════════════════
+async function applyPriceAdjustment(ticker,pct,reason){
+  if(!ticker)return toast('Select a ticker');
+  pct=parseFloat(pct);
+  if(isNaN(pct)||pct===0)return toast('Enter a non-zero percentage');
+  if(Math.abs(pct)>100)return toast('Maximum adjustment is ±100%');
+  const co=getCo(ticker);if(!co)return;
+  const u=cu();
+  const oldPrice=co.price;
+  const newPrice=Math.max(0.01,Math.round(oldPrice*(1+pct/100)*100)/100);
+  const marker=pct>0?'Boost +'+pct+'%':'Drop '+pct+'%';
+  await updateCo(ticker,{price:newPrice,price_history:[...co.price_history,{p:newPrice,t:marker}]});
+  const rec={id:uid(),ticker,company_name:co.name,pct,old_price:oldPrice,new_price:newPrice,reason:(reason||'').trim(),applied_by:u.name,ts:ts()};
+  await sb.post('jex_price_adjustments',rec);
+  DB.priceAdjustments.unshift(rec);
+  await logActivity('price_adj',(pct>0?'Price boost':'Price drop')+' on '+ticker+': '+(pct>0?'+':'')+pct+'% → '+fmt(newPrice)+(reason?' ('+reason+')':''),{ticker,userId:u.id,userName:u.name,amount:newPrice-oldPrice});
+  await pushNotificationToHolders(ticker,'price_adj',(pct>0?'📈 Price boost':'📉 Price drop')+' on '+co.name+': '+(pct>0?'+':'')+pct+'% → '+fmt(newPrice)+(reason?' — '+reason:''));
+  toast(ticker+' price '+(pct>0?'boosted':'dropped')+' '+Math.abs(pct)+'% to '+fmt(newPrice));
+  render();
+}
+
 // ═══════════════════════════════════════════════
 // NET WORTH HISTORY
 // ═══════════════════════════════════════════════
@@ -1038,9 +1380,36 @@ async function delistCompany(ticker,silent=false){
 // ═══════════════════════════════════════════════
 // CHART
 // ═══════════════════════════════════════════════
+// Chart interval state
+const chartIntervals={};
+function setChartInterval(canvasId,interval,co){
+  chartIntervals[canvasId]=interval;
+  if(charts[canvasId])try{charts[canvasId].destroy();delete charts[canvasId];}catch(e){}
+  buildChart(canvasId,co);
+}
+function filterByInterval(pts,interval){
+  if(!pts||!pts.length)return pts;
+  if(interval==='max')return pts;
+  const now=Date.now();
+  const ms={['1d']:86400000,['5d']:5*86400000,['1m']:30*86400000}[interval];
+  if(!ms)return pts;
+  // Since we store time as strings not timestamps, slice from the end
+  const counts={['1d']:Math.min(pts.length,30),['5d']:Math.min(pts.length,150),['1m']:Math.min(pts.length,500)};
+  return pts.slice(-counts[interval]);
+}
+function buildChartIntervalBar(canvasId,co){
+  const intervals=[['1d','1D'],['5d','5D'],['1m','1M'],['max','Max']];
+  const current=chartIntervals[canvasId]||'max';
+  return '<div style="display:flex;gap:2px;margin-bottom:6px">'
+    +intervals.map(([val,label])=>`<button style="font-size:11px;padding:2px 8px;border-radius:4px;cursor:pointer;border:1px solid ${current===val?'var(--blue)':'var(--border2)'};background:${current===val?'var(--blue)':'transparent'};color:${current===val?'white':'var(--text2)'};font-family:var(--font)" onclick="setChartInterval('${canvasId}','${val}',getCo('${co.ticker}'))">${label}</button>`).join('')
+    +'</div>';
+}
 function buildChart(canvasId,co){
   const canvas=get(canvasId);if(!canvas||!window.Chart)return;
-  const pts=co.price_history||[],prices=pts.map(p=>p.p),labels=pts.map((p,i)=>i===pts.length-1?'Now':p.t);
+  const interval=chartIntervals[canvasId]||'max';
+  const allPts=co.price_history||[];
+  const pts=filterByInterval(allPts,interval);
+  const prices=pts.map(p=>p.p),labels=pts.map((p,i)=>i===pts.length-1?'Now':p.t);
   const isUp=prices.length>0&&prices[prices.length-1]>=prices[0],lc=isUp?'#00c896':'#ff4d6a';
   charts[canvasId]=new Chart(canvas,{type:'line',data:{labels,datasets:[{data:prices,borderColor:lc,borderWidth:2,pointRadius:pts.length>30?0:3,pointBackgroundColor:lc,fill:false,tension:0.3}]},
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>fmt(ctx.parsed.y)}}},
@@ -1258,7 +1627,7 @@ function renderLogin(){
   if(UI.loginView==='forgot-email'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 1 of 3</div><div class="frow"><label class="flabel">Your email address</label><input type="email" id="forgot-email" placeholder="you@school.edu" onkeydown="if(event.key==='Enter')forgotStep1(get('forgot-email')?.value)"></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep1(get('forgot-email')?.value)">Continue</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${u?.name}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><input type="password" id="forgot-pw1" placeholder="New password (min 4 characters)"></div><div class="frow"><label class="flabel">Confirm new password</label><input type="password" id="forgot-pw2" placeholder="Repeat new password"></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
-  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><input type="password" id="reg-pw" placeholder="Choose a password"></div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><input type="password" id="reg-co-pw" placeholder="Choose a password"></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
+  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><input type="password" id="reg-pw" placeholder="Choose a password"></div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><input type="password" id="reg-co-pw" placeholder="Choose a password"></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="frow"><label class="flabel">Co-founder 1 name (optional)</label><input type="text" id="reg-co-cf1" placeholder="Exact name as they registered"></div><div class="frow"><label class="flabel">Co-founder 2 name (optional)</label><input type="text" id="reg-co-cf2" placeholder="Exact name as they registered"></div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span> — JTED Stock Exchange</div><div class="login-sub">Sign in to your account</div><div class="acct-list">
     ${chairman?acctRow(chairman,'av-ch'):''}
     ${president?acctRow(president,'av-pr'):''}
@@ -1269,7 +1638,7 @@ function renderLogin(){
   </div><div style="display:flex;justify-content:flex-start;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)"><button class="btn btn-sm btn-primary" onclick="UI.loginView='register';render()">Register new account</button></div></div></div>`;
 }
 function switchRegTab(type){document.querySelectorAll('.reg-tab').forEach(t=>t.classList.remove('active'));const tab=get('reg-tab-'+type);if(tab)tab.classList.add('active');get('reg-student-fields').style.display=type==='student'?'':'none';get('reg-company-fields').style.display=type==='company'?'':'none';}
-function doRegister(){const active=document.querySelector('.reg-tab.active');const type=active?.id==='reg-tab-company'?'company':'student';if(type==='student')registerStudent(get('reg-name')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value);else registerCompany(get('reg-co-name')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value);}
+function doRegister(){const active=document.querySelector('.reg-tab.active');const type=active?.id==='reg-tab-company'?'company':'student';if(type==='student')registerStudent(get('reg-name')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value);else{const cf1=(get('reg-co-cf1')?.value||'').trim(),cf2=(get('reg-co-cf2')?.value||'').trim();const cofounders=[cf1,cf2].filter(Boolean);registerCompany(get('reg-co-name')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value,cofounders);}}
 
 // ═══════════════════════════════════════════════
 // RENDER: CHROME
@@ -1345,6 +1714,8 @@ function renderCompanyPage(parentTicker){
   const chg=priceChg(co);
   const canTrade=u.role==='student'||u.role==='company';
   const isOwner=co.owner_id===u.id;
+  const isCoFounder=co.founders&&co.founders.some(f=>f.userId===u.id);
+  const isMember=isOwner||isCoFounder;
   const baseMeta=DB.shareClasses.find(c=>c.ticker===parentTicker);
   const companyVotes=DB.votes.filter(v=>v.parent_ticker===parentTicker);
   const companyNews=DB.news.filter(n=>n.ticker===parentTicker).slice(0,10);
@@ -1429,8 +1800,10 @@ function renderCompanyPage(parentTicker){
     allTickers.forEach(ticker=>{
       const stock=getCo(ticker);if(!stock)return;
       const meta=getClassMeta(ticker);
-      html+='<div><div style="font-size:12px;font-weight:500;font-family:var(--mono);color:var(--text2);margin-bottom:6px">'+ticker+(meta?' Class '+meta.class:'')+'</div>'
-        +'<div style="position:relative;height:140px"><canvas id="cp-chart-'+ticker+'"></canvas></div></div>';
+      const chartId='cp-chart-'+ticker;
+      html+='<div><div style="font-size:12px;font-weight:500;font-family:var(--mono);color:var(--text2);margin-bottom:4px">'+ticker+(meta?' Class '+meta.class:'')+'</div>'
+        +buildChartIntervalBar(chartId,stock)
+        +'<div style="position:relative;height:140px"><canvas id="'+chartId+'"></canvas></div></div>';
     });
     html+='</div></div>';
 
@@ -1708,7 +2081,8 @@ function openPanel(ticker){
       <button class="btn btn-sm" onclick="closePanel()">close</button>
     </div>
     <div class="grid4"><div class="mcard"><div class="mlabel">Price</div><div class="mval" style="font-family:var(--mono)">${fmt(c.price)}</div></div><div class="mcard"><div class="mlabel">Your cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div><div class="mcard"><div class="mlabel">You hold</div><div class="mval">${held} shares</div></div><div class="mcard"><div class="mlabel">Short position</div><div class="mval ${short?'red':''}">${short?short.qty+' @ '+fmt(short.avgPrice):'—'}</div></div></div>
-    <div style="position:relative;height:160px;margin-bottom:10px"><canvas id="panel-chart"></canvas></div>
+    <div style="margin-bottom:4px">${buildChartIntervalBar('panel-chart',c)}</div>
+    <div style="position:relative;height:160px;margin-bottom:6px"><canvas id="panel-chart"></canvas></div>
     <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2);margin-bottom:10px"><span>${(c.price_history||[]).length} pts | Open: ${fmt((c.price_history||[])[0]?.p||c.price)}</span><span class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</span></div>
     ${fin?`<div style="font-size:12px;padding:8px 10px;background:var(--bg3);border-radius:var(--radius);margin-bottom:10px">Latest: Rev <strong>${fmt(fin.revenue)}</strong> | Profit <strong>${fmt(fin.profit)}</strong> — <span style="color:var(--text2)">${fin.summary}</span></div>`:''}
     <hr class="divider">
@@ -1872,7 +2246,10 @@ function renderAppForm(app){
   return`<div class="card"><div class="section-title">IPO application</div><div class="row"><div class="frow" style="flex:1"><label class="flabel">Company name</label><input type="text" id="ipo-name" placeholder="Acme Corp"></div><div class="frow" style="flex:1"><label class="flabel">Ticker (3-4 letters)</label><input type="text" id="ipo-ticker" placeholder="ACM" maxlength="4" style="text-transform:uppercase"></div></div><div class="row"><div class="frow" style="flex:1"><label class="flabel">IPO price ($)</label><input type="number" id="ipo-price" placeholder="25.00" min="0.01" step="0.01"></div><div class="frow" style="flex:1"><label class="flabel">Total shares</label><input type="number" id="ipo-shares" placeholder="1000" min="1"></div></div><div class="frow"><label class="flabel">Description</label><textarea id="ipo-desc" rows="2" placeholder="Describe your business..."></textarea></div><button class="btn btn-primary" onclick="submitIPOForm()">Submit</button></div>`;
 }
 function renderMyStock(){
-  const u=cu(),co=DB.companies.find(c=>c.owner_id===u.id);
+  const u=cu();
+  // Lead founder or co-founder
+  const co=getMyCompany(u.id);
+  const isLead=co&&co.owner_id===u.id;
   if(!co)return`<div class="card"><div class="empty">Not listed yet.<br><br><button class="btn btn-primary" onclick="setTab('apply')">Apply for IPO</button></div></div>`;
   const pendingDil=DB.dilApps.find(d=>d.ticker===co.ticker&&d.status==='pending');
   const myDils=DB.dilApps.filter(d=>d.ticker===co.ticker).reverse();
@@ -1883,6 +2260,7 @@ function renderMyStock(){
   const myVotes=DB.votes.filter(v=>v.parent_ticker===co.ticker);
   return`<div class="tab-row">
     <button class="tab ${UI.companyTab==='stock'?'active':''}" onclick="UI.companyTab='stock';render()">Overview</button>
+    <button class="tab ${UI.companyTab==='founders'?'active':''}" onclick="UI.companyTab='founders';render()">Founders</button>
     <button class="tab ${UI.companyTab==='classes'?'active':''}" onclick="UI.companyTab='classes';render()">Share classes ${pendingClassApp?'<span class="badge b-amber" style="margin-left:4px">'+pendingClassApp+'</span>':''}</button>
     <button class="tab ${UI.companyTab==='votes'?'active':''}" onclick="UI.companyTab='votes';render()">Votes ${myVotes.length?'<span class="badge b-purple" style="margin-left:4px">'+myVotes.length+'</span>':''}</button>
     <button class="tab ${UI.companyTab==='news'?'active':''}" onclick="UI.companyTab='news';render()">News ${myNews.length?'<span class="badge b-amber" style="margin-left:4px">'+myNews.length+'</span>':''}</button>
@@ -1892,6 +2270,7 @@ function renderMyStock(){
     <button class="tab ${UI.companyTab==='dilution'?'active':''}" onclick="UI.companyTab='dilution';render()">Dilution ${DB.dilApps.filter(d=>getCompanyTickers(co.ticker).includes(d.ticker)&&d.status==='pending').length?'<span class="badge b-amber" style="margin-left:4px">'+DB.dilApps.filter(d=>getCompanyTickers(co.ticker).includes(d.ticker)&&d.status==='pending').length+'</span>':''}</button>
   </div>
   ${UI.companyTab==='stock'?renderStockOverview(co,u)
+  :UI.companyTab==='founders'?renderFoundersTab(co,u)
   :UI.companyTab==='classes'?renderClassesTab(co)
   :UI.companyTab==='votes'?renderCompanyVotesTab(co)
   :UI.companyTab==='news'?renderCompanyNewsTab(co,myNews)
@@ -1973,20 +2352,97 @@ function renderStockOverview(co,u){
   });
 
   html+='</div>';
-  // One chart per ticker
+  // One chart per ticker with interval buttons
   html+='<div class="card"><div class="section-title">Price charts</div>'
-    +'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px">';
+    +'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px">';
   allTickers.forEach(ticker=>{
     const stock=getCo(ticker);if(!stock)return;
     const meta=getClassMeta(ticker);
     const label=ticker===co.ticker?ticker+' (base)':(ticker+' Class '+(meta?meta.class:''));
+    const chartId='co-chart-'+ticker;
     html+='<div>'
-      +'<div style="font-size:12px;font-weight:500;font-family:var(--mono);margin-bottom:6px;color:var(--text2)">'+label+'</div>'
-      +'<div style="position:relative;height:140px"><canvas id="co-chart-'+ticker+'"></canvas></div>'
+      +'<div style="font-size:12px;font-weight:500;font-family:var(--mono);margin-bottom:4px;color:var(--text2)">'+label+'</div>'
+      +buildChartIntervalBar(chartId,stock)
+      +'<div style="position:relative;height:140px"><canvas id="'+chartId+'"></canvas></div>'
       +'</div>';
   });
   html+='</div></div>';
   return html;
+}
+function renderFoundersTab(co,u){
+  const isLead=co.owner_id===u.id;
+  const members=DB.companyMembers.filter(m=>m.company_user_id===co.owner_id);
+  const accepted=members.filter(m=>m.status==='accepted');
+  const pending=members.filter(m=>m.status==='pending');
+  const students=DB.users.filter(u2=>u2.role==='student'&&u2.status==='approved'&&u2.id!==co.owner_id&&!members.find(m=>m.student_id===u2.id&&m.status!=='declined'));
+  const leadUser=getUser(co.owner_id);
+
+  // Pending invitations for current user (co-founder inbox)
+  const myInvites=DB.companyMembers.filter(m=>m.student_id===u.id&&m.status==='pending');
+
+  let html='';
+
+  // My invitations inbox
+  if(myInvites.length){
+    html+='<div class="card"><div class="section-title">Pending invitations</div>';
+    myInvites.forEach(inv=>{
+      const invCo=DB.companies.find(c=>c.owner_id===inv.company_user_id);
+      html+='<div class="app-row"><div class="app-info"><div class="app-name">Co-founder invitation from <strong>'+(invCo?.name||'Unknown company')+'</strong></div><div class="app-meta">Invited by '+inv.invited_by+' · '+inv.ts+'</div></div>'
+        +'<div class="btn-row">'
+        +'<button class="btn btn-success btn-sm" onclick="respondToInvite(&quot;'+inv.id+'&quot;,true)">Accept</button>'
+        +'<button class="btn btn-danger btn-sm" onclick="respondToInvite(&quot;'+inv.id+'&quot;,false)">Decline</button>'
+        +'</div></div>';
+    });
+    html+='</div>';
+  }
+
+  // Current team
+  html+='<div class="card"><div class="section-title">Company team</div>';
+  html+='<div class="app-row"><div class="app-info"><div class="app-name">'+( leadUser?.name||'Lead founder')+' <span class="badge b-chair">Lead founder</span></div><div class="app-meta">'+(leadUser?.email||'')+'</div></div></div>';
+  accepted.forEach(m=>{
+    const s=getUser(m.student_id);
+    html+='<div class="app-row"><div class="app-info"><div class="app-name">'+(s?.name||'?')+' <span class="badge b-blue">Co-founder</span></div><div class="app-meta">'+(s?.email||'')+'</div></div></div>';
+  });
+  pending.forEach(m=>{
+    const s=getUser(m.student_id);
+    html+='<div class="app-row"><div class="app-info"><div class="app-name">'+(s?.name||'?')+' <span class="badge b-gray">Invited</span></div><div class="app-meta">Waiting for response</div></div></div>';
+  });
+  if(!accepted.length&&!pending.length)html+='<div style="font-size:13px;color:var(--text2);padding:8px 0">No co-founders yet.</div>';
+  html+='</div>';
+
+  // Invite form (lead only, max 2 co-founders)
+  if(isLead&&(accepted.length+pending.length)<2){
+    html+='<div class="card"><div class="section-title">Invite a co-founder</div>'
+      +'<div class="ibox ibox-blue">Up to 2 co-founders can join your company. They can post news, financials, votes, and manage dividends.</div>'
+      +'<div class="row" style="align-items:flex-end">'
+      +'<div class="frow" style="flex:1"><label class="flabel">Select student</label>'
+      +'<select id="invite-student"><option value="">— Select —</option>'+students.map(s=>'<option value="'+s.id+'">'+s.name+'</option>').join('')+'</select></div>'
+      +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="inviteCoFounderForm(&quot;'+co.owner_id+'&quot;)">Invite</button></div>'
+      +'</div></div>';
+  }
+
+  // Founder share allocations
+  if(co.status==='listed'){
+    const myAllocs=DB.founderAllocations.filter(a=>a.ticker===co.ticker);
+    const owners=getCompanyOwners(co.owner_id);
+    html+='<div class="card"><div class="section-title">Founder share allocations</div>'
+      +'<div class="ibox ibox-teal">Request shares from the company pool for any founder. Each request is approved by the Chairman individually.</div>'
+      +'<div class="row" style="align-items:flex-end">'
+      +'<div class="frow" style="flex:1"><label class="flabel">Founder</label>'
+      +'<select id="alloc-student"><option value="">— Select founder —</option>'+owners.map(id=>{const s=getUser(id);return s?'<option value="'+id+'">'+s.name+'</option>':''}).join('')+'</select></div>'
+      +'<div class="frow" style="flex:1"><label class="flabel">Shares</label><input type="number" id="alloc-shares" placeholder="e.g. 100" min="1" max="'+co.shares_avail+'"></div>'
+      +'<div class="frow" style="flex:1"><label class="flabel">Reason</label><input type="text" id="alloc-reason" placeholder="Founder compensation"></div>'
+      +'<div style="padding-bottom:12px"><button class="btn btn-warning" onclick="requestFounderAllocForm(&quot;'+co.ticker+'&quot;)">Request</button></div>'
+      +'</div>'
+      +(myAllocs.length?'<hr class="divider"><table><thead><tr><th>Student</th><th>Shares</th><th>Reason</th><th>Status</th></tr></thead><tbody>'
+        +myAllocs.map(a=>'<tr><td>'+a.student_name+'</td><td>'+a.shares.toLocaleString()+'</td><td style="font-size:12px;color:var(--text2)">'+( a.reason||'—')+'</td><td><span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-amber')+'">'+a.status+'</span></td></tr>').join('')
+        +'</tbody></table>':'')
+      +'</div>';
+  }
+  return html;
+}
+function requestFounderAllocForm(ticker){
+  requestFounderAllocation(ticker,get('alloc-student')?.value,get('alloc-shares')?.value,get('alloc-reason')?.value);
 }
 function renderClassesTab(co){
   const myClasses=DB.shareClasses.filter(c=>c.parent_ticker===co.ticker&&c.ticker!==co.ticker);
@@ -2543,7 +2999,31 @@ function renderAdminListed(){
   return`<div class="card"><div class="section-title">Listed companies</div>
     <table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th>Change</th><th>Shares</th><th>Owner</th><th></th></tr></thead>
     <tbody>${DB.companies.map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${c.name}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${owner?owner.name:'—'}</td><td><button class="btn btn-sm btn-danger" onclick="delistCompany('${c.ticker}')">Delist</button></td></tr>`;}).join('')||`<tr><td colspan="7"><div class="empty">No listed companies</div></td></tr>`}
-    </tbody></table></div>`;
+    </tbody></table></div>
+  <div class="card"><div class="section-title">Price adjustment</div>
+    <div class="ibox ibox-amber">Apply a percentage boost or drop to any stock. Notifies all holders. Use positive % to boost, negative % to drop (e.g. -10 = drop 10%).</div>
+    <div class="row" style="align-items:flex-end">
+      <div class="frow" style="flex:1"><label class="flabel">Stock</label>
+        <select id="adj-ticker"><option value="">— Select —</option>${DB.companies.map(c=>`<option value="${c.ticker}">${c.ticker} — ${c.name} (${fmt(c.price)})</option>`).join('')}</select>
+      </div>
+      <div class="frow" style="flex:1"><label class="flabel">Adjustment %</label>
+        <input type="number" id="adj-pct" placeholder="e.g. 15 or -10" step="0.1"></div>
+      <div class="frow" style="flex:2"><label class="flabel">Reason (optional)</label>
+        <input type="text" id="adj-reason" placeholder="e.g. Regulatory fine"></div>
+      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="adjStockForm()">Apply</button></div>
+    </div>
+    ${DB.priceAdjustments&&DB.priceAdjustments.length?`<hr class="divider"><div style="font-size:12px;font-weight:500;margin-bottom:8px">Recent adjustments</div>
+    <table><thead><tr><th>Ticker</th><th>Change</th><th>Old price</th><th>New price</th><th>Reason</th><th>By</th><th>Time</th></tr></thead>
+    <tbody>${DB.priceAdjustments.slice(0,10).map(a=>`<tr>
+      <td><span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></td>
+      <td class="${a.pct>=0?'price-up':'price-down'}" style="font-family:var(--mono)">${a.pct>=0?'+':''}${a.pct}%</td>
+      <td style="font-family:var(--mono)">${fmt(a.old_price)}</td>
+      <td style="font-family:var(--mono);font-weight:500">${fmt(a.new_price)}</td>
+      <td style="font-size:12px;color:var(--text2)">${a.reason||'—'}</td>
+      <td style="font-size:12px;color:var(--text2)">${a.applied_by||'—'}</td>
+      <td style="font-size:12px;color:var(--text2)">${a.ts||''}</td>
+    </tr>`).join('')}</tbody></table>`:''}
+  </div>`;
 }
 
 // ═══════════════════════════════════════════════
