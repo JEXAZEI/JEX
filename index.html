@@ -156,14 +156,14 @@ const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='
 // ═══════════════════════════════════════════════
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
-  notifications:[],halts:[],
-  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null}};
+  notifications:[],halts:[],priceAlerts:[],nwHistory:[],earningsTargets:[],
+  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,earnings_surprise_pct:10,session_open_prices:{}}};
 let SHEETS_URL=null;
 let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview'};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
-  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots,notifications,halts]=await Promise.all([
+  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets]=await Promise.all([
     sb.get('jex_users','order=created_at.asc'),sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_companies','order=created_at.asc'),sb.get('jex_news','order=created_at.desc'),
     sb.get('jex_ipo_applications','order=created_at.asc'),sb.get('jex_dilution_applications','order=created_at.asc'),
@@ -179,11 +179,14 @@ async function loadAll(){
     sb.get('jex_notifications','order=created_at.desc&limit=100'),
     sb.get('jex_halts','order=created_at.asc'),
     sb.get('jex_notifications','order=created_at.desc&limit=100'),
-    sb.get('jex_halts','order=created_at.asc')
+    sb.get('jex_halts','order=created_at.asc'),
+    sb.get('jex_price_alerts','order=created_at.asc'),
+    sb.get('jex_nw_history','order=created_at.asc'),
+    sb.get('jex_earnings_targets','order=created_at.desc')
   ]);
   DB={users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,
     session:session[0]||DB.session,announcements,limitOrders,activity,
-    shareClasses,classApps,votes,ballots,notifications,halts};
+    shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets};
 }
 
 // ═══════════════════════════════════════════════
@@ -233,6 +236,18 @@ const pad=n=>n<10?'0'+n:String(n);
 function getAZTime(){return new Date(new Date().toLocaleString('en-US',{timeZone:'America/Phoenix'}));}
 function fmtAZTime(d){return d.toLocaleString('en-US',{timeZone:'America/Phoenix',weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true})+' MST';}
 async function saveSession(data){Object.assign(DB.session,data);await sb.patch('jex_session','id=eq.1',data);}
+async function saveCBPct(){
+  const pct=parseInt(document.getElementById('cb-pct')?.value);
+  if(isNaN(pct)||pct<1||pct>100)return toast('Enter a value between 1 and 100');
+  await saveSession({circuit_breaker_pct:pct});
+  toast('Circuit breaker set to '+pct+'%');render();
+}
+async function saveSurprisePct(){
+  const pct=parseInt(document.getElementById('surprise-pct')?.value);
+  if(isNaN(pct)||pct<1||pct>50)return toast('Enter a value between 1 and 50');
+  await saveSession({earnings_surprise_pct:pct});
+  toast('Earnings surprise set to '+pct+'%');render();
+}
 async function saveSheetsUrl(url){
   url=(url||'').trim();
   SHEETS_URL=url||null;
@@ -261,7 +276,7 @@ async function pushBalances(){
   await pushToSheets('balances',{rows});
 }
 async function setSession(status){const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';clearInterval(sessionTimer);sessionTimer=null;await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null});const u=cu();await logActivity('session','Session '+status+(u?' by '+u.name:''),{userId:u?.id,userName:u?.name});
-  if(status==='open'){await pushNotificationToAll('session','🟢 Trading session is now open!');activateAfterHoursOrders();}
+  if(status==='open'){await pushNotificationToAll('session','🟢 Trading session is now open!');activateAfterHoursOrders();recordSessionOpenPrices();}
   if(status==='closed')await pushNotificationToAll('session','🔴 Trading session has closed.');
   render();}
 async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);render();}
@@ -374,6 +389,123 @@ async function deleteAnnouncement(id){
 
 // ── Limit orders ────────────────────────────────────────
 // ═══════════════════════════════════════════════
+// NET WORTH HISTORY
+// ═══════════════════════════════════════════════
+async function snapshotNW(userId){
+  const u=getUser(userId);if(!u||u.role!=='student')return;
+  const _nw=nw(u),_pv=pv(u);
+  const rec={id:uid(),user_id:userId,nw:_nw,cash:Math.round(u.cash*100)/100,portfolio:Math.round(_pv*100)/100,ts:ts()};
+  try{await sb.post('jex_nw_history',rec);DB.nwHistory.push(rec);}catch(e){}
+}
+async function snapshotAllNW(){
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+  for(const u of students)await snapshotNW(u.id);
+}
+
+// ═══════════════════════════════════════════════
+// PRICE ALERTS
+// ═══════════════════════════════════════════════
+async function addPriceAlert(ticker,targetPrice,direction){
+  const u=cu();if(!u)return;
+  targetPrice=parseFloat(targetPrice);
+  if(isNaN(targetPrice)||targetPrice<=0)return toast('Enter a valid price');
+  if(!direction)return toast('Select above or below');
+  const rec={id:uid(),user_id:u.id,ticker,target_price:targetPrice,direction,triggered:false,ts:ts()};
+  await sb.post('jex_price_alerts',rec);
+  DB.priceAlerts.push(rec);
+  toast('Alert set: '+ticker+' '+direction+' '+fmt(targetPrice));render();
+}
+async function deletePriceAlert(id){
+  await sb.del('jex_price_alerts','id=eq.'+id);
+  DB.priceAlerts=DB.priceAlerts.filter(a=>a.id!==id);
+  toast('Alert removed');render();
+}
+async function checkPriceAlerts(){
+  const active=DB.priceAlerts.filter(a=>!a.triggered);
+  for(const a of active){
+    const co=getCo(a.ticker);if(!co)continue;
+    const triggered=(a.direction==='above'&&co.price>=a.target_price)||(a.direction==='below'&&co.price<=a.target_price);
+    if(!triggered)continue;
+    await sb.patch('jex_price_alerts','id=eq.'+a.id,{triggered:true});
+    a.triggered=true;
+    await pushNotification(a.user_id,'price_alert','🎯 Price alert: '+a.ticker+' is '+a.direction+' '+fmt(a.target_price)+' (now '+fmt(co.price)+')',a.ticker);
+    toast('Price alert triggered: '+a.ticker+' '+a.direction+' '+fmt(a.target_price));
+  }
+}
+
+// ═══════════════════════════════════════════════
+// CIRCUIT BREAKERS
+// ═══════════════════════════════════════════════
+async function checkCircuitBreakers(){
+  if(!isOpen())return;
+  const threshold=DB.session.circuit_breaker_pct||20;
+  const openPrices=DB.session.session_open_prices||{};
+  for(const co of DB.companies){
+    if(isHalted(co.ticker))continue;
+    const openPrice=openPrices[co.ticker];
+    if(!openPrice)continue;
+    const pctMove=Math.abs((co.price-openPrice)/openPrice*100);
+    if(pctMove>=threshold){
+      const reason='Circuit breaker: '+co.ticker+' moved '+Math.round(pctMove)+'% from session open (threshold: '+threshold+'%)';
+      await haltStock(co.ticker,reason);
+      toast('⚡ Circuit breaker triggered on '+co.ticker+' — trading halted');
+      // Auto-resume after 5 minutes
+      setTimeout(async()=>{
+        if(isHalted(co.ticker))await resumeStock(co.ticker);
+      },5*60*1000);
+    }
+  }
+}
+async function recordSessionOpenPrices(){
+  const prices={};
+  DB.companies.forEach(c=>{prices[c.ticker]=c.price;});
+  await saveSession({session_open_prices:prices});
+  DB.session.session_open_prices=prices;
+}
+
+// ═══════════════════════════════════════════════
+// EARNINGS SURPRISE
+// ═══════════════════════════════════════════════
+async function submitEarningsTarget(ticker,targetRev,targetProfit){
+  if(!targetRev||!targetProfit)return toast('Enter both targets');
+  const co=getCo(ticker);if(!co)return;
+  const u=cu();
+  targetRev=parseFloat(targetRev);targetProfit=parseFloat(targetProfit);
+  if(isNaN(targetRev)||isNaN(targetProfit))return toast('Enter valid numbers');
+  if(DB.earningsTargets.find(t=>t.ticker===ticker&&t.status==='pending'))return toast('A target is already pending approval');
+  const rec={id:uid(),ticker,company_name:co.name,target_revenue:targetRev,target_profit:targetProfit,owner_id:u.id,status:'pending',ts:ts()};
+  await sb.post('jex_earnings_targets',rec);
+  DB.earningsTargets.push(rec);
+  toast('Earnings target submitted for approval');render();
+}
+async function reviewEarningsTarget(id,approve){
+  const t=DB.earningsTargets.find(x=>x.id===id);if(!t)return;
+  await sb.patch('jex_earnings_targets','id=eq.'+id,{status:approve?'approved':'rejected'});
+  t.status=approve?'approved':'rejected';
+  toast('Earnings target '+(approve?'approved':'rejected'));render();
+}
+async function applyEarningsSurprise(ticker,actualRev,actualProfit){
+  const target=DB.earningsTargets.find(t=>t.ticker===ticker&&t.status==='approved');
+  if(!target)return; // No approved target = no surprise
+  const co=getCo(ticker);if(!co)return;
+  const surprisePct=DB.session.earnings_surprise_pct||10;
+  const revBeat=actualRev>=target.target_revenue;
+  const profitBeat=actualProfit>=target.target_profit;
+  const bothBeat=revBeat&&profitBeat;
+  const bothMiss=!revBeat&&!profitBeat;
+  if(!bothBeat&&!bothMiss)return; // Mixed result = no auto move
+  const direction=bothBeat?1:-1;
+  const pctChange=direction*(surprisePct/100);
+  const newPrice=Math.max(0.01,Math.round(co.price*(1+pctChange)*100)/100);
+  const newHistory=[...co.price_history,{p:newPrice,t:'Earnings '+(bothBeat?'beat':'miss')}];
+  await updateCo(ticker,{price:newPrice,price_history:newHistory});
+  await pushNotificationToHolders(ticker,'earnings_surprise',(bothBeat?'📈 ':'📉 ')+co.name+' earnings '+(bothBeat?'BEAT':'MISSED')+' targets! Price '+(bothBeat?'jumped':'dropped')+' '+surprisePct+'% to '+fmt(newPrice));
+  await pushNotificationToAll('earnings_surprise',(bothBeat?'📈':'📉')+' '+co.name+' ('+ticker+') earnings '+(bothBeat?'beat':'missed')+' targets — price '+(bothBeat?'+':'-')+surprisePct+'%');
+  await logActivity('earnings_surprise',co.name+' earnings '+(bothBeat?'beat':'missed')+' targets — price '+(bothBeat?'+':'-')+surprisePct+'% to '+fmt(newPrice),{ticker,amount:newPrice-co.price});
+  toast(co.name+' earnings '+(bothBeat?'beat 📈':'miss 📉')+' — price '+(bothBeat?'+':'-')+surprisePct+'%!');
+}
+
+// ═══════════════════════════════════════════════
 // NOTIFICATIONS
 // ═══════════════════════════════════════════════
 async function pushNotification(userId, type, message, ticker=null){
@@ -411,6 +543,47 @@ function myNotifications(){
 // MARKET HALTS
 // ═══════════════════════════════════════════════
 function isHalted(ticker){return !!DB.halts.find(h=>h.ticker===ticker);}
+async function resetExchange(){
+  if(!confirm('⚠️ FULL RESET\n\nThis will permanently delete:\n• All students and company accounts\n• All listed stocks and price history\n• All trades, orders, dividends, news, votes\n• All notifications and activity logs\n\nChairman, President, Secretary and Treasurer accounts will be kept.\n\nThis CANNOT be undone. Are you sure?'))return;
+  if(!confirm('Last chance — are you absolutely sure you want to reset JEX?'))return;
+  toast('Resetting... please wait');
+  try{
+    // Clear all trading tables
+    await Promise.all([
+      sb.del('jex_trades','id=gt.0'),
+      sb.del('jex_dividends','id=neq.x'),
+      sb.del('jex_buybacks','id=neq.x'),
+      sb.del('jex_limit_orders','id=neq.x'),
+      sb.del('jex_notifications','id=neq.x'),
+      sb.del('jex_halts','ticker=neq.x'),
+      sb.del('jex_activity','id=neq.x'),
+      sb.del('jex_news','id=neq.x'),
+      sb.del('jex_announcements','id=neq.x'),
+      sb.del('jex_ipo_applications','id=neq.x'),
+      sb.del('jex_dilution_applications','id=neq.x'),
+      sb.del('jex_share_classes','id=neq.x'),
+      sb.del('jex_class_applications','id=neq.x'),
+      sb.del('jex_pending','id=neq.x'),
+    ]);
+    // Delete votes (cascades to ballots)
+    await sb.del('jex_votes','id=neq.x');
+    // Delete companies
+    await sb.del('jex_companies','id=neq.x');
+    // Delete students and company users only
+    await sb.del('jex_users','role=in.(student,company)');
+    // Reset session
+    await sb.patch('jex_session','id=eq.1',{status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,sheets_url:null});
+    // Reload everything
+    await loadAll();
+    SHEETS_URL=null;
+    UI.navTab='admin';UI.adminTab='session';UI.companyPage=null;
+    toast('✓ JEX reset complete — clean slate');
+    render();
+  }catch(err){
+    toast('Reset failed: '+err.message);
+    console.error('Reset error:',err);
+  }
+}
 async function haltStock(ticker,reason){
   if(!ticker)return toast('Select a ticker');
   if(!reason||reason.trim().length<3)return toast('Enter a reason');
@@ -643,7 +816,11 @@ async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
   const rec={ticker,qty,price,buyer_id:buyerId,seller_id:sellerId,type,ts:ts()};
   const result=await sb.post('jex_trades',rec);
   if(result&&result[0])DB.trades.push(result[0]);
-  // Push to Sheets asynchronously (don't block trade)
+  // Snapshot NW for buyers/sellers and check alerts/breakers
+  if(buyerId&&buyerId!=='exchange'&&buyerId!=='short')snapshotNW(buyerId);
+  if(sellerId&&sellerId!=='exchange'&&sellerId!=='cover')snapshotNW(sellerId);
+  checkPriceAlerts();
+  checkCircuitBreakers();
   pushBalances();
   pushToSheets('trades',{trades:[{ticker,qty,price,type,ts:ts(),
     buyer:['exchange','short'].includes(buyerId)?'JEX':getUser(buyerId)?.name||buyerId,
@@ -797,6 +974,7 @@ async function postFinancials(ticker,rev,profit,summary){
   const fins=[{revenue:parseFloat(rev),profit:parseFloat(profit),summary:summary.trim(),ts:ts(),period:'Report '+(co.financials.length+1)},...co.financials];
   await updateCo(ticker,{financials:fins});
   await pushNotificationToHolders(ticker,'earnings','📊 '+co.name+' posted earnings: Rev '+fmt(parseFloat(rev))+', Profit '+fmt(parseFloat(profit)));
+  await applyEarningsSurprise(ticker,parseFloat(rev),parseFloat(profit));
   toast('Financials posted');render();
 }
 async function removeUser(uid2){
@@ -1188,6 +1366,7 @@ function renderCompanyPage(parentTicker){
   let html=`
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
     <button class="btn btn-sm" onclick="closeCompanyPage()">← Back to market</button>
+    ${co.logo?`<img src="${co.logo}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid var(--border)">`:''}
     <div style="flex:1">
       <div style="display:flex;align-items:center;gap:10px">
         <span style="font-size:22px;font-weight:500">${co.name}</span>
@@ -1211,6 +1390,7 @@ function renderCompanyPage(parentTicker){
     <button class="tab ${tab==='votes'?'active':''}" onclick="UI.companyPageTab='votes';render()">Votes ${companyVotes.filter(v=>v.status==='open').length?'<span class="badge b-green" style="margin-left:4px">'+companyVotes.filter(v=>v.status==='open').length+'</span>':''}</button>
     <button class="tab ${tab==='shareholders'?'active':''}" onclick="UI.companyPageTab='shareholders';render()">Shareholders</button>
     <button class="tab ${tab==='dividends'?'active':''}" onclick="UI.companyPageTab='dividends';render()">Dividends</button>
+    ${canTrade?`<button class="tab ${tab==='alerts'?'active':''}" onclick="UI.companyPageTab='alerts';render()">🎯 Alerts ${DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&!a.triggered).length?'<span class="badge b-blue" style="margin-left:4px">'+DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&!a.triggered).length+'</span>':''}</button>`:''}
     <button class="tab ${tab==='trades'?'active':''}" onclick="UI.companyPageTab='trades';render()">Trade history</button>
   </div>`;
 
@@ -1406,6 +1586,22 @@ function renderCompanyPage(parentTicker){
     html+='</div>';
   }
 
+  else if(tab==='alerts'&&(u.role==='student'||u.role==='company')){
+    const myAlerts=DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&!a.triggered);
+    const triggeredAlerts=DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&a.triggered);
+    html+='<div class="card"><div class="section-title">Set a price alert</div>'
+      +'<div class="ibox ibox-blue">Get notified when '+parentTicker+' crosses a price level.</div>'
+      +'<div class="row" style="align-items:flex-end">'
+      +'<div class="frow" style="flex:1"><label class="flabel">Direction</label><select id="alert-dir"><option value="above">Above</option><option value="below">Below</option></select></div>'
+      +'<div class="frow" style="flex:1"><label class="flabel">Target price ($)</label><input type="number" id="alert-price" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
+      +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="addAlertForm(&quot;'+parentTicker+'&quot;)">Set alert</button></div></div>'
+      +(myAlerts.length?'<hr class="divider"><div style="font-size:12px;font-weight:500;margin-bottom:8px">Active alerts</div>'
+        +myAlerts.map(a=>'<div class="app-row" style="margin-bottom:6px"><div class="app-info"><div class="app-name">'+a.direction+' '+fmt(a.target_price)+'</div></div>'
+          +'<button class="btn btn-sm btn-danger" onclick="deletePriceAlert(&quot;'+a.id+'&quot;)">Remove</button></div>').join(''):'')
+      +(triggeredAlerts.length?'<hr class="divider"><div style="font-size:12px;color:var(--text2)">'+triggeredAlerts.length+' triggered alert'+(triggeredAlerts.length!==1?'s':'')+' (historical)</div>':'')
+      +'</div>';
+  }
+
   else if(tab==='dividends'){
     if(!companyDivs.length){html+='<div class="card"><div class="empty">No dividends paid yet.</div></div>';}
     else{
@@ -1429,12 +1625,20 @@ function renderCompanyPage(parentTicker){
   return html;
 }
 
-function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)).map(c=>{const chg=priceChg(c),w=isWatched(c.ticker),halted=isHalted(c.ticker);return `<div class="ticker-item ${UI.panelTicker===c.ticker?'active-t':''} ${w?'watched':''} ${halted?'halted-ticker':''}" onclick="openCompanyPage('${c.ticker}')"><div class="tsym">${c.ticker}${w?' ★':''}${halted?' ⚠️':''}</div><div class="tprice" style="${halted?'color:var(--red)':''}">${fmt(c.price)}</div><div class="tchg ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</div></div>`;}).join('')}</div>`;}
+function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)).map(c=>{const chg=priceChg(c),w=isWatched(c.ticker),halted=isHalted(c.ticker);return `<div class="ticker-item ${UI.panelTicker===c.ticker?'active-t':''} ${w?'watched':''} ${halted?'halted-ticker':''}" onclick="openCompanyPage('${c.ticker}')" style="${c.brand_color?'border-color:'+c.brand_color+'30':''}">
+  ${c.logo?`<img src="${c.logo}" style="width:24px;height:24px;object-fit:cover;border-radius:4px;margin-bottom:3px">`:``}
+  <div class="tsym">${c.ticker}${w?' ★':''}${halted?' ⚠️':''}</div><div class="tprice" style="${halted?'color:var(--red)':''}">${fmt(c.price)}</div><div class="tchg ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</div></div>`;}).join('')}</div>`;}
 function renderMarket(){
-  const u=cu();const listed=DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id));
+  const u=cu();
+  const searchQ=(document.getElementById('market-search')?.value||'').toLowerCase();
+  const listed=DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)
+    &&(!searchQ||(c.name.toLowerCase().includes(searchQ)||c.ticker.toLowerCase().includes(searchQ))));
   const recentNews=DB.news.slice(0,5);
   return `${renderTickerBar()}
-    <div class="card"><div class="section-title">Listed companies</div>
+    <div class="card"><div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+      <div class="section-title" style="margin-bottom:0;flex:1">Listed companies</div>
+      <input type="text" id="market-search" placeholder="Search by name or ticker..." style="max-width:240px;padding:6px 10px;font-size:13px" oninput="renderMarketInPlace()">
+    </div>
       <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${(u.role==='student'||u.role==='company')?'<th>Watch</th><th></th>':''}</tr></thead>
       <tbody>${listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
@@ -1467,6 +1671,9 @@ function openCompanyPage(ticker){
   destroyCharts();render();
   window.scrollTo({top:0,behavior:'smooth'});
 }
+function addAlertForm(ticker){
+  addPriceAlert(ticker,document.getElementById('alert-price')?.value,document.getElementById('alert-dir')?.value);
+}
 function cpTrade(mode){
   const t=UI.companyPage;const q=get('cp-qty')?.value;
   if(mode==='buy')placeBuy(t,q);
@@ -1479,6 +1686,11 @@ function cpLimit(side){
   placeLimitOrder(t,side,get('cp-lmt-qty')?.value,get('cp-lmt-price')?.value);
 }
 function toggleWatchAndRefresh(ticker){toggleWatch(ticker).then(()=>openCompanyPage(ticker));}
+function renderMarketInPlace(){
+  const mc=document.getElementById('market-content');
+  if(mc)mc.innerHTML=renderMarket();
+  setTimeout(()=>buildSparklines(),60);
+}
 function closeCompanyPage(){
   UI.companyPage=null;destroyCharts();render();
 }
@@ -1557,6 +1769,7 @@ function renderPortfolio(){
     <button class="tab ${UI.portfolioTab==='watchlist'?'active':''}" onclick="UI.portfolioTab='watchlist';render()">Watchlist ${watched.length?'<span class="badge b-teal" style="margin-left:4px">'+watched.length+'</span>':''}</button>
     <button class="tab ${UI.portfolioTab==='dividends'?'active':''}" onclick="UI.portfolioTab='dividends';render()">Dividends</button>
     <button class="tab ${UI.portfolioTab==='history'?'active':''}" onclick="UI.portfolioTab='history';render()">Trade history</button>
+    <button class="tab ${UI.portfolioTab==='nwchart'?'active':''}" onclick="UI.portfolioTab='nwchart';render()">Net worth chart</button>
   </div>`;
 
   if(UI.portfolioTab==='holdings'){
@@ -1585,6 +1798,7 @@ function renderPortfolio(){
   }
 
   if(UI.portfolioTab==='history') return tabs+renderTradingHistory();
+  if(UI.portfolioTab==='nwchart') return tabs+renderNWChart(u);
 
   // dividends tab
   if(!myDivs.length)return tabs+'<div class="empty">No dividends received yet</div>';
@@ -1617,6 +1831,13 @@ function renderSettings(){
   </div>`:'';
   return sheetsSection+`<div class="card"><div class="section-title">Account</div><div class="grid2"><div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${u.name}</div></div><div class="mcard"><div class="mlabel">Email</div><div class="mval" style="font-size:14px;margin-top:4px">${u.email}</div></div></div></div>
   <div class="card"><div class="section-title">Change password</div><div class="frow"><label class="flabel">Current password</label><input type="password" id="pw-cur" placeholder="Current password"></div><div class="frow"><label class="flabel">New password</label><input type="password" id="pw-new" placeholder="New password (min 4 characters)"></div><div class="frow"><label class="flabel">Confirm new password</label><input type="password" id="pw-conf" placeholder="Repeat new password"></div><button class="btn btn-primary" onclick="changePw('${u.id}',get('pw-cur')?.value,get('pw-new')?.value,get('pw-conf')?.value)">Update password</button></div>
+  ${u.role==='company'?`<div class="card"><div class="section-title">Company branding</div>
+    <div class="ibox ibox-blue" style="margin-bottom:10px">Upload a logo image for your company. Shown on your ticker chip and company page. Max 200KB recommended.</div>
+    ${(()=>{const co=DB.companies.find(c=>c.owner_id===u.id);return co&&co.logo?`<div style="margin-bottom:10px"><img src="${co.logo}" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:1px solid var(--border)"></div>`:'';})()}
+    <div class="frow"><label class="flabel">Logo image</label><input type="file" id="logo-upload" accept="image/*" onchange="previewLogo(this)"></div>
+    <div id="logo-preview" style="margin-bottom:10px"></div>
+    <button class="btn btn-primary" onclick="saveLogo()">Save logo</button>
+  </div>`:''}
   <div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><input type="password" id="settings-secq-pw" placeholder="Current password"></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`;
 }
 
@@ -1878,6 +2099,24 @@ function submitClassAppForm(parentTicker){
   submitClassApplication(parentTicker,clsType,votes,shares,price,restricted,whitelist,reason);
 }
 // Toggle whitelist UI
+function previewLogo(input){
+  const file=input.files[0];if(!file)return;
+  if(file.size>500000){toast('Image too large — please use under 500KB');input.value='';return;}
+  const reader=new FileReader();
+  reader.onload=e=>{
+    const p=document.getElementById('logo-preview');
+    if(p)p.innerHTML='<img src="'+e.target.result+'" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:1px solid var(--border);margin-top:4px">';
+    window._pendingLogo=e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+async function saveLogo(){
+  const logo=window._pendingLogo;if(!logo)return toast('Select an image first');
+  const u=cu();const co=DB.companies.find(c=>c.owner_id===u.id);if(!co)return;
+  await updateCo(co.ticker,{logo});
+  window._pendingLogo=null;
+  toast('Logo saved');render();
+}
 document.addEventListener('change',function(e){
   if(e.target&&e.target.id==='cls-restricted'){
     const wrap=document.getElementById('cls-whitelist-wrap');
@@ -1933,7 +2172,16 @@ function renderNewsPage(){
 }
 
 function renderFinancials(co){
-  return`<div class="card"><div class="section-title">Post earnings report</div><div class="row"><div class="frow" style="flex:1"><label class="flabel">Revenue ($)</label><input type="number" id="fin-rev" placeholder="50000" min="0"></div><div class="frow" style="flex:1"><label class="flabel">Profit ($)</label><input type="number" id="fin-profit" placeholder="12000"></div></div><div class="frow"><label class="flabel">Summary (public)</label><textarea id="fin-sum" rows="2" placeholder="Strong Q1 driven by..."></textarea></div><button class="btn btn-primary" onclick="postFinancials('${co.ticker}',get('fin-rev')?.value,get('fin-profit')?.value,get('fin-sum')?.value)">Post report</button></div>${co.financials&&co.financials.length?`<div class="card"><div class="section-title">Past reports</div><table><thead><tr><th>Period</th><th>Revenue</th><th>Profit</th><th>Margin</th><th>Summary</th></tr></thead><tbody>${co.financials.map(f=>`<tr><td style="color:var(--text2)">${f.period}</td><td style="font-family:var(--mono)">${fmt(f.revenue)}</td><td style="font-family:var(--mono);color:${f.profit>=0?'var(--green)':'var(--red)'}">${fmt(f.profit)}</td><td>${f.revenue>0?Math.round((f.profit/f.revenue)*100)+'%':'—'}</td><td style="font-size:12px;color:var(--text2)">${f.summary}</td></tr>`).join('')}</tbody></table></div>`:''}`;}
+  const myTarget=DB.earningsTargets.find(t=>t.ticker===co.ticker&&t.status!=='rejected');
+  const surprisePct=DB.session.earnings_surprise_pct||10;
+  return`<div class="card"><div class="section-title">Post earnings report</div>
+    ${myTarget&&myTarget.status==='approved'?`<div class="ibox ibox-amber">Approved earnings target — Rev: <strong>${fmt(myTarget.target_revenue)}</strong> · Profit: <strong>${fmt(myTarget.target_profit)}</strong>. If you beat both, stock jumps +${surprisePct}%. If you miss both, it drops -${surprisePct}%.</div>`:''}
+    ${myTarget&&myTarget.status==='pending'?`<div class="ibox ibox-blue">Earnings target pending approval.</div>`:''}
+    <div class="row"><div class="frow" style="flex:1"><label class="flabel">Revenue ($)</label><input type="number" id="fin-rev" placeholder="50000" min="0"></div><div class="frow" style="flex:1"><label class="flabel">Profit ($)</label><input type="number" id="fin-profit" placeholder="12000"></div></div><div class="frow"><label class="flabel">Summary (public)</label><textarea id="fin-sum" rows="2" placeholder="Strong Q1 driven by..."></textarea></div><button class="btn btn-primary" onclick="postFinancials('${co.ticker}',get('fin-rev')?.value,get('fin-profit')?.value,get('fin-sum')?.value)">Post report</button></div>
+    ${!myTarget||myTarget.status==='rejected'?`<div class="card"><div class="section-title">Propose an earnings target</div>
+    <div class="ibox ibox-purple">Submit a revenue and profit target to the Chairman. If approved, beating or missing both will auto-move your stock price ${surprisePct}% when you post earnings.</div>
+    <div class="row"><div class="frow" style="flex:1"><label class="flabel">Revenue target ($)</label><input type="number" id="et-rev" placeholder="50000" min="0"></div><div class="frow" style="flex:1"><label class="flabel">Profit target ($)</label><input type="number" id="et-profit" placeholder="12000"></div></div>
+    <button class="btn btn-warning" onclick="submitEarningsTarget('${co.ticker}',get('et-rev')?.value,get('et-profit')?.value)">Submit target</button></div>`:''}${co.financials&&co.financials.length?`<div class="card"><div class="section-title">Past reports</div><table><thead><tr><th>Period</th><th>Revenue</th><th>Profit</th><th>Margin</th><th>Summary</th></tr></thead><tbody>${co.financials.map(f=>`<tr><td style="color:var(--text2)">${f.period}</td><td style="font-family:var(--mono)">${fmt(f.revenue)}</td><td style="font-family:var(--mono);color:${f.profit>=0?'var(--green)':'var(--red)'}">${fmt(f.profit)}</td><td>${f.revenue>0?Math.round((f.profit/f.revenue)*100)+'%':'—'}</td><td style="font-size:12px;color:var(--text2)">${f.summary}</td></tr>`).join('')}</tbody></table></div>`:''}`;}
 function renderDivTab(co,myDivs){
   const sh=shareholders(co.ticker),owner=cu();
   return`<div class="card"><div class="section-title">Pay a dividend</div><div class="ibox ibox-teal">Paid immediately from company cash to all shareholders.</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">Shareholders</div><div class="mval">${sh.length}</div></div><div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${(co.shares-co.shares_avail).toLocaleString()}</div></div></div>
@@ -2006,9 +2254,9 @@ function renderAdmin(){
   const pS=DB.pending.filter(r=>r.role==='student'),pC=DB.pending.filter(r=>r.role==='company');
 
   // President can only see: session, balances, passwords
-  const presidentTabs=[['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
+  const presidentTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
   const sectreTabs=[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
-  const chairmanTabs=[['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log']];
+  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['earnings','Earnings targets'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log']];
   const tabs=chair?chairmanTabs:isPresident(u)?presidentTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
 
@@ -2023,6 +2271,8 @@ function renderAdmin(){
   :UI.adminTab==='dilution'?renderAdminDilution(pDil,rDil)
   :UI.adminTab==='balances'?renderAdminBalances(students)
   :UI.adminTab==='users'?renderAdminUsers(students,companies)
+  :UI.adminTab==='dashboard'?renderAdminDashboard()
+  :UI.adminTab==='earnings'?renderAdminEarnings()
   :UI.adminTab==='news'?renderAdminNews()
   :UI.adminTab==='announcements'?renderAdminAnnouncements()
   :UI.adminTab==='classes'?renderAdminClasses()
@@ -2044,6 +2294,15 @@ function renderAdminSession(students){
     <div style="display:flex;gap:8px;margin-bottom:14px"><button class="btn btn-primary" onclick="scheduleSession()">Set schedule</button><button class="btn" onclick="clearSchedule()">Clear schedule</button></div>
     ${DB.session.scheduled_open||DB.session.scheduled_close?`<div class="ibox ibox-teal" style="margin-bottom:14px">Scheduled: ${DB.session.scheduled_open?pad(DB.session.scheduled_open.h)+':'+pad(DB.session.scheduled_open.m)+' – ':''}${sched?pad(sched.h)+':'+pad(sched.m):''} MST</div>`:''}
     <div class="divider"></div>
+    <div class="section-title" style="font-size:13px;margin-bottom:10px">Circuit breakers</div>
+    <div class="ibox ibox-blue" style="margin-bottom:10px">If any stock moves this % from its session-open price, trading is auto-halted for 5 minutes.</div>
+    <div class="row" style="align-items:flex-end;margin-bottom:14px">
+      <div class="frow" style="flex:1"><label class="flabel">Trigger threshold (%)</label><input type="number" id="cb-pct" value="${DB.session.circuit_breaker_pct||20}" min="1" max="100" step="1"></div>
+      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="saveCBPct()">Save</button></div>
+      <div style="padding-bottom:12px;margin-left:4px"><button class="btn" onclick="saveSession({circuit_breaker_pct:null}).then(()=>toast('Circuit breakers disabled'))">Disable</button></div>
+    </div>
+    ${DB.session.circuit_breaker_pct?`<div style="font-size:12px;color:var(--text2);margin-bottom:4px">Active — halts if any stock moves ±${DB.session.circuit_breaker_pct}% from open</div>`:'<div style="font-size:12px;color:var(--text2);margin-bottom:4px">Circuit breakers disabled</div>'}
+    <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">Manual countdown timer</div>
     <div class="row" style="align-items:flex-end;margin-bottom:14px"><div class="frow" style="flex:1"><label class="flabel">Duration (minutes)</label><input type="number" id="sess-mins" value="10" min="1" max="120"></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="startTimer(parseInt(get('sess-mins').value)||10)">Start timer</button></div></div>
     <div class="divider"></div>
@@ -2059,6 +2318,10 @@ function renderAdminSession(students){
       <div class="frow" style="flex:2"><label class="flabel">Reason</label><input type="text" id="halt-reason" placeholder="e.g. Under investigation for false earnings"></div>
       <div style="padding-bottom:12px"><button class="btn btn-danger" onclick="haltStock(get('halt-ticker')?.value,get('halt-reason')?.value)">Halt</button></div>
     </div>
+    <div class="divider"></div>
+    <div class="section-title" style="font-size:13px;margin-bottom:6px;color:var(--red)">⚠ Danger zone</div>
+    <div class="ibox ibox-red" style="margin-bottom:10px">Resets JEX to a clean slate. Deletes all students, companies, trades, and data. Chairman, President, Secretary and Treasurer accounts are kept.</div>
+    <button class="btn btn-danger" onclick="resetExchange()">Reset JEX</button>
   </div>`;
 }
 function renderAdminRegs(pS,pC,students,companies){
@@ -2189,6 +2452,75 @@ function renderAdminClasses(){
         +'<span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-gray')+'">'+a.status+'</span></div>'
       ).join('')+'</div>':'');
 }
+function renderAdminDashboard(){
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+  const companies=DB.companies.filter(c=>c.status==='listed');
+  const todayTrades=DB.trades.filter(t=>t.ts&&t.ts.includes(new Date().toLocaleDateString()));
+  const totalMktCap=companies.reduce((s,c)=>s+c.price*c.shares,0);
+  const openOrders=DB.limitOrders.filter(o=>o.status==='open').length;
+  const halted=DB.halts.length;
+  // Biggest mover
+  const movers=companies.map(c=>({ticker:c.ticker,name:c.name,chg:priceChg(c)})).sort((a,b)=>Math.abs(b.chg)-Math.abs(a.chg));
+  const bigMover=movers[0];
+  // Most active stock
+  const tradeCounts={};DB.trades.forEach(t=>{tradeCounts[t.ticker]=(tradeCounts[t.ticker]||0)+1;});
+  const mostActive=Object.entries(tradeCounts).sort((a,b)=>b[1]-a[1])[0];
+  // Top student
+  const ranked=students.map(u=>({...u,_nw:nw(u)})).sort((a,b)=>b._nw-a._nw);
+  return`<div class="grid4" style="margin-bottom:14px">
+    <div class="mcard"><div class="mlabel">Students</div><div class="mval">${students.length}</div></div>
+    <div class="mcard"><div class="mlabel">Listed stocks</div><div class="mval">${companies.length}</div></div>
+    <div class="mcard"><div class="mlabel">Total market cap</div><div class="mval" style="font-size:16px;font-family:var(--mono)">${fmt(totalMktCap)}</div></div>
+    <div class="mcard"><div class="mlabel">Session</div><div class="mval" style="font-size:16px;color:${DB.session.status==='open'?'var(--green)':DB.session.status==='paused'?'var(--amber)':'var(--red)'}">${DB.session.status}</div></div>
+  </div>
+  <div class="grid4" style="margin-bottom:14px">
+    <div class="mcard"><div class="mlabel">Trades today</div><div class="mval">${todayTrades.length}</div></div>
+    <div class="mcard"><div class="mlabel">Open orders</div><div class="mval">${openOrders}</div></div>
+    <div class="mcard"><div class="mlabel">Halted stocks</div><div class="mval" style="color:${halted?'var(--red)':'var(--text)'}">${halted}</div></div>
+    <div class="mcard"><div class="mlabel">Pending registrations</div><div class="mval" style="color:${DB.pending.length?'var(--amber)':'var(--text)'}">${DB.pending.length}</div></div>
+  </div>
+  <div class="grid3" style="margin-bottom:14px">
+    <div class="mcard"><div class="mlabel">🏆 Leaderboard leader</div><div class="mval" style="font-size:15px;margin-top:4px">${ranked[0]?.name||'—'}</div>${ranked[0]?`<div style="font-size:12px;color:var(--green);font-family:var(--mono);margin-top:2px">${fmt(ranked[0]._nw)}</div>`:''}
+    </div>
+    <div class="mcard"><div class="mlabel">📈 Biggest mover</div><div class="mval" style="font-size:15px;margin-top:4px">${bigMover?.ticker||'—'}</div>${bigMover?`<div style="font-size:12px;color:${bigMover.chg>=0?'var(--green)':'var(--red)'};font-family:var(--mono);margin-top:2px">${fmtChg(bigMover.chg)}</div>`:''}
+    </div>
+    <div class="mcard"><div class="mlabel">🔥 Most traded</div><div class="mval" style="font-size:15px;margin-top:4px">${mostActive?mostActive[0]:'—'}</div>${mostActive?`<div style="font-size:12px;color:var(--text2);margin-top:2px">${mostActive[1]} trades</div>`:''}
+    </div>
+  </div>
+  <div class="card"><div class="section-title">Recent activity</div>
+    ${DB.activity.slice(0,10).length?`<table><thead><tr><th>Time</th><th>Type</th><th>Description</th></tr></thead><tbody>
+    ${DB.activity.slice(0,10).map(a=>`<tr><td style="color:var(--text2);white-space:nowrap">${a.ts||''}</td><td><span class="badge b-gray">${a.type}</span></td><td style="font-size:12px">${a.description}</td></tr>`).join('')}
+    </tbody></table>`:'<div class="empty">No activity yet</div>'}
+  </div>`;
+}
+
+function renderAdminEarnings(){
+  const pending=DB.earningsTargets.filter(t=>t.status==='pending');
+  const approved=DB.earningsTargets.filter(t=>t.status==='approved');
+  const rejected=DB.earningsTargets.filter(t=>t.status==='rejected');
+  const surprisePct=DB.session.earnings_surprise_pct||10;
+  return`<div class="card"><div class="section-title">Earnings surprise settings</div>
+    <div class="ibox ibox-blue">When a company posts earnings that <strong>beat both targets</strong>, their stock auto-jumps ${surprisePct}%. If they <strong>miss both</strong>, it drops ${surprisePct}%. Mixed results have no auto-effect.</div>
+    <div class="row" style="align-items:flex-end">
+      <div class="frow" style="flex:1"><label class="flabel">Price impact % on beat/miss</label><input type="number" id="surprise-pct" value="${surprisePct}" min="1" max="50" step="1"></div>
+      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="saveSurprisePct()">Save</button></div>
+    </div>
+  </div>
+  <div class="card"><div class="section-title">Pending earnings targets ${pending.length?`<span class="badge b-amber" style="margin-left:4px">${pending.length}</span>`:''}</div>
+    ${pending.length?pending.map(t=>`<div class="app-row"><div class="app-info">
+      <div class="app-name">${t.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></div>
+      <div class="app-meta">Revenue target: ${fmt(t.target_revenue)} · Profit target: ${fmt(t.target_profit)} · ${t.ts}</div>
+    </div><div class="btn-row">
+      <button class="btn btn-success btn-sm" onclick="reviewEarningsTarget('${t.id}',true)">Approve</button>
+      <button class="btn btn-danger btn-sm" onclick="reviewEarningsTarget('${t.id}',false)">Reject</button>
+    </div></div>`).join(''):'<div class="empty">No pending targets</div>'}
+  </div>
+  ${approved.length?`<div class="card"><div class="section-title">Approved targets</div>
+    <table><thead><tr><th>Company</th><th>Ticker</th><th>Rev target</th><th>Profit target</th><th>Submitted</th></tr></thead>
+    <tbody>${approved.map(t=>`<tr><td>${t.company_name}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.target_revenue)}</td><td style="font-family:var(--mono)">${fmt(t.target_profit)}</td><td style="color:var(--text2)">${t.ts}</td></tr>`).join('')}
+    </tbody></table></div>`:''}`;
+}
+
 function renderAdminNews(){
   const items=DB.news;
   if(!items.length)return`<div class="card"><div class="empty">No company news posts yet.</div></div>`;
@@ -2275,6 +2607,24 @@ function renderStudentOrders(){
 // ═══════════════════════════════════════════════
 // RENDER: TRADING HISTORY (per stock)
 // ═══════════════════════════════════════════════
+function renderNWChart(u){
+  const history=DB.nwHistory.filter(h=>h.user_id===u.id).slice(-60);
+  if(history.length<2)return`<div class="card"><div class="empty">Not enough data yet. Net worth is recorded after each trade.<br><br>Make a few trades to start building your chart.</div></div>`;
+  const current=nw(u);
+  const first=history[0].nw;
+  const change=Math.round((current-first)*100)/100;
+  const pctChange=Math.round((change/first)*100*10)/10;
+  return`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+    Net worth over time
+    <span class="${change>=0?'price-up':'price-down'}" style="font-size:13px">${change>=0?'+':''}${fmt(change)} (${pctChange>=0?'+':''}${pctChange}%)</span>
+  </div>
+  <div style="position:relative;height:220px"><canvas id="nw-chart"></canvas></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:14px">
+    <div class="mcard"><div class="mlabel">Starting</div><div class="mval" style="font-size:16px;font-family:var(--mono)">${fmt(first)}</div></div>
+    <div class="mcard"><div class="mlabel">Current</div><div class="mval" style="font-size:16px;font-family:var(--mono);color:${current>=first?'var(--green)':'var(--red)'}">${fmt(current)}</div></div>
+    <div class="mcard"><div class="mlabel">Peak</div><div class="mval" style="font-size:16px;font-family:var(--mono)">${fmt(Math.max(...history.map(h=>h.nw)))}</div></div>
+  </div></div>`;
+}
 function renderTradingHistory(){
   const u=cu();
   const myTrades=DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id);
@@ -2462,6 +2812,20 @@ function render(){
       }
     }
     if(UI.navTab==='market'&&!UI.companyPage)buildSparklines();
+    if(UI.navTab==='portfolio'&&UI.portfolioTab==='nwchart'){
+      setTimeout(()=>{
+        const u=cu();if(!u)return;
+        const history=DB.nwHistory.filter(h=>h.user_id===u.id).slice(-60);
+        if(history.length<2)return;
+        const canvas=document.getElementById('nw-chart');if(!canvas||!window.Chart)return;
+        if(charts['nw-chart'])try{charts['nw-chart'].destroy();}catch(e){}
+        const prices=history.map(h=>h.nw);
+        const isUp=prices[prices.length-1]>=prices[0];
+        charts['nw-chart']=new Chart(canvas,{type:'line',data:{labels:history.map(h=>h.ts||''),datasets:[{data:prices,borderColor:isUp?'#00c896':'#ff4d6a',borderWidth:2,pointRadius:2,pointBackgroundColor:isUp?'#00c896':'#ff4d6a',fill:true,backgroundColor:isUp?'rgba(0,200,150,0.08)':'rgba(255,77,106,0.08)',tension:0.3}]},
+          options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>fmt(ctx.parsed.y)}}},
+            scales:{x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:8,autoSkip:true}},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#4a5568',font:{size:11},callback:v=>fmt(v)},beginAtZero:false}}}});
+      },80);
+    }
     if(UI.navTab==='market'&&UI.companyPage){
       const allT=getCompanyTickers(UI.companyPage);
       allT.forEach(t=>{const co=getCo(t);if(co)buildChart('cp-chart-'+t,co);});
@@ -2481,6 +2845,7 @@ async function boot(){
     if(savedId&&DB.users.find(u=>u.id===savedId)){
       UI.userId=savedId;const u=DB.users.find(u=>u.id===savedId);
       UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'apply':'market';
+    if(isAdmin(u))UI.adminTab='dashboard';
     }
     if(DB.session.ends_at&&DB.session.status==='open')sessionTimer=setInterval(tickTimer,500);
     SHEETS_URL=DB.session.sheets_url||null;
