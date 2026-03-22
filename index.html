@@ -430,13 +430,14 @@ function getMyCompany(userId){
 }
 function isLeadFounder(companyUserId,userId){return companyUserId===userId;}
 
-function inviteCoFounderForm(companyUserId){
-  inviteCoFounder(companyUserId,document.getElementById('invite-student')?.value);
-}
-function doInviteFounder(companyUserId){
+function doInviteFounder(companyTicker){
   const studentId=document.getElementById('invite-student')?.value;
   if(!studentId)return toast('Select a student first');
-  inviteCoFounder(companyUserId,studentId);
+  const student=getUser(studentId);
+  const co=DB.companies.find(c=>c.owner_id===companyTicker)||getCo(companyTicker);
+  const coName=co?co.name:'this company';
+  if(!confirm('Send a founder invitation to '+( student?.name||studentId)+' for '+coName+'?'))return;
+  sendFounderInvite(companyTicker,studentId);
 }
 function doRequestFounderAlloc(){
   const ticker=document.getElementById('alloc-ticker')?.value;
@@ -447,29 +448,32 @@ function doRequestFounderAlloc(){
   if(!studentId)return toast('Select a founder');
   requestFounderAllocation(ticker,studentId,shares,reason);
 }
-async function inviteCoFounder(companyUserId,studentId){
-  if(!studentId)return toast('Select a student to invite');
-  const existing=DB.companyMembers.filter(m=>m.company_user_id===companyUserId&&m.status!=='declined');
-  if(existing.length>=2)return toast('Maximum 2 co-founders allowed (3 total including lead)');
-  if(existing.find(m=>m.student_id===studentId))return toast('Already invited or a member');
-  const u=cu();
-  const student=getUser(studentId);if(!student)return;
-  const rec={id:uid(),company_user_id:companyUserId,student_id:studentId,role:'co-founder',status:'pending',invited_by:u.name,ts:ts()};
-  await sb.post('jex_company_members',rec);
-  DB.companyMembers.push(rec);
-  await pushNotification(studentId,'invite','🤝 '+u.name+' invited you to co-found their company. Check My Stock to accept.');
-  toast(student.name+' invited as co-founder');render();
-}
+// (merged into sendFounderInvite)
 async function respondToInvite(memberId,accept){
+  if(!confirm(accept?'Accept this founder invitation?':'Decline this founder invitation?'))return;
   const m=DB.companyMembers.find(x=>x.id===memberId);if(!m)return;
   await sb.patch('jex_company_members','id=eq.'+memberId,{status:accept?'accepted':'declined'});
   m.status=accept?'accepted':'declined';
   const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
+  const u=cu();
   if(accept&&co){
-    await logActivity('cofound',getUser(m.student_id)?.name+' joined '+co.name+' as co-founder',{ticker:co.ticker});
-    await pushNotification(m.company_user_id,'invite','✅ '+getUser(m.student_id)?.name+' accepted your co-founder invitation!');
+    await logActivity('cofound',u.name+' joined '+co.name+' as a founder',{ticker:co.ticker,userId:u.id,userName:u.name});
+    // Notify the company account
+    await pushNotification(
+      m.company_user_id,'invite',
+      '✅ '+u.name+' accepted your founder invitation and has joined '+co.name+'!',
+      co.ticker
+    );
+    toast('You joined '+co.name+' as a founder!');
+  } else if(!accept&&co){
+    await pushNotification(
+      m.company_user_id,'invite',
+      '❌ '+u.name+' declined your founder invitation for '+co.name+'.',
+      co.ticker
+    );
+    toast('Invitation declined');
   }
-  toast(accept?'You joined the company!':'Invitation declined');render();
+  render();
 }
 
 // ── Founder share allocations ─────────────────────────────
@@ -654,39 +658,27 @@ function isCompanyMember(co,userId){
   return co.owner_id===userId||(co.founders||[]).some(f=>f.userId===userId);
 }
 
-async function inviteCoFounder(ticker,studentId){
-  const co=getCo(ticker);if(!co)return;
+async function sendFounderInvite(ownerId,studentId){
+  // ownerId = co.owner_id (the company user's id)
+  const co=DB.companies.find(c=>c.owner_id===ownerId);
+  if(!co)return toast('Company not found');
   const student=getUser(studentId);if(!student)return toast('Student not found');
-  const members=getCompanyMembers(co);
-  if(members.length>=3)return toast('Maximum 3 founders per company');
-  if(isCompanyMember(co,studentId))return toast(student.name+' is already a member');
-  if(DB.companyInvites.find(i=>i.ticker===ticker&&i.invited_user_id===studentId&&i.status==='pending'))
-    return toast('Invite already pending for '+student.name);
+  const existing=DB.companyMembers.filter(m=>m.company_user_id===ownerId&&m.status!=='declined');
+  if(existing.length>=3)return toast('Maximum 3 founders reached');
+  if(existing.find(m=>m.student_id===studentId))return toast(student.name+' is already invited or a member');
   const u=cu();
-  const rec={id:uid(),ticker,company_name:co.name,invited_user_id:studentId,invited_by:u.name,status:'pending',ts:ts()};
-  await sb.post('jex_company_invites',rec);
-  DB.companyInvites.push(rec);
-  await pushNotification(studentId,'invite','🤝 '+u.name+' invited you to join '+co.name+' ('+ticker+') as a co-founder',ticker);
-  toast('Invite sent to '+student.name);render();
+  const rec={id:uid(),company_user_id:ownerId,student_id:studentId,role:'founder',status:'pending',invited_by:u.name,ts:ts()};
+  await sb.post('jex_company_members',rec);
+  DB.companyMembers.push(rec);
+  await pushNotification(
+    studentId,'invite',
+    '🤝 '+u.name+' has invited you to join '+co.name+' as a founder. Go to My Stock → Founders to accept or decline.',
+    co.ticker
+  );
+  toast('Invitation sent to '+student.name);render();
 }
 
-async function respondToInvite(inviteId,accept){
-  const inv=DB.companyInvites.find(i=>i.id===inviteId);if(!inv)return;
-  const u=cu();const co=getCo(inv.ticker);if(!co)return;
-  await sb.patch('jex_company_invites','id=eq.'+inviteId,{status:accept?'accepted':'declined'});
-  inv.status=accept?'accepted':'declined';
-  if(accept){
-    const members=getCompanyMembers(co);
-    if(members.length>=3){toast('Company is now full');return;}
-    const newFounders=[...(co.founders||[]),{userId:u.id,name:u.name}];
-    await updateCo(inv.ticker,{founders:newFounders});
-    await logActivity('co_founder',u.name+' joined '+co.name+' as co-founder',{ticker:inv.ticker,userId:u.id,userName:u.name});
-    toast('You joined '+co.name+' as co-founder!');
-  } else {
-    toast('Invite declined');
-  }
-  render();
-}
+// (respondToInvite uses jex_company_members)
 
 async function requestFounderShares(ticker,sharesReq){
   const co=getCo(ticker);if(!co)return;
