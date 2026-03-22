@@ -433,6 +433,20 @@ function isLeadFounder(companyUserId,userId){return companyUserId===userId;}
 function inviteCoFounderForm(companyUserId){
   inviteCoFounder(companyUserId,document.getElementById('invite-student')?.value);
 }
+function doInviteFounder(companyUserId){
+  const studentId=document.getElementById('invite-student')?.value;
+  if(!studentId)return toast('Select a student first');
+  inviteCoFounder(companyUserId,studentId);
+}
+function doRequestFounderAlloc(){
+  const ticker=document.getElementById('alloc-ticker')?.value;
+  const studentId=document.getElementById('alloc-student')?.value;
+  const shares=document.getElementById('alloc-shares')?.value;
+  const reason=document.getElementById('alloc-reason')?.value;
+  if(!ticker)return toast('Select a share class');
+  if(!studentId)return toast('Select a founder');
+  requestFounderAllocation(ticker,studentId,shares,reason);
+}
 async function inviteCoFounder(companyUserId,studentId){
   if(!studentId)return toast('Select a student to invite');
   const existing=DB.companyMembers.filter(m=>m.company_user_id===companyUserId&&m.status!=='declined');
@@ -460,16 +474,19 @@ async function respondToInvite(memberId,accept){
 
 // ── Founder share allocations ─────────────────────────────
 async function requestFounderAllocation(ticker,studentId,shares,reason){
-  const co=getCo(ticker);if(!co)return;
-  const student=getUser(studentId);if(!student)return;
+  const stock=getCo(ticker);if(!stock)return toast('Share class not found');
+  const student=getUser(studentId);if(!student)return toast('Student not found');
   shares=parseInt(shares);if(isNaN(shares)||shares<=0)return toast('Enter valid share count');
-  if(shares>co.shares_avail)return toast('Only '+co.shares_avail+' shares available');
-  if(DB.founderAllocations.find(a=>a.ticker===ticker&&a.student_id===studentId&&a.status==='pending'))return toast('Already a pending allocation for this student');
-  const rec={id:uid(),ticker,company_name:co.name,student_id:studentId,student_name:student.name,shares,status:'pending',reason:(reason||'').trim(),ts:ts()};
+  if(shares>stock.shares_avail)return toast('Only '+stock.shares_avail+' shares available in '+ticker);
+  if(DB.founderAllocations.find(a=>a.ticker===ticker&&a.student_id===studentId&&a.status==='pending'))
+    return toast('Already a pending allocation for '+student.name+' in '+ticker);
+  const meta=getClassMeta(ticker);
+  const classLabel=meta?'Class '+meta.class:'base';
+  const rec={id:uid(),ticker,company_name:stock.name,student_id:studentId,student_name:student.name,shares,status:'pending',reason:(reason||'').trim(),ts:ts()};
   await sb.post('jex_founder_allocations',rec);
   DB.founderAllocations.push(rec);
-  await logActivity('founder_alloc',co.name+' requested '+shares+' founder shares for '+student.name,{ticker});
-  toast('Allocation request submitted for '+student.name);render();
+  await logActivity('founder_alloc',stock.name+' requested '+shares+' '+classLabel+' founder shares for '+student.name,{ticker});
+  toast('Allocation request submitted: '+shares+'×'+ticker+' for '+student.name);render();
 }
 async function reviewFounderAllocation(id,approve){
   const a=DB.founderAllocations.find(x=>x.id===id);if(!a)return;
@@ -2370,24 +2387,24 @@ function renderStockOverview(co,u){
   return html;
 }
 function renderFoundersTab(co,u){
-  const isLead=co.owner_id===u.id;
   const members=DB.companyMembers.filter(m=>m.company_user_id===co.owner_id);
   const accepted=members.filter(m=>m.status==='accepted');
   const pending=members.filter(m=>m.status==='pending');
-  const students=DB.users.filter(u2=>u2.role==='student'&&u2.status==='approved'&&u2.id!==co.owner_id&&!members.find(m=>m.student_id===u2.id&&m.status!=='declined'));
-  const leadUser=getUser(co.owner_id);
-
-  // Pending invitations for current user (co-founder inbox)
+  const allTickers=getCompanyTickers(co.ticker);
+  const availableStudents=DB.users.filter(u2=>
+    u2.role==='student'&&u2.status==='approved'&&
+    !members.find(m=>m.student_id===u2.id&&m.status!=='declined')
+  );
   const myInvites=DB.companyMembers.filter(m=>m.student_id===u.id&&m.status==='pending');
-
   let html='';
 
-  // My invitations inbox
   if(myInvites.length){
     html+='<div class="card"><div class="section-title">Pending invitations</div>';
     myInvites.forEach(inv=>{
       const invCo=DB.companies.find(c=>c.owner_id===inv.company_user_id);
-      html+='<div class="app-row"><div class="app-info"><div class="app-name">Co-founder invitation from <strong>'+(invCo?.name||'Unknown company')+'</strong></div><div class="app-meta">Invited by '+inv.invited_by+' · '+inv.ts+'</div></div>'
+      html+='<div class="app-row"><div class="app-info">'
+        +'<div class="app-name">Founder invitation: <strong>'+(invCo?.name||'Unknown')+'</strong></div>'
+        +'<div class="app-meta">Invited by '+inv.invited_by+' · '+inv.ts+'</div></div>'
         +'<div class="btn-row">'
         +'<button class="btn btn-success btn-sm" onclick="respondToInvite(&quot;'+inv.id+'&quot;,true)">Accept</button>'
         +'<button class="btn btn-danger btn-sm" onclick="respondToInvite(&quot;'+inv.id+'&quot;,false)">Decline</button>'
@@ -2396,51 +2413,63 @@ function renderFoundersTab(co,u){
     html+='</div>';
   }
 
-  // Current team
-  html+='<div class="card"><div class="section-title">Company team</div>';
-  html+='<div class="app-row"><div class="app-info"><div class="app-name">'+( leadUser?.name||'Lead founder')+' <span class="badge b-chair">Lead founder</span></div><div class="app-meta">'+(leadUser?.email||'')+'</div></div></div>';
+  html+='<div class="card"><div class="section-title">Founders ('+accepted.length+'/3 accepted)</div>';
+  if(!accepted.length&&!pending.length){
+    html+='<div class="ibox ibox-amber">No founders yet. Use the form below to invite students as founders.</div>';
+  }
   accepted.forEach(m=>{
     const s=getUser(m.student_id);
-    html+='<div class="app-row"><div class="app-info"><div class="app-name">'+(s?.name||'?')+' <span class="badge b-blue">Co-founder</span></div><div class="app-meta">'+(s?.email||'')+'</div></div></div>';
+    html+='<div class="app-row"><div class="app-info">'
+      +'<div class="app-name">'+(s?.name||'?')+' <span class="badge b-blue">Founder</span></div>'
+      +'<div class="app-meta">'+(s?.email||'')+'</div></div></div>';
   });
   pending.forEach(m=>{
     const s=getUser(m.student_id);
-    html+='<div class="app-row"><div class="app-info"><div class="app-name">'+(s?.name||'?')+' <span class="badge b-gray">Invited</span></div><div class="app-meta">Waiting for response</div></div></div>';
+    html+='<div class="app-row"><div class="app-info">'
+      +'<div class="app-name">'+(s?.name||'?')+' <span class="badge b-gray">Invite pending</span></div>'
+      +'<div class="app-meta">Waiting for response</div></div></div>';
   });
-  if(!accepted.length&&!pending.length)html+='<div style="font-size:13px;color:var(--text2);padding:8px 0">No co-founders yet.</div>';
   html+='</div>';
 
-  // Invite form (lead only, max 2 co-founders)
-  if(isLead&&(accepted.length+pending.length)<2){
-    html+='<div class="card"><div class="section-title">Invite a co-founder</div>'
-      +'<div class="ibox ibox-blue">Up to 2 co-founders can join your company. They can post news, financials, votes, and manage dividends.</div>'
+  if(accepted.length+pending.length<3){
+    html+='<div class="card"><div class="section-title">Invite a founder</div>'
+      +'<div class="ibox ibox-blue">Up to 3 students can be founders. They can post news, financials, votes, and request share allocations.</div>'
       +'<div class="row" style="align-items:flex-end">'
       +'<div class="frow" style="flex:1"><label class="flabel">Select student</label>'
-      +'<select id="invite-student"><option value="">— Select —</option>'+students.map(s=>'<option value="'+s.id+'">'+s.name+'</option>').join('')+'</select></div>'
-      +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="inviteCoFounderForm(&quot;'+co.owner_id+'&quot;)">Invite</button></div>'
+      +'<select id="invite-student"><option value="">— Select a student —</option>'
+      +availableStudents.map(s=>'<option value="'+s.id+'">'+s.name+'</option>').join('')
+      +'</select></div>'
+      +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="doInviteFounder(&quot;'+co.owner_id+'&quot;)">Send invite</button></div>'
       +'</div></div>';
+  } else {
+    html+='<div class="ibox ibox-teal">Maximum 3 founders reached.</div>';
   }
 
-  // Founder share allocations
   if(co.status==='listed'){
-    const myAllocs=DB.founderAllocations.filter(a=>a.ticker===co.ticker);
-    const owners=getCompanyOwners(co.owner_id);
+    const allAllocs=DB.founderAllocations.filter(a=>allTickers.includes(a.ticker));
     html+='<div class="card"><div class="section-title">Founder share allocations</div>'
-      +'<div class="ibox ibox-teal">Request shares from the company pool for any founder. Each request is approved by the Chairman individually.</div>'
-      +'<div class="row" style="align-items:flex-end">'
-      +'<div class="frow" style="flex:1"><label class="flabel">Founder</label>'
-      +'<select id="alloc-student"><option value="">— Select founder —</option>'+owners.map(id=>{const s=getUser(id);return s?'<option value="'+id+'">'+s.name+'</option>':''}).join('')+'</select></div>'
-      +'<div class="frow" style="flex:1"><label class="flabel">Shares</label><input type="number" id="alloc-shares" placeholder="e.g. 100" min="1" max="'+co.shares_avail+'"></div>'
-      +'<div class="frow" style="flex:1"><label class="flabel">Reason</label><input type="text" id="alloc-reason" placeholder="Founder compensation"></div>'
-      +'<div style="padding-bottom:12px"><button class="btn btn-warning" onclick="requestFounderAllocForm(&quot;'+co.ticker+'&quot;)">Request</button></div>'
+      +'<div class="ibox ibox-teal">Request shares from any share class for any founder. Each request requires Chairman approval.</div>'
+      +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:12px">'
+      +'<div><label class="flabel">Founder</label>'
+      +'<select id="alloc-student"><option value="">— Select —</option>'
+      +accepted.map(m=>{const s=getUser(m.student_id);return s?'<option value="'+s.id+'">'+s.name+'</option>':''}).join('')
+      +'</select></div>'
+      +'<div><label class="flabel">Share class</label>'
+      +'<select id="alloc-ticker"><option value="">— Select —</option>'
+      +allTickers.map(t=>{const stock=getCo(t);if(!stock)return'';const meta=getClassMeta(t);return'<option value="'+t+'">'+t+' '+(meta?'(Class '+meta.class+')':'(base)')+' — '+stock.shares_avail+' avail.</option>';}).join('')
+      +'</select></div>'
+      +'<div><label class="flabel">Shares</label><input type="number" id="alloc-shares" placeholder="e.g. 100" min="1"></div>'
+      +'<div><label class="flabel">Reason</label><input type="text" id="alloc-reason" placeholder="Founder compensation"></div>'
       +'</div>'
-      +(myAllocs.length?'<hr class="divider"><table><thead><tr><th>Student</th><th>Shares</th><th>Reason</th><th>Status</th></tr></thead><tbody>'
-        +myAllocs.map(a=>'<tr><td>'+a.student_name+'</td><td>'+a.shares.toLocaleString()+'</td><td style="font-size:12px;color:var(--text2)">'+( a.reason||'—')+'</td><td><span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-amber')+'">'+a.status+'</span></td></tr>').join('')
+      +'<button class="btn btn-warning" onclick="doRequestFounderAlloc()">Submit allocation request</button>'
+      +(allAllocs.length?'<hr class="divider"><table><thead><tr><th>Founder</th><th>Ticker</th><th>Shares</th><th>Reason</th><th>Status</th></tr></thead><tbody>'
+        +allAllocs.map(a=>'<tr><td>'+a.student_name+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+a.ticker+'</span></td><td>'+a.shares.toLocaleString()+'</td><td style="font-size:12px;color:var(--text2)">'+(a.reason||'—')+'</td><td><span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-amber')+'">'+a.status+'</span></td></tr>').join('')
         +'</tbody></table>':'')
       +'</div>';
   }
   return html;
 }
+
 function requestFounderAllocForm(ticker){
   requestFounderAllocation(ticker,get('alloc-student')?.value,get('alloc-shares')?.value,get('alloc-reason')?.value);
 }
@@ -2819,6 +2848,20 @@ function renderAdminBalances(students){
   <div id="csv-panel" style="display:none;margin-top:12px"><div class="ibox ibox-teal">Click inside the box, press <strong>Ctrl+A</strong> (Cmd+A) to select all, then <strong>Ctrl+C</strong> to copy.</div><textarea readonly onclick="this.select()" style="width:100%;font-family:var(--mono);font-size:12px;padding:10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);resize:vertical;min-height:160px;line-height:1.5">${csv}</textarea></div>`;
 }
 function downloadCSV(){const csv=window._jexCSV;if(!csv)return;const blob=new Blob([csv],{type:'text/csv'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='jex_balances.csv';a.click();URL.revokeObjectURL(url);}
+async function adjustCompanyCash(uid2){
+  const u=getUser(uid2);if(!u)return;
+  const op=document.getElementById('co-cash-op-'+uid2)?.value;
+  const amt=parseFloat(document.getElementById('co-cash-amt-'+uid2)?.value);
+  if(isNaN(amt)||amt<0)return toast('Enter a valid amount');
+  let newCash;
+  if(op==='add')newCash=Math.round((u.cash+amt)*100)/100;
+  else if(op==='subtract')newCash=Math.max(0,Math.round((u.cash-amt)*100)/100);
+  else if(op==='set')newCash=Math.round(amt*100)/100;
+  else return toast('Select an operation');
+  await updateUser(uid2,{cash:newCash});
+  await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-u.cash});
+  toast(u.name+"'s balance updated to "+fmt(newCash));render();
+}
 async function adjustCash(uid2){
   const u=getUser(uid2);if(!u)return;
   const op=get('cash-op-'+uid2)?.value;
@@ -2855,10 +2898,25 @@ function renderAdminUsers(students,companies){
       </div>
     </div>`).join(''):`<div class="empty">No students yet</div>`}
   </div>
-  ${companies.length?`<div class="card"><div class="section-title">Companies</div>
-    <table><thead><tr><th>Name</th><th>Email</th><th class="r">Cash</th><th>IPO status</th><th></th></tr></thead>
-    <tbody>${companies.map(u=>`<tr><td style="font-weight:500">${u.name}</td><td style="color:var(--text2)">${u.email}</td><td class="r" style="font-family:var(--mono)">${fmt(u.cash)}</td><td><span class="badge ${u.app_status==='approved'?'b-green':u.app_status==='pending'?'b-amber':'b-gray'}">${u.app_status||'—'}</span></td><td><button class="btn btn-sm btn-danger" onclick="removeCompany('${u.id}')">Remove</button></td></tr>`).join('')}
-    </tbody></table></div>`:''}`;
+  ${companies.length?`<div class="card"><div class="section-title">Companies — balance adjustment</div>
+    <div class="ibox ibox-blue">Adjust a company account&#39;s cash balance directly.</div>
+    ${companies.map(u=>`<div class="app-row">
+      <div class="app-info">
+        <div class="app-name">${u.name}</div>
+        <div class="app-meta">${u.email} &nbsp;|&nbsp; Cash: <strong style="font-family:var(--mono);color:var(--green)">${fmt(u.cash)}</strong></div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <select id="co-cash-op-${u.id}" style="width:90px;font-size:12px;padding:5px 8px">
+          <option value="add">Add</option>
+          <option value="subtract">Subtract</option>
+          <option value="set">Set to</option>
+        </select>
+        <input type="number" id="co-cash-amt-${u.id}" placeholder="Amount" min="0" step="0.01" style="width:100px;font-size:12px;padding:5px 8px">
+        <button class="btn btn-sm btn-primary" onclick="adjustCompanyCash('${u.id}')">Apply</button>
+        <button class="btn btn-sm btn-danger" onclick="removeCompany('${u.id}')">Remove</button>
+      </div>
+    </div>`).join('')}
+  </div>`:''}`;
 }
 function renderAdminClasses(){
   const pending=DB.classApps.filter(a=>a.status==='pending');
