@@ -672,7 +672,7 @@ async function sendFounderInvite(ownerId,studentId){
   DB.companyMembers.push(rec);
   await pushNotification(
     studentId,'invite',
-    '🤝 '+u.name+' has invited you to join '+co.name+' as a founder. Go to My Stock → Founders to accept or decline.',
+    '🤝 '+u.name+' has invited you to join '+co.name+' as a founder. Accept or decline below.',
     co.ticker
   );
   toast('Invitation sent to '+student.name);render();
@@ -3081,19 +3081,33 @@ function renderAdminListed(){
 // ═══════════════════════════════════════════════
 function renderNotifications(){
   const notifs=myNotifications();
+  const u=cu();
   const unread=notifs.filter(n=>!n.read).length;
-  const typeIcon={dividend:'💰',news:'📰',earnings:'📊',vote:'🗳️',vote_closed:'🗳️',ipo:'🏢',session:'🟢',limit_fill:'⚡',after_hours:'⏰',halt:'⚠️',resume:'✅'};
-  const typeBg={dividend:'b-teal',news:'b-amber',earnings:'b-blue',vote:'b-purple',ipo:'b-green',session:'b-gray',limit_fill:'b-teal',after_hours:'b-amber',halt:'b-red',resume:'b-green'};
+  const typeIcon={dividend:'💰',news:'📰',earnings:'📊',vote:'🗳️',vote_closed:'🗳️',ipo:'🏢',session:'🟢',limit_fill:'⚡',after_hours:'⏰',halt:'⚠️',resume:'✅',invite:'🤝',founder_alloc:'🎁',price_adj:'📊',earnings_surprise:'📈'};
   return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
     Notifications ${unread?`<span class="badge b-red">${unread} unread</span>`:''}
     ${notifs.length?`<button class="btn btn-sm" onclick="markAllRead()">Mark all read</button>`:''}
   </div>
-  ${notifs.length?notifs.map(n=>`<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);opacity:${n.read?'0.55':'1'}">
-    <div style="font-size:18px;min-width:28px">${typeIcon[n.type]||'•'}</div>
-    <div style="flex:1"><div style="font-size:13px${n.read?'':';font-weight:500'}">${n.message}</div>
-    <div style="font-size:11px;color:var(--text3);margin-top:2px">${n.ts||''}</div></div>
-    ${n.ticker&&n.ticker!==null?`<span class="badge b-gray" style="font-family:var(--mono);font-size:10px">${n.ticker}</span>`:''}
-  </div>`).join(''):`<div class="empty">No notifications yet</div>`}
+  ${notifs.length?notifs.map(n=>{
+    // Find pending invite that matches this notification
+    const pendingInvite=n.type==='invite'?DB.companyMembers.find(m=>
+      m.student_id===u.id&&
+      m.status==='pending'&&
+      DB.companies.find(c=>c.owner_id===m.company_user_id)
+    ):null;
+    return `<div style="display:flex;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid var(--border);opacity:${n.read?'0.55':'1'}">
+      <div style="font-size:18px;min-width:28px">${typeIcon[n.type]||'•'}</div>
+      <div style="flex:1">
+        <div style="font-size:13px${n.read?'':';font-weight:500'}">${n.message}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px">${n.ts||''}</div>
+        ${pendingInvite?`<div style="display:flex;gap:6px;margin-top:8px">
+          <button class="btn btn-sm btn-success" onclick="respondToInvite('${pendingInvite.id}',true)">✓ Accept</button>
+          <button class="btn btn-sm btn-danger" onclick="respondToInvite('${pendingInvite.id}',false)">✕ Decline</button>
+        </div>`:''}
+      </div>
+      ${n.ticker&&n.ticker!==null?`<span class="badge b-gray" style="font-family:var(--mono);font-size:10px">${n.ticker}</span>`:''}
+    </div>`;
+  }).join(''):`<div class="empty">No notifications yet</div>`}
   </div>`;
 }
 function renderStudentOrders(){
