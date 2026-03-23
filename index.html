@@ -779,6 +779,39 @@ async function checkPriceAlerts(){
 }
 
 // ═══════════════════════════════════════════════
+// NOTIFICATIONS
+// ═══════════════════════════════════════════════
+async function pushNotification(userId,type,message,ticker=null){
+  try{
+    const rec={id:uid(),user_id:userId,type,message,ticker,read:false,ts:ts()};
+    await sb.post('jex_notifications',rec);
+    if(userId===UI.userId)DB.notifications.unshift(rec);
+  }catch(e){console.warn('Notification failed:',e);}
+}
+async function pushNotificationToHolders(ticker,type,message){
+  const holders=DB.users.filter(u=>u.role==='student'&&(holdings(u)[ticker]||0)>0);
+  for(const u of holders)await pushNotification(u.id,type,message,ticker);
+}
+async function pushNotificationToAll(type,message){
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+  for(const u of students)await pushNotification(u.id,type,message);
+}
+async function markAllRead(){
+  const unread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read);
+  for(const n of unread){
+    await sb.patch('jex_notifications','id=eq.'+n.id,{read:true});
+    n.read=true;
+  }
+  render();
+}
+function myUnreadCount(){
+  return DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
+}
+function myNotifications(){
+  return DB.notifications.filter(n=>n.user_id===UI.userId).slice(0,50);
+}
+
+// ═══════════════════════════════════════════════
 // CIRCUIT BREAKERS
 // ═══════════════════════════════════════════════
 async function checkCircuitBreakers(){
