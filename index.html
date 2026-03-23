@@ -981,6 +981,7 @@ async function placeLimitOrder(ticker,side,qty,limitPrice){
   const u=cu(),co=getCo(ticker);if(!u||!co)return;
   // Block if ticker is halted (regardless of session state)
   if(ticker&&isHalted(ticker))return toast(ticker+' trading is currently halted.');
+  if(!canTradeTicker(ticker,u?.id))return toast(ticker+' is restricted — you are not on the whitelist.');
   qty=parseInt(qty);limitPrice=parseFloat(limitPrice);
   if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(isNaN(limitPrice)||limitPrice<=0)return toast('Enter a valid limit price');
@@ -1185,6 +1186,7 @@ async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
 
 async function placeBuy(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(!canTradeTicker(ticker,u.id))return toast(ticker+' is restricted — you are not on the whitelist.');
   if(u.role==='company'&&co.owner_id===u.id)return toast("You can't buy your own company's stock — use Buyback instead.");
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
@@ -1199,6 +1201,7 @@ async function placeBuy(ticker,qty){
 }
 async function placeSell(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(!canTradeTicker(ticker,u.id))return toast(ticker+' is restricted — you are not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const held=(holdings(u)[ticker])||0;if(held<qty)return toast('You only hold '+held+' shares');
   const np=impactPrice(co,qty,'sell');
@@ -1211,6 +1214,7 @@ async function placeSell(ticker,qty){
 }
 async function placeShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(!canTradeTicker(ticker,u.id))return toast(ticker+' is restricted — you are not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const price=co.price,coll=Math.round(price*qty*1.5*100)/100;
   if(u.cash<coll)return toast('Need '+fmt(coll)+' collateral');
@@ -1225,6 +1229,7 @@ async function placeShort(ticker,qty){
 }
 async function coverShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(!canTradeTicker(ticker,u.id))return toast(ticker+' is restricted — you are not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const sh={...shorts(u)},short=sh[ticker];if(!short||short.qty<qty)return toast('You only have '+(short?.qty||0)+' shorted');
   const cp=impactPrice(co,qty,'buy'),pnl=Math.round((short.avgPrice-cp)*qty*100)/100;
@@ -1482,10 +1487,14 @@ function getCompanyTickers(parentTicker){
   return [...base,...classes];
 }
 // Helper: can this user see/trade this ticker?
+// Restricted tickers are always visible but only whitelisted users can trade them
 function canAccessTicker(ticker,userId){
+  return true; // all tickers visible to all users
+}
+function canTradeTicker(ticker,userId){
   const meta=getClassMeta(ticker);
-  if(!meta)return true; // base class, always accessible
-  if(!meta.restricted)return true;
+  if(!meta)return true; // base class, always tradeable
+  if(!meta.restricted)return true; // unrestricted class
   if(!userId)return false;
   return (meta.whitelist||[]).includes(userId);
 }
@@ -1755,6 +1764,8 @@ function renderCompanyPage(parentTicker){
   const short=(shorts(u))[parentTicker];
   const chg=priceChg(co);
   const canTrade=u.role==='student'||u.role==='company';
+  const canTradeThis=canTrade&&canTradeTicker(parentTicker,u.id);
+  const isRestricted=!!(getClassMeta(parentTicker)?.restricted);
   const isOwner=co.owner_id===u.id;
   const isCoFounder=DB.companyMembers.some(m=>m.company_user_id===co.owner_id&&m.student_id===u.id&&m.status==='accepted');
   const isMember=isOwner||isCoFounder;
@@ -1785,7 +1796,8 @@ function renderCompanyPage(parentTicker){
         <span style="font-size:22px;font-weight:500">${co.name}</span>
         ${baseMeta?'<span class="badge b-amber">Class '+baseMeta.class+' · '+baseMeta.votes_per_share+'v</span>':''}
         <span class="badge b-gray" style="font-family:var(--mono)">${parentTicker}</span>
-        ${canTrade?'<button class="wstar '+(isWatched(parentTicker)?'on':'')+'" onclick="toggleWatchAndRefresh(&quot;'+parentTicker+'&quot;)">'+(isWatched(parentTicker)?'★':'☆')+'</button>':''}
+        ${canTradeThis?'<button class="wstar '+(isWatched(parentTicker)?'on':'')+'" onclick="toggleWatchAndRefresh(&quot;'+parentTicker+'&quot;)">'+(isWatched(parentTicker)?'★':'☆')+'</button>':''}
+        ${isRestricted?'<span class="badge b-red">🔒 Restricted</span>':''}
       </div>
       <div style="font-size:13px;color:var(--text2);margin-top:2px">${co.description||''}</div>
     </div>
@@ -1863,6 +1875,7 @@ function renderCompanyPage(parentTicker){
 
   else if(tab==='trade'){
     if(!canTrade){html+='<div class="card"><div class="empty">Sign in as a student or company to trade.</div></div>';}
+    else if(!canTradeThis){html+='<div class="card"><div class="ibox ibox-red">🔒 <strong>'+parentTicker+' is a restricted share class.</strong> You are not on the whitelist and cannot trade this stock. Contact the company to request access.</div></div>';}
     else{
       const mode=UI.panelMode;
       const book=getOrderBook(parentTicker);
@@ -2002,6 +2015,8 @@ function renderCompanyPage(parentTicker){
   }
 
   else if(tab==='alerts'&&(u.role==='student'||u.role==='company')){
+    if(!canTradeThis){html+='<div class="card"><div class="ibox ibox-red">🔒 Alerts are only available to whitelisted users for restricted share classes.</div></div>';}
+    else{
     const myAlerts=DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&!a.triggered);
     const triggeredAlerts=DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&a.triggered);
     html+='<div class="card"><div class="section-title">Set a price alert</div>'
@@ -2015,6 +2030,7 @@ function renderCompanyPage(parentTicker){
           +'<button class="btn btn-sm btn-danger" onclick="deletePriceAlert(&quot;'+a.id+'&quot;)">Remove</button></div>').join(''):'')
       +(triggeredAlerts.length?'<hr class="divider"><div style="font-size:12px;color:var(--text2)">'+triggeredAlerts.length+' triggered alert'+(triggeredAlerts.length!==1?'s':'')+' (historical)</div>':'')
       +'</div>';
+    }
   }
 
   else if(tab==='dividends'){
@@ -2040,13 +2056,13 @@ function renderCompanyPage(parentTicker){
   return html;
 }
 
-function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)).map(c=>{const chg=priceChg(c),w=isWatched(c.ticker),halted=isHalted(c.ticker);return `<div class="ticker-item ${UI.panelTicker===c.ticker?'active-t':''} ${w?'watched':''} ${halted?'halted-ticker':''}" onclick="openCompanyPage('${c.ticker}')" style="${c.brand_color?'border-color:'+c.brand_color+'30':''}">
+function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.companies.filter(c=>c.status==='listed').map(c=>{const chg=priceChg(c),w=isWatched(c.ticker),halted=isHalted(c.ticker),canTrade=canTradeTicker(c.ticker,u?.id),meta=getClassMeta(c.ticker),isRestricted=!!(meta&&meta.restricted);return `<div class="ticker-item ${UI.panelTicker===c.ticker?'active-t':''} ${w?'watched':''} ${halted?'halted-ticker':''}" onclick="openCompanyPage('${c.ticker}')" style="${c.brand_color?'border-color:'+c.brand_color+'30':''}${isRestricted&&!canTrade?';opacity:0.5':''}">
   ${c.logo?`<img src="${c.logo}" style="width:24px;height:24px;object-fit:cover;border-radius:4px;margin-bottom:3px">`:``}
-  <div class="tsym">${c.ticker}${w?' ★':''}${halted?' ⚠️':''}</div><div class="tprice" style="${halted?'color:var(--red)':''}">${fmt(c.price)}</div><div class="tchg ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</div></div>`;}).join('')}</div>`;}
+  <div class="tsym">${c.ticker}${w?' ★':''}${halted?' ⚠️':''}${isRestricted?' 🔒':''}</div><div class="tprice" style="${halted?'color:var(--red)':''}">${fmt(c.price)}</div><div class="tchg ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</div></div>`;}).join('')}</div>`;}
 function renderMarket(){
   const u=cu();
   const searchQ=(document.getElementById('market-search')?.value||'').toLowerCase();
-  const listed=DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)
+  const listed=DB.companies.filter(c=>c.status==='listed'
     &&(!searchQ||(c.name.toLowerCase().includes(searchQ)||c.ticker.toLowerCase().includes(searchQ))));
   const recentNews=DB.news.slice(0,5);
   return `${renderTickerBar()}
@@ -2056,9 +2072,10 @@ function renderMarket(){
     </div>
       <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${(u.role==='student'||u.role==='company')?'<th>Watch</th><th></th>':''}</tr></thead>
       <tbody>${listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
+    const canTrade=canTradeTicker(c.ticker,u?.id);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
-    const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
-    return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
+    const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">'+(canTrade?'🔓 Restricted':'🔒 Restricted')+'</span>':'';
+    return`<tr style="${meta&&meta.restricted&&!canTrade?'opacity:0.7':''}"><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td>${canTrade?`<button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button>`:'—'}</td><td><button class="btn btn-sm ${canTrade?'btn-primary':''}" onclick="openCompanyPage('${c.ticker}')" ${!canTrade?'style="opacity:0.5;cursor:default"':''}>View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
     </div>
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
       +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
@@ -2112,6 +2129,7 @@ function closeCompanyPage(){
 function openPanel(ticker){
   UI.panelTicker=ticker;const c=getCo(ticker),u=cu();
   const held=(holdings(u)[ticker])||0,chg=priceChg(c),short=(shorts(u))[ticker];
+  const canTradeThis=canTradeTicker(ticker,u?.id);
   destroyCharts();
   document.getElementById('market-content').innerHTML=renderMarket();
   const panel=get('trade-panel');if(!panel)return;
@@ -2128,7 +2146,7 @@ function openPanel(ticker){
     <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2);margin-bottom:10px"><span>${(c.price_history||[]).length} pts | Open: ${fmt((c.price_history||[])[0]?.p||c.price)}</span><span class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</span></div>
     ${fin?`<div style="font-size:12px;padding:8px 10px;background:var(--bg3);border-radius:var(--radius);margin-bottom:10px">Latest: Rev <strong>${fmt(fin.revenue)}</strong> | Profit <strong>${fmt(fin.profit)}</strong> — <span style="color:var(--text2)">${fin.summary}</span></div>`:''}
     <hr class="divider">
-    <div class="ot-toggle">
+    ${canTradeThis?`<div class="ot-toggle">
       <button class="ot-btn ${mode==='buy'?'ot-buy':''}" onclick="UI.panelMode='buy';openPanel('${ticker}')">Buy</button>
       <button class="ot-btn ${mode==='sell'?'ot-sell':''}" onclick="UI.panelMode='sell';openPanel('${ticker}')">Sell</button>
       <button class="ot-btn ${mode==='short'?'ot-short':''}" onclick="UI.panelMode='short';openPanel('${ticker}')">Short</button>
@@ -2155,6 +2173,7 @@ function openPanel(ticker){
     </div>`:`<div class="empty" style="padding:16px">You don't hold any ${ticker}.</div>`}`
     :mode==='short'?`<div class="ibox ibox-purple">Borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="placeShort('${ticker}',get('t-qty')?.value)">Short sell</button></div></div><div id="t-preview">${shortPrev(c,1)}</div>`
     :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="coverShort('${ticker}',get('t-qty')?.value)">Cover short</button></div></div><div id="t-preview">${impactPreview(c,short.qty,'buy')}</div>`:''}
+    `:`<div class="ibox ibox-red">🔒 <strong>${ticker} is a restricted share class.</strong> You are not on the whitelist and cannot trade this stock.</div>`}
   </div>`;
   const qi=get('t-qty');if(qi){qi.addEventListener('input',()=>{const q=parseInt(qi.value)||0,p=get('t-preview');if(!p)return;if(mode==='buy')p.innerHTML=impactPreview(c,q,'buy');else if(mode==='sell')p.innerHTML=impactPreview(c,q,'sell');else if(mode==='short')p.innerHTML=shortPrev(c,q);else if(mode==='cover')p.innerHTML=impactPreview(c,q,'buy');});}
   panel.scrollIntoView({behavior:'smooth',block:'nearest'});setTimeout(()=>buildChart('panel-chart',c),50);
@@ -2700,10 +2719,56 @@ function renderDivTab(co,myDivs){
 }
 function updateDivPrev(ticker){const co=getCo(ticker);if(!co)return;const ps=parseFloat(get('div-ps')?.value)||0,p=get('div-prev');if(!p)return;if(ps<=0){p.innerHTML='';return;}const sh=shareholders(ticker),total=divTotal(ticker,ps),owner=cu(),ok=owner.cash>=total;p.innerHTML=`<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px"><div><div style="color:var(--text2);margin-bottom:2px">Shareholders</div><div style="font-weight:500">${sh.length}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Total</div><div style="color:var(--green);font-family:var(--mono)">${fmt(total)}</div></div><div><div style="color:var(--text2);margin-bottom:2px">After</div><div style="font-family:var(--mono);color:${ok?'var(--text)':'var(--red)'}">${fmt(owner.cash-total)}</div></div></div>${!ok?`<div style="color:var(--red);font-weight:500">Insufficient funds</div>`:''}</div>`;}
 function renderBBTab(co,myBBs){
-  const sold=co.shares-co.shares_avail,owner=cu();
-  return`<div class="card"><div class="section-title">Share buyback</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${sold.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div></div>${sold>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Shares to buy back</label><input type="number" id="bb-qty" placeholder="50" min="1" max="${sold}" oninput="updateBBPrev('${co.ticker}')"></div><div style="padding-bottom:12px"><button class="btn btn-primary" onclick="doBuyback('${co.ticker}',get('bb-qty')?.value)">Buy back</button></div></div><div id="bb-prev"></div>`:'<div class="empty">No shares in circulation.</div>'}</div>${myBBs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${myBBs.map(b=>`<tr><td style="color:var(--text2)">${b.ts}</td><td>${b.qty}</td><td style="font-family:var(--mono)">${fmt(b.price)}</td><td style="font-weight:500;font-family:var(--mono)">${fmt(b.total)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
+  const owner=cu();
+  const allTickers=getCompanyTickers(co.ticker);
+  let html='';
+
+  allTickers.forEach(ticker=>{
+    const stock=getCo(ticker);if(!stock)return;
+    const meta=getClassMeta(ticker);
+    const sold=stock.shares-stock.shares_avail;
+    const classLabel=meta?'Class '+meta.class+' ('+ticker+')':'Base stock ('+ticker+')';
+    const classColor=meta?(meta.class==='A'?'b-blue':meta.class==='B'?'b-amber':'b-teal'):'b-gray';
+
+    html+='<div class="card"><div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">'
+      +'<div class="section-title" style="margin-bottom:0">Buyback — </div>'
+      +'<span class="badge '+classColor+'" style="font-family:var(--mono)">'+ticker+'</span>'
+      +(meta?'<span class="badge b-amber">Class '+meta.class+'</span>':'<span class="badge b-gray">Base</span>')
+      +'</div>';
+
+    html+='<div class="grid3" style="margin-bottom:12px">'
+      +'<div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">'+fmt(owner.cash)+'</div></div>'
+      +'<div class="mcard"><div class="mlabel">In circulation</div><div class="mval">'+sold.toLocaleString()+'</div></div>'
+      +'<div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">'+fmt(stock.price)+'</div></div>'
+      +'</div>';
+    if(sold>0){
+      html+='<div class="row" style="align-items:flex-end">'
+        +'<div class="frow" style="flex:1"><label class="flabel">Shares to buy back</label>'
+        +'<input type="number" id="bb-qty-'+ticker+'" placeholder="50" min="1" max="'+sold+'" oninput="updateBBPrev(&quot;'+ticker+'&quot;)"></div>'
+        +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="doBuyback(&quot;'+ticker+'&quot;,get(&quot;bb-qty-'+ticker+'&quot;)?.value)">Buy back</button></div>'
+        +'</div>'
+        +'<div id="bb-prev-'+ticker+'"></div>';
+    } else {
+      html+='<div class="empty">No shares in circulation.</div>';
+    }
+    html+='</div>';
+  });
+
+  if(myBBs.length){
+    html+='<div class="card"><div class="section-title">Buyback history</div>'
+      +'<table><thead><tr><th>Time</th><th>Ticker</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>'
+      +myBBs.map(b=>'<tr>'
+        +'<td style="color:var(--text2)">'+b.ts+'</td>'
+        +'<td><span class="badge b-gray" style="font-family:var(--mono)">'+b.ticker+'</span></td>'
+        +'<td>'+b.qty+'</td>'
+        +'<td style="font-family:var(--mono)">'+fmt(b.price)+'</td>'
+        +'<td style="font-weight:500;font-family:var(--mono)">'+fmt(b.total)+'</td>'
+        +'</tr>').join('')
+      +'</tbody></table></div>';
+  }
+  return html;
 }
-function updateBBPrev(ticker){const co=getCo(ticker);if(!co)return;const q=parseInt(get('bb-qty')?.value)||0;const p=get('bb-prev');if(p)p.innerHTML=q>0?impactPreview(co,q,'buy'):'';}
+function updateBBPrev(ticker){const co=getCo(ticker);if(!co)return;const q=parseInt(get('bb-qty-'+ticker)?.value)||0;const p=get('bb-prev-'+ticker);if(p)p.innerHTML=q>0?impactPreview(co,q,'buy'):'';}
 function renderDilTab(co){
   // Get all tickers for this company: base + classes
   const allTickers=getCompanyTickers(co.ticker);
