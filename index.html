@@ -357,7 +357,7 @@ async function registerStudent(name,email,pw,secQ,secA){
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';render();
 }
-async function registerCompany(name,email,pw,desc,secQ,secA,cofounders=[]){
+async function registerCompany(name,email,pw,desc,secQ,secA){
   if(!name||name.trim().length<2)return toast('Enter a valid company name');
   if(!validEmail(email))return toast('Enter a valid email');
   if(!pw||pw.length<4)return toast('Password must be at least 4 characters');
@@ -366,7 +366,7 @@ async function registerCompany(name,email,pw,desc,secQ,secA,cofounders=[]){
   if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
-  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),cofounders,ts:ts()};
+  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';render();
 }
