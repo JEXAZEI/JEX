@@ -158,7 +158,7 @@ let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[]
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],nwHistory:[],earningsTargets:[],
   founderShares:[],companyInvites:[],
-  founders:[],founderAllocs:[],priceAdjustments:[],companyMembers:[],founderAllocations:[],
+  founders:[],priceAdjustments:[],companyMembers:[],founderAllocations:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,earnings_surprise_pct:10,session_open_prices:{}}};
 let SHEETS_URL=null;
 let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview'};
@@ -192,7 +192,7 @@ async function loadAll(){
     session:session[0]||DB.session,announcements,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,
     companyMembers,founderAllocations,priceAdjustments,founders,
-    founderAllocs:DB.founderAllocs||[],founderShares:[]};}
+    founderShares:[]};}
 
 // ═══════════════════════════════════════════════
 // HELPERS
@@ -636,40 +636,6 @@ async function removeFounder(ticker,studentId){
   toast('Co-founder removed');render();
 }
 
-async function requestFounderAlloc(ticker,shares,reason){
-  const u=cu();if(!u)return;
-  const co=getCo(ticker);if(!co)return;
-  shares=parseInt(shares);
-  if(isNaN(shares)||shares<=0)return toast('Enter a valid share count');
-  if(!reason||reason.trim().length<5)return toast('Please add a reason');
-  if(shares>co.shares_avail)return toast('Only '+co.shares_avail+' shares available');
-  if(DB.founderAllocs.find(a=>a.company_ticker===ticker&&a.student_id===u.id&&a.status==='pending'))return toast('You already have a pending allocation request');
-  const rec={id:uid(),company_ticker:ticker,company_name:co.name,student_id:u.id,student_name:u.name,shares,reason:reason.trim(),status:'pending',ts:ts()};
-  await sb.post('jex_founder_allocs',rec);DB.founderAllocs.push(rec);
-  toast('Share allocation request submitted — awaiting Chairman approval');render();
-}
-
-async function reviewFounderAlloc(id,approve){
-  const a=DB.founderAllocs.find(x=>x.id===id);if(!a)return;
-  await sb.patch('jex_founder_allocs','id=eq.'+id,{status:approve?'approved':'rejected'});
-  a.status=approve?'approved':'rejected';
-  if(approve){
-    const co=getCo(a.company_ticker);const student=getUser(a.student_id);
-    if(co&&student&&co.shares_avail>=a.shares){
-      // Transfer shares from pool to student
-      const h={...holdings(student)};h[a.company_ticker]=(h[a.company_ticker]||0)+a.shares;
-      await updateUser(a.student_id,{holdings:h});
-      await updateCo(a.company_ticker,{shares_avail:co.shares_avail-a.shares});
-      await logActivity('founder_alloc',a.student_name+' received '+a.shares+' founder shares in '+a.company_name,{ticker:a.company_ticker,userId:a.student_id,userName:a.student_name,amount:a.shares});
-      await pushNotification(a.student_id,'founder','✅ Your founder share allocation of '+a.shares+' shares in '+a.company_name+' was approved!',a.company_ticker);
-      toast(a.student_name+' allocated '+a.shares+' shares in '+a.company_name);
-    } else toast('Could not allocate — insufficient available shares');
-  } else {
-    await pushNotification(a.student_id,'founder','❌ Your founder share allocation request for '+a.company_name+' was rejected.',a.company_ticker);
-    toast('Allocation rejected');
-  }
-  render();
-}
 
 // ═══════════════════════════════════════════════
 // PRICE ADJUSTMENTS (Chairman tool)
@@ -2932,7 +2898,7 @@ function renderAdminBalances(students){
   const csv=[['Rank','Name','Email','Cash','Portfolio','Short P&L','Dividends','Net worth','vs Start'],...rows.map((r,i)=>[i+1,r.name,r.email,r.cash.toFixed(2),r.portfolio.toFixed(2),r.shortPnl.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),(r.nw-(DB.session.starting_cash||10000)).toFixed(2)])].map(r=>r.map(v=>typeof v==='string'&&v.includes(',')? '"'+v+'"':v).join(',')).join('\n');
   window._jexCSV=csv;
   return`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><span style="font-size:12px;color:var(--text2)">Live student balances</span><div style="display:flex;gap:8px"><button class="btn btn-sm" style="background:var(--purple);color:white;border-color:var(--purple)" onclick="generatePDFReport()">📄 Full PDF report</button><button class="btn btn-sm btn-success" onclick="downloadCSV()">Download CSV</button><button class="btn btn-sm btn-primary" onclick="const p=get('csv-panel');p.style.display=p.style.display==='none'?'block':'none'">Show CSV to copy</button></div></div>
-  <div class="grid4" style="margin-bottom:14px"><div class="mcard"><div class="mlabel">Students</div><div class="mval">${rows.length}</div></div><div class="mcard"><div class="mlabel">Avg net worth</div><div class="mval ${rows.length&&rows.reduce((s,r)=>s+r.nw,0)/rows.length>=10000?'green':''}" style="font-family:var(--mono)">${rows.length?fmt(rows.reduce((s,r)=>s+r.nw,0)/rows.length):'—'}</div></div><div class="mcard"><div class="mlabel">Leader</div><div class="mval" style="font-size:15px;margin-top:4px">${rows[0]?.name||'—'}</div></div><div class="mcard"><div class="mlabel">Total dividends paid</div><div class="mval green" style="font-family:var(--mono)">${fmt(rows.reduce((s,r)=>s+r.divs,0))}</div></div></div>
+  <div class="grid4" style="margin-bottom:14px"><div class="mcard"><div class="mlabel">Students</div><div class="mval">${rows.length}</div></div><div class="mcard"><div class="mlabel">Avg net worth</div><div class="mval ${rows.length&&rows.reduce((s,r)=>s+r.nw,0)/rows.length>=(DB.session.starting_cash||10000)?'green':''}" style="font-family:var(--mono)">${rows.length?fmt(rows.reduce((s,r)=>s+r.nw,0)/rows.length):'—'}</div></div><div class="mcard"><div class="mlabel">Leader</div><div class="mval" style="font-size:15px;margin-top:4px">${rows[0]?.name||'—'}</div></div><div class="mcard"><div class="mlabel">Total dividends paid</div><div class="mval green" style="font-family:var(--mono)">${fmt(rows.reduce((s,r)=>s+r.divs,0))}</div></div></div>
   <div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th style="padding-left:14px">Rank</th><th>Student</th><th>Email</th><th class="r">Cash</th><th class="r">Portfolio</th><th class="r">Short P&L</th><th class="r">Dividends</th><th class="r">Net worth</th><th class="r">vs Start</th></tr></thead>
   <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-(DB.session.starting_cash||10000),vc=vs>=0?'price-up':'price-down';return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${i===0?'var(--amber)':i===1?'var(--text2)':i===2?'#993C1D':'var(--text3)'}">#${i+1}</td><td style="font-weight:500">${r.name}</td><td style="color:var(--text2);font-size:12px">${r.email}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r ${r.shortPnl>=0?'price-up':'price-down'}" style="font-family:var(--mono)">${r.shortPnl>=0?'+':''}${fmt(r.shortPnl)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="9"><div class="empty">No approved students yet</div></td></tr>`}
   </tbody></table></div>
@@ -2949,8 +2915,10 @@ async function adjustCompanyCash(uid2){
   else if(op==='subtract')newCash=Math.max(0,Math.round((u.cash-amt)*100)/100);
   else if(op==='set')newCash=Math.round(amt*100)/100;
   else return toast('Select an operation');
+  const prev=u.cash;
   await updateUser(uid2,{cash:newCash});
-  await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-u.cash});
+  await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
+  pushBalances();
   toast(u.name+"'s balance updated to "+fmt(newCash));render();
 }
 async function adjustCash(uid2){
