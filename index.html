@@ -297,6 +297,44 @@ async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_
 function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('Trading session is now open!');});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended.');});}}
 setInterval(()=>{checkSchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
 
+// ── Auto-refresh: pull latest data every 20 seconds ──────
+let _lastRefresh=0;
+async function autoRefresh(){
+  if(!UI.userId)return; // not logged in
+  const now=Date.now();
+  if(now-_lastRefresh<18000)return; // debounce
+  _lastRefresh=now;
+  try{
+    // Only reload lightweight tables that change frequently
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders]=await Promise.all([
+      sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
+      sb.get('jex_session','id=eq.1'),
+      sb.get('jex_companies','order=created_at.asc'),
+      sb.get('jex_trades','order=id.desc&limit=100'),
+      sb.get('jex_limit_orders','order=created_at.asc'),
+    ]);
+    const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
+    DB.notifications=newNotifs;
+    DB.session=newSession[0]||DB.session;
+    DB.companies=newCompanies;
+    // Merge new trades (avoid duplicates)
+    const existingIds=new Set(DB.trades.map(t=>t.id));
+    newTrades.forEach(t=>{if(!existingIds.has(t.id))DB.trades.unshift(t);});
+    DB.limitOrders=newLimitOrders;
+    // Update session timer if needed
+    if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
+    // Re-render topbar + banner silently (just update bell count and session banner)
+    const newUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
+    if(newUnread!==prevUnread||DB.session.status!==document.querySelector('.session-banner')?.className?.includes('s-'+DB.session.status)){
+      // Patch topbar bell count without full re-render
+      const tb=document.querySelector('.user-pill');
+      if(tb)tb.innerHTML=tb.innerHTML; // trigger re-paint
+      render(); // full render only if something actually changed
+    }
+  }catch(e){/* silent fail */}
+}
+setInterval(autoRefresh,20000);
+
 // ═══════════════════════════════════════════════
 // AUTH & REGISTRATION
 // ═══════════════════════════════════════════════
@@ -1403,8 +1441,35 @@ async function delistCompany(ticker,silent=false){
 const chartIntervals={};
 function setChartInterval(canvasId,interval,co){
   chartIntervals[canvasId]=interval;
+  // Destroy existing chart
   if(charts[canvasId])try{charts[canvasId].destroy();delete charts[canvasId];}catch(e){}
-  buildChart(canvasId,co);
+  // If it's a company page chart, re-render the whole tab so interval buttons update
+  if(canvasId.startsWith('cp-chart-')||canvasId.startsWith('co-chart-')||canvasId==='panel-chart'){
+    destroyCharts();
+    if(UI.companyPage){
+      document.querySelector('.content').innerHTML=renderCompanyPage(UI.companyPage);
+    } else if(UI.navTab==='mystock'){
+      render();
+    } else {
+      // panel chart — just rebuild in place
+      setTimeout(()=>buildChart(canvasId,co),30);
+      return;
+    }
+    // Rebuild all charts for this page after DOM update
+    setTimeout(()=>{
+      if(UI.companyPage){
+        getCompanyTickers(UI.companyPage).forEach(t=>{
+          const s=getCo(t);if(s)buildChart('cp-chart-'+t,s);
+        });
+      } else {
+        getCompanyTickers(co.ticker||'').forEach(t=>{
+          const s=getCo(t);if(s)buildChart('co-chart-'+t,s);
+        });
+      }
+    },80);
+  } else {
+    setTimeout(()=>buildChart(canvasId,co),30);
+  }
 }
 function filterByInterval(pts,interval){
   if(!pts||!pts.length)return pts;
@@ -3100,11 +3165,12 @@ function renderNotifications(){
   </div>
   ${notifs.length?notifs.map(n=>{
     // Find pending invite that matches this notification
-    const pendingInvite=n.type==='invite'?DB.companyMembers.find(m=>
-      m.student_id===u.id&&
-      m.status==='pending'&&
-      DB.companies.find(c=>c.owner_id===m.company_user_id)
-    ):null;
+    // Only show buttons for actual pending invites (not accepted/declined/company confirmations)
+    const pendingInvite=n.type==='invite'&&n.message.includes('invited you')?
+      DB.companyMembers.find(m=>
+        m.student_id===u.id&&
+        m.status==='pending'
+      ):null;
     return `<div style="display:flex;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid var(--border);opacity:${n.read?'0.55':'1'}">
       <div style="font-size:18px;min-width:28px">${typeIcon[n.type]||'•'}</div>
       <div style="flex:1">
