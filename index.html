@@ -350,20 +350,10 @@ async function quickRefresh(){
     ]);
     DB.companies=newCompanies;
     DB.session=newSession[0]||DB.session;
-    const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
-    const newUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
-    const bannerHasStatus=document.querySelector('.session-banner')?.classList.contains('s-'+DB.session.status);
-    if(newUnread!==prevUnread||!bannerHasStatus)render();
-    else{
-      // Silently update price displays without full re-render
-      document.querySelectorAll('[data-ticker-price]').forEach(el=>{
-        const c=getCo(el.dataset.tickerPrice);
-        if(c)el.textContent=fmt(c.price);
-      });
-    }
-  }catch(e){/* silent fail */}
+    render();
+  }catch(e){console.warn('quickRefresh failed:',e);}
 }
 
 // ═══════════════════════════════════════════════
@@ -453,7 +443,7 @@ async function logActivity(type,description,extras={}){
 // ── Announcements ───────────────────────────────────────
 async function postAnnouncement(title,body,level){
   if(!title||title.trim().length<3)return toast('Enter a title');
-  const u=cu();
+  const u=cu();if(!u)return;
   const rec={id:uid(),title:title.trim(),body:(body||'').trim(),level:level||'info',author_id:u.id,author_name:u.name,ts:ts()};
   await sb.post('jex_announcements',rec);
   DB.announcements.unshift(rec);
@@ -773,7 +763,7 @@ async function checkCircuitBreakers(){
       toast('⚡ Circuit breaker triggered on '+co.ticker+' — trading halted');
       // Auto-resume after 5 minutes
       setTimeout(async()=>{
-        if(isHalted(co.ticker))await resumeStock(co.ticker);
+        if(isHalted(co.ticker))await resumeStock(co.ticker,true);
       },5*60*1000);
     }
   }
@@ -912,26 +902,26 @@ async function resetExchange(){
     console.error('Reset error:',err);
   }
 }
-async function haltStock(ticker,reason){
+async function haltStock(ticker,reason,silent=false){
   if(!ticker)return toast('Select a ticker');
   if(!reason||reason.trim().length<3)return toast('Enter a reason');
-  if(isHalted(ticker))return toast(ticker+' is already halted');
+  if(isHalted(ticker))return;
   const u=cu();
-  const rec={ticker,reason:reason.trim(),halted_by:u.name,ts:ts()};
+  const rec={ticker,reason:reason.trim(),halted_by:u?u.name:'system',ts:ts()};
   await sb.post('jex_halts',rec);
   DB.halts.push(rec);
-  await logActivity('halt',ticker+' trading halted — '+reason.trim(),{ticker,userId:u.id,userName:u.name});
+  await logActivity('halt',ticker+' trading halted — '+reason.trim(),{ticker,userId:u?.id,userName:u?.name||'system'});
   // Notify all students who hold this stock
   await pushNotificationToHolders(ticker,'halt','⚠️ Trading halted on '+ticker+': '+reason.trim());
   await pushNotificationToAll('halt','⚠️ '+ticker+' trading has been halted: '+reason.trim());
-  toast(ticker+' halted');render();
+  if(!silent){toast(ticker+' halted');render();}
 }
-async function resumeStock(ticker){
-  if(!confirm('Resume trading on '+ticker+'?'))return;
+async function resumeStock(ticker,silent=false){
+  if(!silent&&!confirm('Resume trading on '+ticker+'?'))return;
   await sb.del('jex_halts','ticker=eq.'+ticker);
   DB.halts=DB.halts.filter(h=>h.ticker!==ticker);
   const u=cu();
-  await logActivity('resume',ticker+' trading resumed',{ticker,userId:u.id,userName:u.name});
+  await logActivity('resume',ticker+' trading resumed',{ticker,userId:u?.id,userName:u?.name||'system'});
   await pushNotificationToAll('resume','✅ '+ticker+' trading has resumed');
   toast(ticker+' trading resumed');render();
 }
