@@ -157,7 +157,7 @@ const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],nwHistory:[],earningsTargets:[],
-  founderShares:[],companyInvites:[],priceAdjustments:[],
+  founderShares:[],companyInvites:[],
   founders:[],founderAllocs:[],priceAdjustments:[],companyMembers:[],founderAllocations:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,earnings_surprise_pct:10,session_open_prices:{}}};
 let SHEETS_URL=null;
@@ -180,19 +180,18 @@ async function loadAll(){
     sb.get('jex_vote_ballots','order=created_at.asc'),
     sb.get('jex_notifications','order=created_at.desc&limit=100'),
     sb.get('jex_halts','order=created_at.asc'),
-    sb.get('jex_notifications','order=created_at.desc&limit=100'),
-    sb.get('jex_halts','order=created_at.asc'),
     sb.get('jex_price_alerts','order=created_at.asc'),
     sb.get('jex_nw_history','order=created_at.asc'),
     sb.get('jex_earnings_targets','order=created_at.desc'),
     sb.get('jex_company_members','order=created_at.asc'),
-    sb.get('jex_founder_allocations','order=created_at.desc')
+    sb.get('jex_founder_allocations','order=created_at.desc'),
+    sb.get('jex_price_adjustments','order=created_at.desc'),
   ]);
   DB={users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,
     session:session[0]||DB.session,announcements,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,
-    companyMembers,founderAllocations,
-    founders:DB.founders||[],founderAllocs:DB.founderAllocs||[],priceAdjustments:DB.priceAdjustments||[]};
+    companyMembers,founderAllocations,priceAdjustments,
+    founders:DB.founders||[],founderAllocs:DB.founderAllocs||[]};
 }
 
 // ═══════════════════════════════════════════════
@@ -202,11 +201,11 @@ const get=id=>document.getElementById(id);
 const fmt=n=>'$'+Number(n).toFixed(2);
 const fmtChg=n=>(n>=0?'+':'')+Number(n).toFixed(2)+'%';
 const norm=s=>(s||'').trim().toLowerCase();
-const validEmail=e=>e&&e.includes('@')&&e.includes('.');
+const validEmail=e=>e&&/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e);
 const cu=()=>DB.users.find(u=>u.id===UI.userId)||null;
 const getUser=id=>DB.users.find(u=>u.id===id);
 const getCo=t=>DB.companies.find(c=>c.ticker===t);
-const uid=()=>'id_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
+const uid=()=>crypto.randomUUID();
 const ts=()=>new Date().toLocaleTimeString();
 const isoNow=()=>new Date().toISOString(); // full timestamp for price history
 const priceChg=c=>{if(!c.price_history||c.price_history.length<2)return 0;const f=c.price_history[0].p,l=c.price_history[c.price_history.length-1].p;return f?((l-f)/f*100):0;};
@@ -285,7 +284,7 @@ async function pushBalances(){
     portfolio:Math.round(pv(u)*100)/100,
     shortPnl:Math.round(sPnl(u)*100)/100,
     divs:Math.round(divRec(u)*100)/100,
-    nw:nw(u),vsStart:Math.round((nw(u)-10000)*100)/100
+    nw:nw(u),vsStart:Math.round((nw(u)-(DB.session.starting_cash||10000))*100)/100
   })).sort((a,b)=>b.nw-a.nw).map((r,i)=>({...r,rank:i+1}));
   await pushToSheets('balances',{rows});
 }
@@ -332,10 +331,8 @@ async function autoRefresh(){
     if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
     // Re-render topbar + banner silently (just update bell count and session banner)
     const newUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
-    if(newUnread!==prevUnread||DB.session.status!==document.querySelector('.session-banner')?.className?.includes('s-'+DB.session.status)){
-      // Patch topbar bell count without full re-render
-      const tb=document.querySelector('.user-pill');
-      if(tb)tb.innerHTML=tb.innerHTML; // trigger re-paint
+    const bannerHasStatus=document.querySelector('.session-banner')?.classList.contains('s-'+DB.session.status);
+    if(newUnread!==prevUnread||!bannerHasStatus){
       render(); // full render only if something actually changed
     }
   }catch(e){/* silent fail */}
@@ -395,7 +392,7 @@ async function approveReg(id,startCash){
   toast(r.name+' approved with '+fmt(startCash));render();
 }
 async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');render();}
-function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u||u.password!==pw)return toast('Wrong password');UI.userId=uid2;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}render();}
+function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u||u.password!==pw)return toast('Wrong password');UI.userId=uid2;const r=u.role;const coIsListed=r==='company'&&DB.companies.some(c=>c.owner_id===uid2);UI.navTab=isAdmin(u)?'admin':r==='company'?(coIsListed?'mystock':'apply'):'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}render();}
 function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
 async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;if(u.password!==cur)return toast('Current password incorrect');if(!nw2||nw2.length<4)return toast('Min 4 characters');if(nw2!==conf)return toast('Passwords do not match');await sb.patch('jex_users','id=eq.'+uid2,{password:nw2});u.password=nw2;toast('Password changed');render();}
 async function adminResetPw(uid2,pw){if(!pw||pw.length<4)return toast('Min 4 characters');const u=getUser(uid2);if(!u)return;await sb.patch('jex_users','id=eq.'+uid2,{password:pw});u.password=pw;toast(u.name+"'s password reset");render();}
@@ -3515,7 +3512,8 @@ async function boot(){
     const savedId=localStorage.getItem(SESSION_KEY);
     if(savedId&&DB.users.find(u=>u.id===savedId)){
       UI.userId=savedId;const u=DB.users.find(u=>u.id===savedId);
-      UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'apply':'market';
+      const coIsListed=u?.role==='company'&&DB.companies.some(c=>c.owner_id===u.id);
+      UI.navTab=isAdmin(u)?'admin':u?.role==='company'?(coIsListed?'mystock':'apply'):'market';
     if(isAdmin(u))UI.adminTab='dashboard';
     }
     if(DB.session.ends_at&&DB.session.status==='open')sessionTimer=setInterval(tickTimer,500);
