@@ -165,7 +165,7 @@ let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',com
 let charts={},sessionTimer=null;
 
 async function loadAll(){
-  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,priceAdjustments]=await Promise.all([
+  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,priceAdjustments,founderShares]=await Promise.all([
     sb.get('jex_users','order=created_at.asc'),sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_companies','order=created_at.asc'),sb.get('jex_news','order=created_at.desc'),
     sb.get('jex_ipo_applications','order=created_at.asc'),sb.get('jex_dilution_applications','order=created_at.asc'),
@@ -186,11 +186,12 @@ async function loadAll(){
     sb.get('jex_company_members','order=created_at.asc'),
     sb.get('jex_founder_allocations','order=created_at.desc'),
     sb.get('jex_price_adjustments','order=created_at.desc'),
+    sb.get('jex_founder_shares','order=created_at.desc'),
   ]);
   DB={users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,
     session:session[0]||DB.session,announcements,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,
-    companyMembers,founderAllocations,priceAdjustments,
+    companyMembers,founderAllocations,priceAdjustments,founderShares,
     founders:DB.founders||[],founderAllocs:DB.founderAllocs||[]};
 }
 
@@ -380,15 +381,6 @@ async function approveReg(id,startCash){
   await sb.post('jex_users',u);await sb.del('jex_pending','id=eq.'+id);
   DB.users.push(u);DB.pending=DB.pending.filter(x=>x.id!==id);
   await logActivity('registration',r.name+' approved ('+r.role+') with '+fmt(startCash),{userId:r.id,userName:r.name,amount:startCash});
-  // Create co-founder invitations if company specified cofounders
-  if(r.role==='company'&&r.cofounders&&r.cofounders.length){
-    for(const cfName of r.cofounders){
-      const student=DB.users.find(s=>s.role==='student'&&norm(s.name)===norm(cfName));
-      if(student){
-        await pushNotification(student.id,'invite','🤝 '+r.name+' listed you as a co-founder. You will be able to manage this company once their IPO is approved.');
-      }
-    }
-  }
   toast(r.name+' approved with '+fmt(startCash));render();
 }
 async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');render();}
@@ -458,10 +450,6 @@ function getCompanyOwners(companyUserId){
   const accepted=DB.companyMembers.filter(m=>m.company_user_id===companyUserId&&m.status==='accepted').map(m=>m.student_id);
   return [companyUserId,...accepted];
 }
-function canManageCompany(companyUserId,userId){
-  if(companyUserId===userId)return true;
-  return DB.companyMembers.some(m=>m.company_user_id===companyUserId&&m.student_id===userId&&m.status==='accepted');
-}
 function getMyCompany(userId){
   // Find company where user is lead owner or accepted co-founder
   const asLead=DB.companies.find(c=>c.owner_id===userId);
@@ -472,14 +460,14 @@ function getMyCompany(userId){
 }
 function isLeadFounder(companyUserId,userId){return companyUserId===userId;}
 
-function doInviteFounder(companyTicker){
+function doInviteFounder(ownerId){
   const studentId=document.getElementById('invite-student')?.value;
   if(!studentId)return toast('Select a student first');
   const student=getUser(studentId);
-  const co=DB.companies.find(c=>c.owner_id===companyTicker)||getCo(companyTicker);
+  const co=DB.companies.find(c=>c.owner_id===ownerId);
   const coName=co?co.name:'this company';
   if(!confirm('Send a founder invitation to '+( student?.name||studentId)+' for '+coName+'?'))return;
-  sendFounderInvite(companyTicker,studentId);
+  sendFounderInvite(ownerId,studentId);
 }
 function doRequestFounderAlloc(){
   const ticker=document.getElementById('alloc-ticker')?.value;
@@ -687,24 +675,6 @@ async function reviewFounderAlloc(id,approve){
 // ═══════════════════════════════════════════════
 // PRICE ADJUSTMENTS (Chairman tool)
 // ═══════════════════════════════════════════════
-async function applyPriceAdjustment(ticker,pct,reason){
-  if(!ticker)return toast('Select a ticker');
-  pct=parseFloat(pct);
-  if(isNaN(pct)||pct===0)return toast('Enter a non-zero percentage');
-  if(Math.abs(pct)>100)return toast('Max adjustment is ±100%');
-  const co=getCo(ticker);if(!co)return;
-  const oldPrice=co.price;
-  const newPrice=Math.max(0.01,Math.round(oldPrice*(1+pct/100)*100)/100);
-  const newHistory=[...co.price_history,{p:newPrice,t:(pct>0?'+':'')+pct+'% adj'}];
-  await updateCo(ticker,{price:newPrice,price_history:newHistory});
-  const rec={id:uid(),ticker,company_name:co.name,pct,old_price:oldPrice,new_price:newPrice,reason:(reason||'').trim(),applied_by:cu()?.name,ts:ts()};
-  await sb.post('jex_price_adjustments',rec);DB.priceAdjustments.unshift(rec);
-  await logActivity('price_adj',(pct>0?'+':'')+pct+'% price adjustment on '+ticker+' by '+cu()?.name+(reason?' — '+reason:''),{ticker,amount:newPrice-oldPrice});
-  await pushNotificationToHolders(ticker,'price_adj',(pct>0?'📈':'📉')+' '+co.name+' price '+(pct>0?'boosted':'reduced')+' by '+Math.abs(pct)+'%'+(reason?' — '+reason.trim():''));
-  await pushNotificationToAll('price_adj',(pct>0?'📈':'📉')+' '+co.name+' ('+ticker+'): '+(pct>0?'+':'')+pct+'%'+(reason?' — '+reason.trim():''));
-  toast(ticker+' price '+(pct>0?'boosted':'reduced')+' by '+Math.abs(pct)+'% → '+fmt(newPrice));render();
-}
-
 // ═══════════════════════════════════════════════
 // CO-FOUNDER SYSTEM
 // ═══════════════════════════════════════════════
@@ -842,8 +812,8 @@ async function checkPriceAlerts(){
     if(!triggered)continue;
     await sb.patch('jex_price_alerts','id=eq.'+a.id,{triggered:true});
     a.triggered=true;
-    await pushNotification(a.user_id,'price_alert','🎯 Price alert: '+a.ticker+' is '+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0)+' (now '+fmt(co.price)+')',a.ticker);
-    toast('Price alert triggered: '+a.ticker+' '+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0));
+    await pushNotification(a.user_id,'price_alert','🎯 Price alert: '+a.ticker+' is '+a.direction+' '+fmt(a.target_price)+' (now '+fmt(co.price)+')',a.ticker);
+    toast('Price alert triggered: '+a.ticker+' '+a.direction+' '+fmt(a.target_price));
   }
 }
 
@@ -978,6 +948,12 @@ async function resetExchange(){
       sb.del('jex_share_classes','id=neq.x'),
       sb.del('jex_class_applications','id=neq.x'),
       sb.del('jex_pending','id=neq.x'),
+      sb.del('jex_price_adjustments','id=neq.x'),
+      sb.del('jex_founder_allocations','id=neq.x'),
+      sb.del('jex_company_members','id=neq.x'),
+      sb.del('jex_nw_history','id=neq.x'),
+      sb.del('jex_price_alerts','id=neq.x'),
+      sb.del('jex_founder_shares','id=neq.x'),
     ]);
     // Delete votes (cascades to ballots)
     await sb.del('jex_votes','id=neq.x');
@@ -1003,7 +979,7 @@ async function haltStock(ticker,reason){
   if(!reason||reason.trim().length<3)return toast('Enter a reason');
   if(isHalted(ticker))return toast(ticker+' is already halted');
   const u=cu();
-  const rec={ticker,reason:reason.trim(),halted_by:u.name,ts:ts()};
+  const rec={id:uid(),ticker,reason:reason.trim(),halted_by:u.name,ts:ts()};
   await sb.post('jex_halts',rec);
   DB.halts.push(rec);
   await logActivity('halt',ticker+' trading halted — '+reason.trim(),{ticker,userId:u.id,userName:u.name});
@@ -1037,8 +1013,9 @@ function getOrderBook(ticker){
 
 // ── Place a limit order ───────────────────────────────────
 async function placeLimitOrder(ticker,side,qty,limitPrice){
-  if(!requireOpen())return;
   const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  // Block if ticker is halted (regardless of session state)
+  if(ticker&&isHalted(ticker))return toast(ticker+' trading is currently halted.');
   qty=parseInt(qty);limitPrice=parseFloat(limitPrice);
   if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(isNaN(limitPrice)||limitPrice<=0)return toast('Enter a valid limit price');
@@ -1811,7 +1788,7 @@ function renderNewsFeed(){
 // ═══════════════════════════════════════════════
 function renderCompanyPage(parentTicker){
   const co=getCo(parentTicker);if(!co)return'<div class="empty">Company not found</div>';
-  const u=cu();
+  const u=cu();if(!u)return'<div class="empty">Not logged in</div>';
   const allTickers=getCompanyTickers(parentTicker);
   const held=(holdings(u)[parentTicker])||0;
   const short=(shorts(u))[parentTicker];
@@ -2073,7 +2050,7 @@ function renderCompanyPage(parentTicker){
       +'<div class="frow" style="flex:1"><label class="flabel">Target price ($)</label><input type="number" id="alert-price" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
       +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="addAlertForm(&quot;'+parentTicker+'&quot;)">Set alert</button></div></div>'
       +(myAlerts.length?'<hr class="divider"><div style="font-size:12px;font-weight:500;margin-bottom:8px">Active alerts</div>'
-        +myAlerts.map(a=>'<div class="app-row" style="margin-bottom:6px"><div class="app-info"><div class="app-name">'+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0)+'</div></div>'
+        +myAlerts.map(a=>'<div class="app-row" style="margin-bottom:6px"><div class="app-info"><div class="app-name">'+a.direction+' '+fmt(a.target_price)+'</div></div>'
           +'<button class="btn btn-sm btn-danger" onclick="deletePriceAlert(&quot;'+a.id+'&quot;)">Remove</button></div>').join(''):'')
       +(triggeredAlerts.length?'<hr class="divider"><div style="font-size:12px;color:var(--text2)">'+triggeredAlerts.length+' triggered alert'+(triggeredAlerts.length!==1?'s':'')+' (historical)</div>':'')
       +'</div>';
@@ -2229,7 +2206,7 @@ function closePanel(){UI.panelTicker=null;destroyCharts();document.getElementByI
 function renderLeaderboard(){
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nw(u),_divs:divRec(u)})).sort((a,b)=>b._nw-a._nw);
   const rc=i=>i===0?'r-gold':i===1?'r-silver':i===2?'r-bronze':'';
-  return `<div class="card"><div class="section-title">Net worth leaderboard</div>${students.length?students.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${u.name}</div><div style="font-size:12px;color:var(--text2)">Cash ${fmt(u.cash)} | Portfolio ${fmt(pv(u))} | Dividends ${fmt(u._divs)}</div></div><div class="lb-val ${u._nw>=10000?'price-up':'price-down'}">${fmt(u._nw)}</div></div>`).join(''):'<div class="empty">No students yet</div>'}</div>`;
+  return `<div class="card"><div class="section-title">Net worth leaderboard</div>${students.length?students.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${u.name}</div><div style="font-size:12px;color:var(--text2)">Cash ${fmt(u.cash)} | Portfolio ${fmt(pv(u))} | Dividends ${fmt(u._divs)}</div></div><div class="lb-val ${u._nw>=(DB.session.starting_cash||10000)?'price-up':'price-down'}">${fmt(u._nw)}</div></div>`).join(''):'<div class="empty">No students yet</div>'}</div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -2256,7 +2233,7 @@ function renderPortfolio(){
       const val=c.price*q,chg=priceChg(c);
       return '<tr><td><span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></td><td>'+c.name+'</td><td>'+q+'</td><td style="font-family:var(--mono)">'+fmt(c.price)+'</td><td style="font-weight:500;font-family:var(--mono)">'+fmt(val)+'</td><td class="'+(chg>=0?'price-up':'price-down')+'">'+fmtChg(chg)+'</td><td><button class="btn btn-sm" onclick="setTab(&quot;market&quot;);setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Trade</button></td></tr>';
     }).join(''):'<tr><td colspan="7"><div class="empty">No holdings</div></td></tr>';
-    return tabs+`<div class="grid4"><div class="mcard"><div class="mlabel">Cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div><div class="mcard"><div class="mlabel">Portfolio</div><div class="mval" style="font-family:var(--mono)">${fmt(_pv)}</div></div><div class="mcard"><div class="mlabel">Net worth</div><div class="mval ${_nw>=10000?'green':'red'}" style="font-family:var(--mono)">${fmt(_nw)}</div></div><div class="mcard"><div class="mlabel">Dividends received</div><div class="mval green" style="font-family:var(--mono)">${fmt(_divs)}</div></div></div>
+    return tabs+`<div class="grid4"><div class="mcard"><div class="mlabel">Cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div><div class="mcard"><div class="mlabel">Portfolio</div><div class="mval" style="font-family:var(--mono)">${fmt(_pv)}</div></div><div class="mcard"><div class="mlabel">Net worth</div><div class="mval ${_nw>=(DB.session.starting_cash||10000)?'green':'red'}" style="font-family:var(--mono)">${fmt(_nw)}</div></div><div class="mcard"><div class="mlabel">Dividends received</div><div class="mval green" style="font-family:var(--mono)">${fmt(_divs)}</div></div></div>
     <div class="card"><div class="section-title">Holdings</div><table><thead><tr><th>Ticker</th><th>Company</th><th>Shares</th><th>Price</th><th>Value</th><th>P&L</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
@@ -2926,12 +2903,12 @@ function renderAdminDilution(pDil,rDil){
 }
 function renderAdminBalances(students){
   const rows=students.map(u=>({name:u.name,email:u.email,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pv(u)*100)/100,shortPnl:Math.round(sPnl(u)*100)/100,divs:Math.round(divRec(u)*100)/100,nw:nw(u)})).sort((a,b)=>b.nw-a.nw);
-  const csv=[['Rank','Name','Email','Cash','Portfolio','Short P&L','Dividends','Net worth','vs Start'],...rows.map((r,i)=>[i+1,r.name,r.email,r.cash.toFixed(2),r.portfolio.toFixed(2),r.shortPnl.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),(r.nw-10000).toFixed(2)])].map(r=>r.map(v=>typeof v==='string'&&v.includes(',')? '"'+v+'"':v).join(',')).join('\n');
+  const csv=[['Rank','Name','Email','Cash','Portfolio','Short P&L','Dividends','Net worth','vs Start'],...rows.map((r,i)=>[i+1,r.name,r.email,r.cash.toFixed(2),r.portfolio.toFixed(2),r.shortPnl.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),(r.nw-(DB.session.starting_cash||10000)).toFixed(2)])].map(r=>r.map(v=>typeof v==='string'&&v.includes(',')? '"'+v+'"':v).join(',')).join('\n');
   window._jexCSV=csv;
   return`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><span style="font-size:12px;color:var(--text2)">Live student balances</span><div style="display:flex;gap:8px"><button class="btn btn-sm" style="background:var(--purple);color:white;border-color:var(--purple)" onclick="generatePDFReport()">📄 Full PDF report</button><button class="btn btn-sm btn-success" onclick="downloadCSV()">Download CSV</button><button class="btn btn-sm btn-primary" onclick="const p=get('csv-panel');p.style.display=p.style.display==='none'?'block':'none'">Show CSV to copy</button></div></div>
   <div class="grid4" style="margin-bottom:14px"><div class="mcard"><div class="mlabel">Students</div><div class="mval">${rows.length}</div></div><div class="mcard"><div class="mlabel">Avg net worth</div><div class="mval ${rows.length&&rows.reduce((s,r)=>s+r.nw,0)/rows.length>=10000?'green':''}" style="font-family:var(--mono)">${rows.length?fmt(rows.reduce((s,r)=>s+r.nw,0)/rows.length):'—'}</div></div><div class="mcard"><div class="mlabel">Leader</div><div class="mval" style="font-size:15px;margin-top:4px">${rows[0]?.name||'—'}</div></div><div class="mcard"><div class="mlabel">Total dividends paid</div><div class="mval green" style="font-family:var(--mono)">${fmt(rows.reduce((s,r)=>s+r.divs,0))}</div></div></div>
   <div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th style="padding-left:14px">Rank</th><th>Student</th><th>Email</th><th class="r">Cash</th><th class="r">Portfolio</th><th class="r">Short P&L</th><th class="r">Dividends</th><th class="r">Net worth</th><th class="r">vs Start</th></tr></thead>
-  <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-10000,vc=vs>=0?'price-up':'price-down';return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${i===0?'var(--amber)':i===1?'var(--text2)':i===2?'#993C1D':'var(--text3)'}">#${i+1}</td><td style="font-weight:500">${r.name}</td><td style="color:var(--text2);font-size:12px">${r.email}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r ${r.shortPnl>=0?'price-up':'price-down'}" style="font-family:var(--mono)">${r.shortPnl>=0?'+':''}${fmt(r.shortPnl)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="9"><div class="empty">No approved students yet</div></td></tr>`}
+  <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-(DB.session.starting_cash||10000),vc=vs>=0?'price-up':'price-down';return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${i===0?'var(--amber)':i===1?'var(--text2)':i===2?'#993C1D':'var(--text3)'}">#${i+1}</td><td style="font-weight:500">${r.name}</td><td style="color:var(--text2);font-size:12px">${r.email}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r ${r.shortPnl>=0?'price-up':'price-down'}" style="font-family:var(--mono)">${r.shortPnl>=0?'+':''}${fmt(r.shortPnl)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="9"><div class="empty">No approved students yet</div></td></tr>`}
   </tbody></table></div>
   <div id="csv-panel" style="display:none;margin-top:12px"><div class="ibox ibox-teal">Click inside the box, press <strong>Ctrl+A</strong> (Cmd+A) to select all, then <strong>Ctrl+C</strong> to copy.</div><textarea readonly onclick="this.select()" style="width:100%;font-family:var(--mono);font-size:12px;padding:10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);resize:vertical;min-height:160px;line-height:1.5">${csv}</textarea></div>`;
 }
@@ -3057,7 +3034,8 @@ function renderAdminClasses(){
 function renderAdminDashboard(){
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
   const companies=DB.companies.filter(c=>c.status==='listed');
-  const todayTrades=DB.trades.filter(t=>t.ts&&t.ts.includes(new Date().toLocaleDateString()));
+  const todayStr=new Date().toLocaleDateString();
+  const todayTrades=DB.trades.filter(t=>t.ts&&(t.ts.includes(todayStr)||new Date(t.ts).toLocaleDateString()===todayStr));
   const totalMktCap=companies.reduce((s,c)=>s+c.price*c.shares,0);
   const openOrders=DB.limitOrders.filter(o=>o.status==='open').length;
   const halted=DB.halts.length;
@@ -3416,7 +3394,7 @@ function generatePDFReport(){
   </div>
   <h2>Leaderboard</h2>
   <table><thead><tr><th>Rank</th><th>Student</th><th>Cash</th><th>Portfolio</th><th>Short P&L</th><th>Dividends</th><th>Net worth</th><th>vs Start</th></tr></thead><tbody>
-  ${students.map((u,i)=>{const vs=u._nw-10000;return`<tr><td>${i===0?'<span class="badge badge-gold">🥇 #1</span>':'#'+(i+1)}</td><td><strong>${u.name}</strong></td><td>$${u.cash.toFixed(2)}</td><td>$${pv(u).toFixed(2)}</td><td class="${sPnl(u)>=0?'up':'dn'}">$${sPnl(u).toFixed(2)}</td><td>$${u._divs.toFixed(2)}</td><td><strong class="${vs>=0?'up':'dn'}">$${u._nw.toFixed(2)}</strong></td><td class="${vs>=0?'up':'dn'}">${vs>=0?'+':''}$${vs.toFixed(2)}</td></tr>`;}).join('')}
+  ${students.map((u,i)=>{const vs=u._nw-(DB.session.starting_cash||10000);return`<tr><td>${i===0?'<span class="badge badge-gold">🥇 #1</span>':'#'+(i+1)}</td><td><strong>${u.name}</strong></td><td>$${u.cash.toFixed(2)}</td><td>$${pv(u).toFixed(2)}</td><td class="${sPnl(u)>=0?'up':'dn'}">$${sPnl(u).toFixed(2)}</td><td>$${u._divs.toFixed(2)}</td><td><strong class="${vs>=0?'up':'dn'}">$${u._nw.toFixed(2)}</strong></td><td class="${vs>=0?'up':'dn'}">${vs>=0?'+':''}$${vs.toFixed(2)}</td></tr>`;}).join('')}
   </tbody></table>
   <h2>Listed Companies</h2>
   <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Shares</th><th>Avail.</th><th>Market cap</th></tr></thead><tbody>
