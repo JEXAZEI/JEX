@@ -683,7 +683,7 @@ async function sendFounderInvite(ownerId,studentId){
   const existing=DB.companyMembers.filter(m=>m.company_user_id===ownerId&&m.status!=='declined');
   if(existing.length>=3)return toast('Maximum 3 founders reached');
   if(existing.find(m=>m.student_id===studentId))return toast(student.name+' is already invited or a member');
-  const u=cu();
+  const u=cu();if(!u)return;
   const rec={id:uid(),company_user_id:ownerId,student_id:studentId,role:'founder',status:'pending',invited_by:u.name,ts:ts()};
   await sb.post('jex_company_members',rec);
   DB.companyMembers.push(rec);
@@ -781,7 +781,7 @@ async function recordSessionOpenPrices(){
 async function submitEarningsTarget(ticker,targetRev,targetProfit){
   if(!targetRev||!targetProfit)return toast('Enter both targets');
   const co=getCo(ticker);if(!co)return;
-  const u=cu();
+  const u=cu();if(!u)return;
   targetRev=parseFloat(targetRev);targetProfit=parseFloat(targetProfit);
   if(isNaN(targetRev)||isNaN(targetProfit))return toast('Enter valid numbers');
   if(DB.earningsTargets.find(t=>t.ticker===ticker&&t.status==='pending'))return toast('A target is already pending approval');
@@ -1541,7 +1541,7 @@ async function postVote(parentTicker,question,optA,optB,closesAt){
   if(!question||question.trim().length<5)return toast('Enter a question');
   if(!optA||!optB)return toast('Enter both options');
   const co=getCo(parentTicker);if(!co)return;
-  const u=cu();
+  const u=cu();if(!u)return;
   const v={id:uid(),parent_ticker:parentTicker,company_name:co.name,
     question:question.trim(),option_a:optA.trim(),option_b:optB.trim(),
     status:'open',created_by:u.id,ts:ts(),closes_at:closesAt||null};
@@ -2272,7 +2272,7 @@ function renderAppForm(app){
   return`<div class="card"><div class="section-title">IPO application</div><div class="row"><div class="frow" style="flex:1"><label class="flabel">Company name</label><input type="text" id="ipo-name" placeholder="Acme Corp"></div><div class="frow" style="flex:1"><label class="flabel">Ticker (3-4 letters)</label><input type="text" id="ipo-ticker" placeholder="ACM" maxlength="4" style="text-transform:uppercase"></div></div><div class="row"><div class="frow" style="flex:1"><label class="flabel">IPO price ($)</label><input type="number" id="ipo-price" placeholder="25.00" min="0.01" step="0.01"></div><div class="frow" style="flex:1"><label class="flabel">Total shares</label><input type="number" id="ipo-shares" placeholder="1000" min="1"></div></div><div class="frow"><label class="flabel">Description</label><textarea id="ipo-desc" rows="2" placeholder="Describe your business..."></textarea></div><button class="btn btn-primary" onclick="submitIPOForm()">Submit</button></div>`;
 }
 function renderMyStock(){
-  const u=cu();
+  const u=cu();if(!u)return'';
   // Lead founder or co-founder
   const co=getMyCompany(u.id);
   const isLead=co&&co.owner_id===u.id;
@@ -2658,7 +2658,7 @@ function renderCompanyNewsTab(co,myNews){
 
 // Also render the company News tab from nav (non-mystock view)
 function renderNewsPage(){
-  const u=cu();
+  const u=cu();if(!u)return'';
   const co=DB.companies.find(c=>c.owner_id===u.id);
   if(!co)return`<div class="card"><div class="empty">You need a listed company to post news.<br><br><button class="btn btn-primary" onclick="setTab('apply')">Apply for IPO</button></div></div>`;
   const myNews=DB.news.filter(n=>n.ticker===co.ticker);
@@ -3206,7 +3206,7 @@ function renderNotifications(){
   </div>`;
 }
 function renderStudentOrders(){
-  const u=cu();
+  const u=cu();if(!u)return'';
   const myOrders=DB.limitOrders.filter(o=>o.user_id===u.id).reverse();
   const open=myOrders.filter(o=>o.status==='open');
   const afterHours=myOrders.filter(o=>o.status==='after_hours');
@@ -3265,7 +3265,7 @@ function renderNWChart(u){
   </div></div>`;
 }
 function renderTradingHistory(){
-  const u=cu();
+  const u=cu();if(!u)return'';
   const myTrades=DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id);
   if(!myTrades.length)return`<div class="card"><div class="empty">No trades yet</div></div>`;
   // Group by ticker
@@ -3358,6 +3358,7 @@ function generatePDFReport(){
   const totalTrades=DB.trades.length;
   const totalDivsPaid=DB.dividends.reduce((s,d)=>s+d.total,0);
   const w=window.open('','_blank');
+  if(!w){toast('Pop-up blocked — please allow pop-ups for this page');return;}
   w.document.write(`<!DOCTYPE html><html><head><title>JEX Exchange Report</title>
   <style>
     body{font-family:Arial,sans-serif;font-size:12px;color:#111;max-width:900px;margin:0 auto;padding:20px}
@@ -3417,6 +3418,7 @@ function generatePDFReport(){
 // ═══════════════════════════════════════════════
 function getPageContent(){
   const t=UI.navTab,u=cu();
+  if(!u)return '';
   if(t==='market'){
     if(UI.companyPage)return renderCompanyPage(UI.companyPage);
     return`<div id="market-content">${renderMarket()}</div>`;
