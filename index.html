@@ -452,13 +452,23 @@ function doRequestFounderAlloc(){
 async function respondToInvite(memberId,accept){
   if(!confirm(accept?'Accept this founder invitation?':'Decline this founder invitation?'))return;
   const m=DB.companyMembers.find(x=>x.id===memberId);if(!m)return;
+
+  // Update jex_company_members status
   await sb.patch('jex_company_members','id=eq.'+memberId,{status:accept?'accepted':'declined'});
   m.status=accept?'accepted':'declined';
+
   const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
   const u=cu();
+
   if(accept&&co){
+    // Also persist to the founders array on the company record so it survives reloads
+    const currentFounders=co.founders||[];
+    if(!currentFounders.find(f=>f.userId===u.id)){
+      const newFounders=[...currentFounders,{userId:u.id,name:u.name}];
+      await sb.patch('jex_companies','owner_id=eq.'+m.company_user_id,{founders:newFounders});
+      co.founders=newFounders;
+    }
     await logActivity('cofound',u.name+' joined '+co.name+' as a founder',{ticker:co.ticker,userId:u.id,userName:u.name});
-    // Notify the company account
     await pushNotification(
       m.company_user_id,'invite',
       '✅ '+u.name+' accepted your founder invitation and has joined '+co.name+'!',
