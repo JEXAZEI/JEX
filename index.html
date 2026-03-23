@@ -828,8 +828,8 @@ async function checkPriceAlerts(){
     if(!triggered)continue;
     await sb.patch('jex_price_alerts','id=eq.'+a.id,{triggered:true});
     a.triggered=true;
-    await pushNotification(a.user_id,'price_alert','🎯 Price alert: '+a.ticker+' is '+a.direction+' '+fmt(a.target_price)+' (now '+fmt(co.price)+')',a.ticker);
-    toast('Price alert triggered: '+a.ticker+' '+a.direction+' '+fmt(a.target_price));
+    await pushNotification(a.user_id,'price_alert','🎯 Price alert: '+a.ticker+' is '+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0)+' (now '+fmt(co.price)+')',a.ticker);
+    toast('Price alert triggered: '+a.ticker+' '+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0));
   }
 }
 
@@ -2059,7 +2059,7 @@ function renderCompanyPage(parentTicker){
       +'<div class="frow" style="flex:1"><label class="flabel">Target price ($)</label><input type="number" id="alert-price" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
       +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="addAlertForm(&quot;'+parentTicker+'&quot;)">Set alert</button></div></div>'
       +(myAlerts.length?'<hr class="divider"><div style="font-size:12px;font-weight:500;margin-bottom:8px">Active alerts</div>'
-        +myAlerts.map(a=>'<div class="app-row" style="margin-bottom:6px"><div class="app-info"><div class="app-name">'+a.direction+' '+fmt(a.target_price)+'</div></div>'
+        +myAlerts.map(a=>'<div class="app-row" style="margin-bottom:6px"><div class="app-info"><div class="app-name">'+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0)+'</div></div>'
           +'<button class="btn btn-sm btn-danger" onclick="deletePriceAlert(&quot;'+a.id+'&quot;)">Remove</button></div>').join(''):'')
       +(triggeredAlerts.length?'<hr class="divider"><div style="font-size:12px;color:var(--text2)">'+triggeredAlerts.length+' triggered alert'+(triggeredAlerts.length!==1?'s':'')+' (historical)</div>':'')
       +'</div>';
@@ -2814,7 +2814,7 @@ function renderAdmin(){
   // President can only see: session, balances, passwords
   const presidentTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
   const sectreTabs=[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
-  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['earnings','Earnings targets'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log']];
+  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['earnings','Earnings targets'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log']];
   const tabs=chair?chairmanTabs:isPresident(u)?presidentTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
 
@@ -2830,6 +2830,7 @@ function renderAdmin(){
   :UI.adminTab==='balances'?renderAdminBalances(students)
   :UI.adminTab==='users'?renderAdminUsers(students,companies)
   :UI.adminTab==='dashboard'?renderAdminDashboard()
+  :UI.adminTab==='founder_allocs'?renderAdminFounderAllocs()
   :UI.adminTab==='earnings'?renderAdminEarnings()
   :UI.adminTab==='news'?renderAdminNews()
   :UI.adminTab==='announcements'?renderAdminAnnouncements()
@@ -3081,6 +3082,33 @@ function renderAdminDashboard(){
   </div>`;
 }
 
+function renderAdminFounderAllocs(){
+  const pending=DB.founderAllocations.filter(a=>a.status==='pending');
+  const reviewed=DB.founderAllocations.filter(a=>a.status!=='pending');
+  return '<div class="card"><div class="section-title">Pending founder share allocations '
+    +(pending.length?'<span class="badge b-amber" style="margin-left:4px">'+pending.length+'</span>':'')+'</div>'
+    +(pending.length?pending.map(a=>'<div class="app-row"><div class="app-info">'
+      +'<div class="app-name">'+a.student_name+' <span class="badge b-blue">student</span></div>'
+      +'<div class="app-meta"><strong>'+a.shares.toLocaleString()+'</strong> shares of <span style="font-family:var(--mono)">'+a.ticker+'</span> ('+a.company_name+')'+(a.reason?' — '+a.reason:'')+'</div>'
+      +'<div class="app-meta">'+a.ts+'</div>'
+      +'</div><div class="btn-row">'
+      +'<button class="btn btn-success btn-sm" onclick="reviewFounderAllocation(&quot;'+a.id+'&quot;,true)">Approve</button>'
+      +'<button class="btn btn-danger btn-sm" onclick="reviewFounderAllocation(&quot;'+a.id+'&quot;,false)">Reject</button>'
+      +'</div></div>').join('')
+    :'<div class="empty">No pending founder share requests</div>')
+    +'</div>'
+    +(reviewed.length?'<div class="card"><div class="section-title">History</div>'
+      +'<table><thead><tr><th>Student</th><th>Ticker</th><th>Shares</th><th>Reason</th><th>Status</th><th>Time</th></tr></thead><tbody>'
+      +reviewed.map(a=>'<tr>'
+        +'<td>'+a.student_name+'</td>'
+        +'<td><span class="badge b-gray" style="font-family:var(--mono)">'+a.ticker+'</span></td>'
+        +'<td>'+a.shares.toLocaleString()+'</td>'
+        +'<td style="font-size:12px;color:var(--text2)">'+(a.reason||'—')+'</td>'
+        +'<td><span class="badge '+(a.status==='approved'?'b-green':'b-red')+'">'+a.status+'</span></td>'
+        +'<td style="font-size:12px;color:var(--text2)">'+a.ts+'</td>'
+        +'</tr>').join('')
+      +'</tbody></table></div>':'');
+}
 function renderAdminEarnings(){
   const pending=DB.earningsTargets.filter(t=>t.status==='pending');
   const approved=DB.earningsTargets.filter(t=>t.status==='approved');
