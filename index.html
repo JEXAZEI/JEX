@@ -293,8 +293,8 @@ async function setSession(status){const label=status==='open'?'Session open':sta
   render();}
 async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);setTimeout(quickRefresh,500);render();}
 function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
-async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
-async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();}
+async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');setTimeout(quickRefresh,500);}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');setTimeout(quickRefresh,500);}render();}
+async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');setTimeout(quickRefresh,500);render();}
 function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('Trading session is now open!');});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended.');});}}
 setInterval(()=>{checkSchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
 
@@ -397,9 +397,9 @@ async function approveReg(id,startCash){
   await sb.post('jex_users',u);await sb.del('jex_pending','id=eq.'+id);
   DB.users.push(u);DB.pending=DB.pending.filter(x=>x.id!==id);
   await logActivity('registration',r.name+' approved ('+r.role+') with '+fmt(startCash),{userId:r.id,userName:r.name,amount:startCash});
-  toast(r.name+' approved with '+fmt(startCash));render();
+  toast(r.name+' approved with '+fmt(startCash));setTimeout(quickRefresh,500);render();
 }
-async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');render();}
+async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');setTimeout(quickRefresh,500);render();}
 function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u||u.password!==pw)return toast('Wrong password');UI.userId=uid2;const r=u.role;const coIsListed=r==='company'&&DB.companies.some(c=>c.owner_id===uid2);UI.navTab=isAdmin(u)?'admin':r==='company'?(coIsListed?'mystock':'apply'):'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}render();}
 function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
 async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;if(u.password!==cur)return toast('Current password incorrect');if(!nw2||nw2.length<4)return toast('Min 4 characters');if(nw2!==conf)return toast('Passwords do not match');await sb.patch('jex_users','id=eq.'+uid2,{password:nw2});u.password=nw2;toast('Password changed');render();}
@@ -448,13 +448,13 @@ async function postAnnouncement(title,body,level){
   await sb.post('jex_announcements',rec);
   DB.announcements.unshift(rec);
   await logActivity('announcement','Announcement posted: '+title.trim(),{userId:u.id,userName:u.name});
-  toast('Announcement posted');render();
+  toast('Announcement posted');setTimeout(quickRefresh,500);render();
 }
 async function deleteAnnouncement(id){
   if(!confirm('Delete this announcement?'))return;
   await sb.del('jex_announcements','id=eq.'+id);
   DB.announcements=DB.announcements.filter(a=>a.id!==id);
-  toast('Announcement deleted');render();
+  toast('Announcement deleted');setTimeout(quickRefresh,500);render();
 }
 
 // ── Limit orders ────────────────────────────────────────
@@ -504,7 +504,7 @@ async function respondToInvite(memberId,accept){
   m.status=accept?'accepted':'declined';
 
   const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
-  const u=cu();
+  const u=cu();if(!u)return;
 
   if(accept&&co){
     // jex_company_members is already patched above — that's the source of truth
@@ -575,6 +575,7 @@ async function reviewFounderAllocation(id,approve){
     await pushNotification(a.student_id,'founder_alloc','❌ Founder share request for '+a.company_name+' was rejected.');
     toast('Allocation rejected');
   }
+  setTimeout(quickRefresh,500);
   render();
 }
 
@@ -587,7 +588,7 @@ async function adjustStockPrice(ticker,pct,reason){
   if(isNaN(pct)||pct===0)return toast('Enter a non-zero percentage');
   if(Math.abs(pct)>100)return toast('Max adjustment is ±100%');
   const co=getCo(ticker);if(!co)return;
-  const u=cu();
+  const u=cu();if(!u)return;
   const oldPrice=co.price;
   const newPrice=Math.max(0.01,Math.round(oldPrice*(1+pct/100)*100)/100);
   const label=pct>=0?'Boost +'+pct+'%':'Drop '+pct+'%';
@@ -794,7 +795,7 @@ async function reviewEarningsTarget(id,approve){
   const t=DB.earningsTargets.find(x=>x.id===id);if(!t)return;
   await sb.patch('jex_earnings_targets','id=eq.'+id,{status:approve?'approved':'rejected'});
   t.status=approve?'approved':'rejected';
-  toast('Earnings target '+(approve?'approved':'rejected'));render();
+  toast('Earnings target '+(approve?'approved':'rejected'));setTimeout(quickRefresh,500);render();
 }
 async function applyEarningsSurprise(ticker,actualRev,actualProfit){
   const target=DB.earningsTargets.find(t=>t.ticker===ticker&&t.status==='approved');
@@ -914,7 +915,7 @@ async function haltStock(ticker,reason,silent=false){
   // Notify all students who hold this stock
   await pushNotificationToHolders(ticker,'halt','⚠️ Trading halted on '+ticker+': '+reason.trim());
   await pushNotificationToAll('halt','⚠️ '+ticker+' trading has been halted: '+reason.trim());
-  if(!silent){toast(ticker+' halted');render();}
+  if(!silent){toast(ticker+' halted');setTimeout(quickRefresh,500);render();}
 }
 async function resumeStock(ticker,silent=false){
   if(!silent&&!confirm('Resume trading on '+ticker+'?'))return;
@@ -923,7 +924,7 @@ async function resumeStock(ticker,silent=false){
   const u=cu();
   await logActivity('resume',ticker+' trading resumed',{ticker,userId:u?.id,userName:u?.name||'system'});
   await pushNotificationToAll('resume','✅ '+ticker+' trading has resumed');
-  toast(ticker+' trading resumed');render();
+  toast(ticker+' trading resumed');setTimeout(quickRefresh,500);render();
 }
 
 // ═══════════════════════════════════════════════
@@ -1216,7 +1217,7 @@ async function doBuyback(ticker,qty){
   await updateCo(ticker,{price,shares_avail:co.shares_avail+qty,shares:co.shares-qty,price_history:[...co.price_history,{p:price,t:'Buyback'}]});
   const bb={id:uid(),ticker,company_name:co.name,qty,price,total:cost,ts:ts()};
   await sb.post('jex_buybacks',bb);DB.buybacks.push(bb);
-  toast('Bought back '+qty+' shares @ '+fmt(price));render();
+  toast('Bought back '+qty+' shares @ '+fmt(price));setTimeout(quickRefresh,1000);render();
 }
 async function issueDividend(ticker,perShare,note){
   const co=getCo(ticker),owner=cu();if(!co||!owner)return;
@@ -1274,6 +1275,7 @@ async function reviewIPO(id,approve){
     await pushNotification(app.user_id,'ipo','❌ Your IPO application for '+app.name+' was rejected.');
     toast('IPO application rejected');
   }
+  setTimeout(quickRefresh,500);
   render();
 }
 async function submitDilution(ticker,newShares,reason){
@@ -1292,6 +1294,7 @@ async function reviewDilution(id,approve){
   app.status=approve?'approved':'rejected';
   if(approve){const co=getCo(app.ticker);if(!co)return;const old=co.shares,ns=co.shares+app.new_shares,np=Math.max(0.01,Math.round(co.price*(old/ns)*100)/100);await updateCo(app.ticker,{shares:ns,shares_avail:co.shares_avail+app.new_shares,price:np,price_history:[...co.price_history,{p:np,t:'Dilution'}]});toast(app.company_name+': +'+app.new_shares+' shares');}
   else toast('Dilution rejected');
+  setTimeout(quickRefresh,500);
   render();
 }
 async function postFinancials(ticker,rev,profit,summary){
@@ -1309,7 +1312,7 @@ async function removeUser(uid2){
   await sb.del('jex_users','id=eq.'+uid2);
   DB.users=DB.users.filter(x=>x.id!==uid2);
   DB.dividends.forEach(d=>{d.payouts=(d.payouts||[]).filter(p=>p.userId!==uid2);});
-  toast(u.name+' removed');render();
+  toast(u.name+' removed');setTimeout(quickRefresh,500);render();
 }
 async function removeCompany(uid2){
   const u=getUser(uid2);if(!u)return;
@@ -1320,7 +1323,7 @@ async function removeCompany(uid2){
   DB.users=DB.users.filter(x=>x.id!==uid2);
   DB.ipoApps=DB.ipoApps.filter(a=>a.user_id!==uid2);
   DB.dilApps=DB.dilApps.filter(d=>d.user_id!==uid2);
-  toast(u.name+' removed');render();
+  toast(u.name+' removed');setTimeout(quickRefresh,500);render();
 }
 async function removeShareClass(ticker){
   const meta=DB.shareClasses.find(c=>c.ticker===ticker);
@@ -1347,6 +1350,7 @@ async function removeShareClass(ticker){
   DB.classApps=DB.classApps.filter(a=>a.proposed_ticker!==ticker);
   await logActivity('class_removed',(isConversion?'Class '+meta.class+' stripped from':'Share class '+ticker+' removed from')+' '+meta?.company_name,{ticker});
   toast(isConversion?ticker+' class stripped — stock remains listed':ticker+' class removed and delisted');
+  setTimeout(quickRefresh,500);
   render();
 }
 async function delistCompany(ticker,silent=false){
@@ -1358,7 +1362,7 @@ async function delistCompany(ticker,silent=false){
   DB.companies=DB.companies.filter(c=>c.ticker!==ticker);
   DB.dilApps=DB.dilApps.filter(d=>d.ticker!==ticker);
   DB.news=DB.news.filter(n=>n.ticker!==ticker);
-  if(!silent){toast(co.name+' delisted');render();}
+  if(!silent){toast(co.name+' delisted');setTimeout(quickRefresh,500);render();}
 }
 
 // ═══════════════════════════════════════════════
@@ -1428,7 +1432,7 @@ function buildChart(canvasId,co){
   const labels=pts.map((p,i)=>i===pts.length-1?'Now':fmtChartLabel(p.t,interval));
   const isUp=prices.length>0&&prices[prices.length-1]>=prices[0],lc=isUp?'#00c896':'#ff4d6a';
   charts[canvasId]=new Chart(canvas,{type:'line',data:{labels,datasets:[{data:prices,borderColor:lc,borderWidth:2,pointRadius:pts.length>30?0:3,pointBackgroundColor:lc,fill:false,tension:0.3}]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>fmt(ctx.parsed.y),title:ctx=>ctx[0]?.label||''}}},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>fmt(ctx.parsed.y),title:ctx=>{const pt=pts[ctx[0]?.dataIndex];if(!pt)return ctx[0]?.label||'';if(pt.t&&pt.t.includes('T')&&pt.t.includes('Z')){const d=new Date(pt.t);return d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'});}return pt.t||ctx[0]?.label||'';}}}},
       scales:{x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:6,autoSkip:true}},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#4a5568',font:{size:11},callback:v=>fmt(v)},beginAtZero:false}}}});
 }
 function impactPreview(co,qty,dir){if(!qty||qty<=0)return'';const np=impactPrice(co,qty,dir),delta=np-co.price,pct=((delta/co.price)*100).toFixed(2),cls=dir==='buy'?'price-up':'price-down';return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">Fill: <strong>${fmt(np)}</strong> <span class="${cls}">${delta>=0?'+':''}${fmt(delta)} (${delta>=0?'+':''}${pct}%)</span> &nbsp;|&nbsp; Total: <strong>${fmt(np*qty)}</strong></div>`;}
@@ -1533,6 +1537,7 @@ async function reviewClassApp(id,approve){
   } else {
     toast('Class application rejected');
   }
+  setTimeout(quickRefresh,500);
   render();
 }
 
@@ -1690,8 +1695,8 @@ function renderBanner(){
 function renderNav(){
   const u=cu();
   let tabs;
-  if(isChairman(u))tabs=[['admin','Admin'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
-  else if(isAdmin(u))tabs=[['admin','Admin'],['market','Market'],['settings','Settings']];
+  if(isChairman(u))tabs=[['admin','Chairman'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
+  else if(isAdmin(u))tabs=[['admin','Chairman'],['market','Market'],['settings','Settings']];
   else if(u.role==='company')tabs=[['market','Market'],['portfolio','Portfolio'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   else tabs=[['market','Market'],['portfolio','Portfolio'],['leaderboard','Leaderboard'],['orders','Orders'],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   return `<div class="nav">${tabs.map(([k,v])=>`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
@@ -2918,7 +2923,7 @@ async function adjustCompanyCash(uid2){
   await updateUser(uid2,{cash:newCash});
   await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
   pushBalances();
-  toast(u.name+"'s balance updated to "+fmt(newCash));render();
+  toast(u.name+"'s balance updated to "+fmt(newCash));setTimeout(quickRefresh,500);render();
 }
 async function adjustCash(uid2){
   const u=getUser(uid2);if(!u)return;
@@ -2934,7 +2939,7 @@ async function adjustCash(uid2){
   await updateUser(uid2,{cash:newCash});
   await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:''+u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
   pushBalances();
-  toast(u.name+"'s balance updated to "+fmt(newCash));render();
+  toast(u.name+"'s balance updated to "+fmt(newCash));setTimeout(quickRefresh,500);render();
 }
 function renderAdminUsers(students,companies){
   return`<div class="card"><div class="section-title">Students — balance adjustment</div>
