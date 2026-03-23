@@ -291,6 +291,7 @@ async function pushBalances(){
 async function setSession(status){const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';clearInterval(sessionTimer);sessionTimer=null;await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null});const u=cu();await logActivity('session','Session '+status+(u?' by '+u.name:''),{userId:u?.id,userName:u?.name});
   if(status==='open'){await pushNotificationToAll('session','🟢 Trading session is now open!');activateAfterHoursOrders();recordSessionOpenPrices();}
   if(status==='closed')await pushNotificationToAll('session','🔴 Trading session has closed.');
+  setTimeout(quickRefresh,500);
   render();}
 async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);render();}
 function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
@@ -338,6 +339,34 @@ async function autoRefresh(){
   }catch(e){/* silent fail */}
 }
 setInterval(autoRefresh,20000);
+
+// ── Quick refresh: fires after trades, session changes, dividends ──
+// Only fetches companies (prices) + current user's data
+async function quickRefresh(){
+  if(!UI.userId)return;
+  try{
+    const [newCompanies,newSession,newNotifs]=await Promise.all([
+      sb.get('jex_companies','order=created_at.asc'),
+      sb.get('jex_session','id=eq.1'),
+      sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
+    ]);
+    DB.companies=newCompanies;
+    DB.session=newSession[0]||DB.session;
+    const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
+    DB.notifications=newNotifs;
+    const newUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
+    if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
+    const bannerHasStatus=document.querySelector('.session-banner')?.classList.contains('s-'+DB.session.status);
+    if(newUnread!==prevUnread||!bannerHasStatus)render();
+    else{
+      // Silently update price displays without full re-render
+      document.querySelectorAll('[data-ticker-price]').forEach(el=>{
+        const c=getCo(el.dataset.tickerPrice);
+        if(c)el.textContent=fmt(c.price);
+      });
+    }
+  }catch(e){/* silent fail */}
+}
 
 // ═══════════════════════════════════════════════
 // AUTH & REGISTRATION
@@ -700,6 +729,7 @@ async function applyPriceAdjustment(ticker,pct,reason){
   await logActivity('price_adj',(pct>0?'Price boost':'Price drop')+' on '+ticker+': '+(pct>0?'+':'')+pct+'% → '+fmt(newPrice)+(reason?' ('+reason+')':''),{ticker,userId:u.id,userName:u.name,amount:newPrice-oldPrice});
   await pushNotificationToHolders(ticker,'price_adj',(pct>0?'📈 Price boost':'📉 Price drop')+' on '+co.name+': '+(pct>0?'+':'')+pct+'% → '+fmt(newPrice)+(reason?' — '+reason:''));
   toast(ticker+' price '+(pct>0?'boosted':'dropped')+' '+Math.abs(pct)+'% to '+fmt(newPrice));
+  setTimeout(quickRefresh,1000);
   render();
 }
 
@@ -1148,6 +1178,7 @@ async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
   pushToSheets('trades',{trades:[{ticker,qty,price,type,ts:ts(),
     buyer:['exchange','short'].includes(buyerId)?'JEX':getUser(buyerId)?.name||buyerId,
     seller:['exchange','cover'].includes(sellerId)?'JEX':getUser(sellerId)?.name||sellerId}]});
+  setTimeout(quickRefresh,1500);
 }
 
 async function placeBuy(ticker,qty){
@@ -1237,6 +1268,7 @@ async function issueDividend(ticker,perShare,note){
   await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(total),{ticker,userId:owner.id,userName:owner.name,amount:total});
   await pushNotificationToHolders(ticker,'dividend','💰 '+co.name+' paid a dividend of '+fmt(perShare)+'/share');
   pushBalances();
+  setTimeout(quickRefresh,1500);
   toast(co.name+' paid '+fmt(perShare)+'/share');UI.companyTab='dividends';render();
 }
 function submitIPOForm(){
