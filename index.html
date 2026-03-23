@@ -190,7 +190,9 @@ async function loadAll(){
   ]);
   DB={users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,
     session:session[0]||DB.session,announcements,limitOrders,activity,
-    shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations};
+    shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,
+    companyMembers,founderAllocations,
+    founders:DB.founders||[],founderAllocs:DB.founderAllocs||[],priceAdjustments:DB.priceAdjustments||[]};
 }
 
 // ═══════════════════════════════════════════════
@@ -307,19 +309,21 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs]=await Promise.all([
       sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_companies','order=created_at.asc'),
       sb.get('jex_trades','order=id.desc&limit=100'),
       sb.get('jex_limit_orders','order=created_at.asc'),
       sb.get('jex_company_members','order=created_at.asc'),
+      sb.get('jex_founder_allocations','order=created_at.desc'),
     ]);
     const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
     DB.session=newSession[0]||DB.session;
     DB.companies=newCompanies;
     DB.companyMembers=newMembers;
+    DB.founderAllocations=newAllocs;
     // Merge new trades (avoid duplicates)
     const existingIds=new Set(DB.trades.map(t=>t.id));
     newTrades.forEach(t=>{if(!existingIds.has(t.id))DB.trades.unshift(t);});
@@ -524,19 +528,33 @@ async function respondToInvite(memberId,accept){
 
 // ── Founder share allocations ─────────────────────────────
 async function requestFounderAllocation(ticker,studentId,shares,reason){
-  const stock=getCo(ticker);if(!stock)return toast('Share class not found');
+  if(!ticker)return toast('Select a share class');
+  if(!studentId)return toast('Select a founder');
+  const stock=getCo(ticker);if(!stock)return toast('Share class "'+ticker+'" not found — is the company listed?');
   const student=getUser(studentId);if(!student)return toast('Student not found');
-  shares=parseInt(shares);if(isNaN(shares)||shares<=0)return toast('Enter valid share count');
+  shares=parseInt(shares);
+  if(isNaN(shares)||shares<=0)return toast('Enter a valid share count');
   if(shares>stock.shares_avail)return toast('Only '+stock.shares_avail+' shares available in '+ticker);
+  // Check for duplicate pending
   if(DB.founderAllocations.find(a=>a.ticker===ticker&&a.student_id===studentId&&a.status==='pending'))
     return toast('Already a pending allocation for '+student.name+' in '+ticker);
   const meta=getClassMeta(ticker);
   const classLabel=meta?'Class '+meta.class:'base';
-  const rec={id:uid(),ticker,company_name:stock.name,student_id:studentId,student_name:student.name,shares,status:'pending',reason:(reason||'').trim(),ts:ts()};
-  await sb.post('jex_founder_allocations',rec);
-  DB.founderAllocations.push(rec);
-  await logActivity('founder_alloc',stock.name+' requested '+shares+' '+classLabel+' founder shares for '+student.name,{ticker});
-  toast('Allocation request submitted: '+shares+'×'+ticker+' for '+student.name);render();
+  // Use parent company name not share class name
+  const parentTicker=meta?meta.parent_ticker:ticker;
+  const parentCo=getCo(parentTicker);
+  const companyName=parentCo?parentCo.name:stock.name;
+  const rec={id:uid(),ticker,company_name:companyName,student_id:studentId,student_name:student.name,shares,status:'pending',reason:(reason||'').trim(),ts:ts()};
+  try{
+    const result=await sb.post('jex_founder_allocations',rec);
+    DB.founderAllocations.push(rec);
+    await logActivity('founder_alloc',companyName+' requested '+shares+' '+classLabel+' founder shares for '+student.name,{ticker});
+    toast('✓ Allocation request submitted: '+shares+'×'+ticker+' for '+student.name);
+    render();
+  }catch(err){
+    console.error('Founder alloc error:',err);
+    toast('Error submitting request: '+err.message);
+  }
 }
 async function reviewFounderAllocation(id,approve){
   const a=DB.founderAllocations.find(x=>x.id===id);if(!a)return;
