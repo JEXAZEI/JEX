@@ -157,7 +157,6 @@ const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],nwHistory:[],earningsTargets:[],
-  founderShares:[],companyInvites:[],
   founders:[],priceAdjustments:[],companyMembers:[],founderAllocations:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,earnings_surprise_pct:10,session_open_prices:{}}};
 let SHEETS_URL=null;
@@ -191,8 +190,7 @@ async function loadAll(){
   DB={users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,
     session:session[0]||DB.session,announcements,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,
-    companyMembers,founderAllocations,priceAdjustments,founders,
-    founderShares:[]};}
+    companyMembers,founderAllocations,priceAdjustments,founders};}
 
 // ═══════════════════════════════════════════════
 // HELPERS
@@ -293,7 +291,7 @@ async function setSession(status){const label=status==='open'?'Session open':sta
   if(status==='closed')await pushNotificationToAll('session','🔴 Trading session has closed.');
   setTimeout(quickRefresh,500);
   render();}
-async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);render();}
+async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);setTimeout(quickRefresh,500);render();}
 function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
 async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
 async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();}
@@ -612,7 +610,9 @@ async function adjustStockPrice(ticker,pct,reason){
   await pushNotificationToHolders(ticker,'price_adj',msg);
   await pushNotificationToAll('price_adj',msg);
   await logActivity('price_adj',msg,{ticker,userId:u.id,userName:u.name,amount:newPrice-oldPrice});
-  toast(ticker+' '+(pct>=0?'boosted':'cut')+' by '+Math.abs(pct)+'% → '+fmt(newPrice));render();
+  toast(ticker+' '+(pct>=0?'boosted':'cut')+' by '+Math.abs(pct)+'% → '+fmt(newPrice));
+  setTimeout(quickRefresh,1000);
+  render();
 }
 
 // ═══════════════════════════════════════════════
@@ -709,29 +709,6 @@ async function sendFounderInvite(ownerId,studentId){
 
 
 
-// ═══════════════════════════════════════════════
-// PRICE ADJUSTMENT (Chairman)
-// ═══════════════════════════════════════════════
-async function applyPriceAdjustment(ticker,pct,reason){
-  if(!ticker)return toast('Select a ticker');
-  pct=parseFloat(pct);
-  if(isNaN(pct)||pct===0)return toast('Enter a non-zero percentage');
-  if(Math.abs(pct)>100)return toast('Maximum adjustment is ±100%');
-  const co=getCo(ticker);if(!co)return;
-  const u=cu();
-  const oldPrice=co.price;
-  const newPrice=Math.max(0.01,Math.round(oldPrice*(1+pct/100)*100)/100);
-  const marker=pct>0?'Boost +'+pct+'%':'Drop '+pct+'%';
-  await updateCo(ticker,{price:newPrice,price_history:[...co.price_history,{p:newPrice,t:marker}]});
-  const rec={id:uid(),ticker,company_name:co.name,pct,old_price:oldPrice,new_price:newPrice,reason:(reason||'').trim(),applied_by:u.name,ts:ts()};
-  await sb.post('jex_price_adjustments',rec);
-  DB.priceAdjustments.unshift(rec);
-  await logActivity('price_adj',(pct>0?'Price boost':'Price drop')+' on '+ticker+': '+(pct>0?'+':'')+pct+'% → '+fmt(newPrice)+(reason?' ('+reason+')':''),{ticker,userId:u.id,userName:u.name,amount:newPrice-oldPrice});
-  await pushNotificationToHolders(ticker,'price_adj',(pct>0?'📈 Price boost':'📉 Price drop')+' on '+co.name+': '+(pct>0?'+':'')+pct+'% → '+fmt(newPrice)+(reason?' — '+reason:''));
-  toast(ticker+' price '+(pct>0?'boosted':'dropped')+' '+Math.abs(pct)+'% to '+fmt(newPrice));
-  setTimeout(quickRefresh,1000);
-  render();
-}
 
 // ═══════════════════════════════════════════════
 // NET WORTH HISTORY
