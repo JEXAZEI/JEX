@@ -288,7 +288,8 @@ async function saveSheetsUrl(url){
 async function pushToSheets(type,payload){
   if(!SHEETS_URL)return;
   try{
-    await fetch(SHEETS_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type,...payload})});
+    // Use no-cors + text/plain to avoid CORS preflight — Google Apps Script requires this
+    await fetch(SHEETS_URL,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain'},body:JSON.stringify({type,...payload})});
   }catch(e){console.warn('Sheets sync failed:',e);}
 }
 async function pushBalances(){
@@ -2350,7 +2351,7 @@ function renderSettings(){
     <div class="frow"><label class="flabel">Web app URL</label><input type="text" id="sheets-url" placeholder="https://script.google.com/macros/s/..." value="${SHEETS_URL||''}"></div>
     <div style="display:flex;gap:8px">
       <button class="btn btn-primary" onclick="saveSheetsUrl(get('sheets-url')?.value)">Save URL</button>
-      <button class="btn btn-success" onclick="pushBalances().then(()=>toast('Manual sync sent to Sheets'))">Push now</button>
+      <button class="btn btn-success" onclick="pushBalances().then(()=>toast('✓ Pushed to Sheets')).catch(()=>toast('Sheets push failed — check your URL'))">Push now</button>
       ${SHEETS_URL?'<button class="btn btn-danger" onclick="saveSheetsUrl(&quot;&quot;)">Clear</button>':''}
     </div>
     ${SHEETS_URL?'<div style="font-size:12px;color:var(--text2);margin-top:8px">✓ Sync active — pushing to Sheets automatically</div>':''}
