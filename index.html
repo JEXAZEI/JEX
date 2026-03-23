@@ -1184,8 +1184,9 @@ async function placeBuy(ticker,qty){
   if(u.role==='company'&&co.owner_id===u.id)return toast("You can't buy your own company's stock — use Buyback instead.");
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(isHalted(ticker))return toast(ticker+' trading is currently halted.');
+  if(DB.session.status==='paused')return toast('Trading is paused. Wait for the session to resume.');
   // After-hours: queue as market order
-  if(!isOpen()){
+  if(DB.session.status==='closed'){
     const order={id:uid(),user_id:u.id,ticker,side:'buy',qty,limit_price:0,status:'after_hours_market',ts:ts()};
     await sb.post('jex_limit_orders',order);DB.limitOrders.push(order);
     toast('After-hours order queued: buy '+qty+'×'+ticker+' — executes at open price when session starts');
@@ -1206,9 +1207,10 @@ async function placeSell(ticker,qty){
   if(!canTradeTicker(ticker,u.id))return toast(ticker+' is restricted — you are not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(isHalted(ticker))return toast(ticker+' trading is currently halted.');
+  if(DB.session.status==='paused')return toast('Trading is paused. Wait for the session to resume.');
   const held=(holdings(u)[ticker])||0;if(held<qty)return toast('You only hold '+held+' shares');
   // After-hours: queue as market order
-  if(!isOpen()){
+  if(DB.session.status==='closed'){
     const order={id:uid(),user_id:u.id,ticker,side:'sell',qty,limit_price:0,status:'after_hours_market',ts:ts()};
     await sb.post('jex_limit_orders',order);DB.limitOrders.push(order);
     toast('After-hours order queued: sell '+qty+'×'+ticker+' — executes at open price when session starts');
@@ -1227,8 +1229,9 @@ async function placeShort(ticker,qty){
   if(!canTradeTicker(ticker,u.id))return toast(ticker+' is restricted — you are not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(isHalted(ticker))return toast(ticker+' trading is currently halted.');
+  if(DB.session.status==='paused')return toast('Trading is paused. Wait for the session to resume.');
   // After-hours: queue as market order
-  if(!isOpen()){
+  if(DB.session.status==='closed'){
     const order={id:uid(),user_id:u.id,ticker,side:'short',qty,limit_price:0,status:'after_hours_market',ts:ts()};
     await sb.post('jex_limit_orders',order);DB.limitOrders.push(order);
     toast('After-hours order queued: short '+qty+'×'+ticker+' — executes at open price when session starts');
@@ -1251,8 +1254,9 @@ async function coverShort(ticker,qty){
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(isHalted(ticker))return toast(ticker+' trading is currently halted.');
   const sh={...shorts(u)},short=sh[ticker];if(!short||short.qty<qty)return toast('You only have '+(short?.qty||0)+' shorted');
+  if(DB.session.status==='paused')return toast('Trading is paused. Wait for the session to resume.');
   // After-hours: queue as market order
-  if(!isOpen()){
+  if(DB.session.status==='closed'){
     const order={id:uid(),user_id:u.id,ticker,side:'cover',qty,limit_price:0,status:'after_hours_market',ts:ts()};
     await sb.post('jex_limit_orders',order);DB.limitOrders.push(order);
     toast('After-hours order queued: cover '+qty+'×'+ticker+' — executes at open price when session starts');
@@ -2140,6 +2144,14 @@ function cpTrade(mode){
   const t=UI.companyPage;const q=parseInt(get('cp-qty')?.value)||0;
   if(!q||!t)return toast('Enter a valid quantity');
   const co=getCo(t);if(!co)return;
+  if(!isOpen()){
+    // After hours — skip price modal, go straight to queue
+    if(mode==='buy')placeBuy(t,q);
+    else if(mode==='sell')placeSell(t,q);
+    else if(mode==='short')placeShort(t,q);
+    else if(mode==='cover')coverShort(t,q);
+    return;
+  }
   if(mode==='buy'){const np=impactPrice(co,q,'buy');confirmTrade({ticker:t,action:'Buy',qty:q,price:fmt(np),total:fmt(np*q),color:'var(--teal)',onConfirm:()=>placeBuy(t,q)});}
   else if(mode==='sell'){const np=impactPrice(co,q,'sell');confirmTrade({ticker:t,action:'Sell',qty:q,price:fmt(np),total:fmt(np*q),color:'var(--red)',onConfirm:()=>placeSell(t,q)});}
   else if(mode==='short'){const coll=Math.round(co.price*q*1.5*100)/100;confirmTrade({ticker:t,action:'Short sell',qty:q,price:fmt(co.price),total:fmt(coll)+' collateral',color:'var(--purple)',onConfirm:()=>placeShort(t,q)});}
@@ -2185,7 +2197,7 @@ function openPanel(ticker){
       ${short?`<button class="ot-btn ${mode==='cover'?'ot-cover':''}" onclick="UI.panelMode='cover';openPanel('${ticker}')">Cover</button>`:''}
     </div>
     ${mode==='buy'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Buy pushes price up. Available: <strong>${c.shares_avail}</strong> of ${c.shares.toLocaleString()}.</p>
-    <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${c.shares_avail}"></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="(()=>{const q=parseInt(get('t-qty')?.value)||0,co=getCo('${ticker}');if(!q||!co)return;const np=impactPrice(co,q,'buy');confirmTrade({ticker:'${ticker}',action:'Buy',qty:q,price:fmt(np),total:fmt(np*q),color:'var(--teal)',onConfirm:()=>placeBuy('${ticker}',q)});})();">Buy now</button></div></div>
+    <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${c.shares_avail}"></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="(()=>{const q=parseInt(get('t-qty')?.value)||0;if(!q)return;if(!isOpen()){placeBuy('${ticker}',q);return;}const co=getCo('${ticker}');if(!co)return;const np=impactPrice(co,q,'buy');confirmTrade({ticker:'${ticker}',action:'Buy',qty:q,price:fmt(np),total:fmt(np*q),color:'var(--teal)',onConfirm:()=>placeBuy('${ticker}',q)});})();">Buy now</button></div></div>
     <div id="t-preview">${impactPreview(c,1,'buy')}</div>
     <hr class="divider" style="margin:10px 0">
     <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy</div>
@@ -2194,7 +2206,7 @@ function openPanel(ticker){
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="placeLimitOrder('${ticker}','buy',get('t-lmt-qty')?.value,get('t-lmt-price')?.value)">Place limit</button></div>
     </div>`
-    :mode==='sell'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Sell pushes price down. You hold: <strong>${held}</strong>.</p>${held>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${held}"></div><div style="padding-bottom:12px"><button class="btn btn-danger" onclick="(()=>{const q=parseInt(get('t-qty')?.value)||0,co=getCo('${ticker}');if(!q||!co)return;const np=impactPrice(co,q,'sell');confirmTrade({ticker:'${ticker}',action:'Sell',qty:q,price:fmt(np),total:fmt(np*q),color:'var(--red)',onConfirm:()=>placeSell('${ticker}',q)});})();">Sell now</button></div></div>
+    :mode==='sell'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Sell pushes price down. You hold: <strong>${held}</strong>.</p>${held>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${held}"></div><div style="padding-bottom:12px"><button class="btn btn-danger" onclick="(()=>{const q=parseInt(get('t-qty')?.value)||0;if(!q)return;if(!isOpen()){placeSell('${ticker}',q);return;}const co=getCo('${ticker}');if(!co)return;const np=impactPrice(co,q,'sell');confirmTrade({ticker:'${ticker}',action:'Sell',qty:q,price:fmt(np),total:fmt(np*q),color:'var(--red)',onConfirm:()=>placeSell('${ticker}',q)});})();">Sell now</button></div></div>
     <div id="t-preview">${impactPreview(c,1,'sell')}</div>
     <hr class="divider" style="margin:10px 0">
     <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell</div>
@@ -2203,8 +2215,8 @@ function openPanel(ticker){
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="placeLimitOrder('${ticker}','sell',get('t-lmt-qty')?.value,get('t-lmt-price')?.value)">Place limit</button></div>
     </div>`:`<div class="empty" style="padding:16px">You don't hold any ${ticker}.</div>`}`
-    :mode==='short'?`<div class="ibox ibox-purple">Borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="(()=>{const q=parseInt(get('t-qty')?.value)||0,co=getCo('${ticker}');if(!q||!co)return;const coll=Math.round(co.price*q*1.5*100)/100;confirmTrade({ticker:'${ticker}',action:'Short sell',qty:q,price:fmt(co.price),total:fmt(coll)+' collateral',color:'var(--purple)',onConfirm:()=>placeShort('${ticker}',q)});})();">Short sell</button></div></div><div id="t-preview">${shortPrev(c,1)}</div>`
-    :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="(()=>{const q=parseInt(get('t-qty')?.value)||0,co=getCo('${ticker}');if(!q||!co)return;const cp=impactPrice(co,q,'buy');confirmTrade({ticker:'${ticker}',action:'Cover short',qty:q,price:fmt(cp),total:fmt(cp*q),color:'#BA7517',onConfirm:()=>coverShort('${ticker}',q)});})();">Cover short</button></div></div><div id="t-preview">${impactPreview(c,short.qty,'buy')}</div>`:''}
+    :mode==='short'?`<div class="ibox ibox-purple">Borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="(()=>{const q=parseInt(get('t-qty')?.value)||0;if(!q)return;if(!isOpen()){placeShort('${ticker}',q);return;}const co=getCo('${ticker}');if(!co)return;const coll=Math.round(co.price*q*1.5*100)/100;confirmTrade({ticker:'${ticker}',action:'Short sell',qty:q,price:fmt(co.price),total:fmt(coll)+' collateral',color:'var(--purple)',onConfirm:()=>placeShort('${ticker}',q)});})();">Short sell</button></div></div><div id="t-preview">${shortPrev(c,1)}</div>`
+    :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="(()=>{const q=parseInt(get('t-qty')?.value)||0;if(!q)return;if(!isOpen()){coverShort('${ticker}',q);return;}const co=getCo('${ticker}');if(!co)return;const cp=impactPrice(co,q,'buy');confirmTrade({ticker:'${ticker}',action:'Cover short',qty:q,price:fmt(cp),total:fmt(cp*q),color:'#BA7517',onConfirm:()=>coverShort('${ticker}',q)});})();">Cover short</button></div></div><div id="t-preview">${impactPreview(c,short.qty,'buy')}</div>`:''}
     `:`<div class="ibox ibox-red">🔒 <strong>${ticker} is a restricted share class.</strong> You are not on the whitelist and cannot trade this stock.</div>`}
   </div>`;
   const qi=get('t-qty');if(qi){qi.addEventListener('input',()=>{const q=parseInt(qi.value)||0,p=get('t-preview');if(!p)return;if(mode==='buy')p.innerHTML=impactPreview(c,q,'buy');else if(mode==='sell')p.innerHTML=impactPreview(c,q,'sell');else if(mode==='short')p.innerHTML=shortPrev(c,q);else if(mode==='cover')p.innerHTML=impactPreview(c,q,'buy');});}
