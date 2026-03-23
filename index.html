@@ -303,7 +303,19 @@ async function pushBalances(){
     divs:Math.round(divRec(u)*100)/100,
     nw:nw(u),vsStart:Math.round((nw(u)-(DB.session.starting_cash||10000))*100)/100
   })).sort((a,b)=>b.nw-a.nw).map((r,i)=>({...r,rank:i+1}));
-  await pushToSheets('balances',{rows});
+  const companies=DB.companies.filter(c=>c.status==='listed').map(c=>{
+    const chg=priceChg(c);
+    const owner=DB.users.find(u=>u.id===c.owner_id);
+    return{
+      name:c.name,ticker:c.ticker,
+      price:Math.round(c.price*100)/100,
+      change:Math.round(chg*100)/100,
+      shares:c.shares,shares_avail:c.shares_avail,
+      market_cap:Math.round(c.price*c.shares*100)/100,
+      cash:owner?Math.round(owner.cash*100)/100:0
+    };
+  });
+  await pushToSheets('balances',{rows,companies});
 }
 async function setSession(status){const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';clearInterval(sessionTimer);sessionTimer=null;await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null});const u=cu();await logActivity('session','Session '+status+(u?' by '+u.name:''),{userId:u?.id,userName:u?.name});
   if(status==='open'){await clearLeaderboardSnapshot();await pushNotificationToAll('session','🟢 Trading session is now open!');activateAfterHoursOrders();recordSessionOpenPrices();}
