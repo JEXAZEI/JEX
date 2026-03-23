@@ -206,6 +206,7 @@ const getUser=id=>DB.users.find(u=>u.id===id);
 const getCo=t=>DB.companies.find(c=>c.ticker===t);
 const uid=()=>'id_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
 const ts=()=>new Date().toLocaleTimeString();
+const isoNow=()=>new Date().toISOString(); // full timestamp for price history
 const priceChg=c=>{if(!c.price_history||c.price_history.length<2)return 0;const f=c.price_history[0].p,l=c.price_history[c.price_history.length-1].p;return f?((l-f)/f*100):0;};
 const holdings=u=>u.holdings||{};const shorts=u=>u.shorts||{};const watchlist=u=>u.watchlist||[];
 const pv=u=>Object.entries(holdings(u)).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0);
@@ -1107,7 +1108,7 @@ async function matchAgainstBook(ticker,side,qty,price,taker){
       maker.qty=newQty;
     }
     // Update price chart
-    const newHistory=[...co.price_history,{p:fillPrice,t:ts()}];
+    const newHistory=[...co.price_history,{p:fillPrice,t:isoNow()}];
     await updateCo(ticker,{price:fillPrice,price_history:newHistory});
     await recordTrade(ticker,fillQty,fillPrice,side==='buy'?taker.id:makerUser.id,side==='buy'?makerUser.id:taker.id,'book_match');
     await logActivity('limit_fill',taker.name+' matched '+fillQty+'×'+ticker+' @ '+fmt(fillPrice)+' with '+makerUser.name,{ticker,userId:taker.id,userName:taker.name,amount:fillPrice});
@@ -1168,7 +1169,7 @@ async function checkLimitOrders(){
       if(sQty<=0){await sb.patch('jex_limit_orders','id=eq.'+ask.id,{status:'filled',filled_price:fillPrice,filled_at:ts()});ask.status='filled';}
       else{await sb.patch('jex_limit_orders','id=eq.'+ask.id,{qty:sQty});ask.qty=sQty;}
       // Update price
-      const newHistory=[...co.price_history,{p:fillPrice,t:ts()}];
+      const newHistory=[...co.price_history,{p:fillPrice,t:isoNow()}];
       await updateCo(ticker,{price:fillPrice,price_history:newHistory});
       await recordTrade(ticker,fillQty,fillPrice,buyer.id,seller.id,'book_match');
       await logActivity('limit_fill',buyer.name+' ↔ '+seller.name+': '+fillQty+'×'+ticker+' @ '+fmt(fillPrice),{ticker,amount:fillPrice});
@@ -1186,14 +1187,14 @@ async function checkLimitOrders(){
         if(u.cash<cost)continue;
         const bH={...holdings(u)};bH[o.ticker]=(bH[o.ticker]||0)+o.qty;
         await updateUser(u.id,{cash:Math.round((u.cash-cost)*100)/100,holdings:bH});
-        await updateCo(ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-o.qty),price_history:[...co.price_history,{p:np,t:ts()}]});
+        await updateCo(ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-o.qty),price_history:[...co.price_history,{p:np,t:isoNow()}]});
         await recordTrade(ticker,o.qty,np,u.id,'exchange','limit_buy');
       } else {
         const held=(holdings(u)[ticker])||0;if(held<o.qty)continue;
         const np=impactPrice(co,o.qty,'sell');
         const nH={...holdings(u)};nH[ticker]=held-o.qty;if(nH[ticker]<=0)delete nH[ticker];
         await updateUser(u.id,{cash:Math.round((u.cash+o.qty*np)*100)/100,holdings:nH});
-        await updateCo(ticker,{price:np,shares_avail:co.shares_avail+o.qty,price_history:[...co.price_history,{p:np,t:ts()}]});
+        await updateCo(ticker,{price:np,shares_avail:co.shares_avail+o.qty,price_history:[...co.price_history,{p:np,t:isoNow()}]});
         await recordTrade(ticker,o.qty,np,'exchange',u.id,'limit_sell');
       }
       await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'filled',filled_price:getCo(ticker)?.price,filled_at:ts()});
@@ -1235,7 +1236,7 @@ async function placeBuy(ticker,qty){
   if(u.cash<cost)return toast('Insufficient funds (need '+fmt(cost)+')');
   const bH={...holdings(u)};bH[ticker]=(bH[ticker]||0)+qty;
   await updateUser(u.id,{cash:Math.round((u.cash-cost)*100)/100,holdings:bH});
-  const newH=[...co.price_history,{p:np,t:ts()}];
+  const newH=[...co.price_history,{p:np,t:isoNow()}];
   await updateCo(ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-qty),price_history:newH});
   await recordTrade(ticker,qty,np,u.id,'exchange');
   toast('Bought '+qty+' × '+ticker+' @ '+fmt(np));openPanel(ticker);
@@ -1247,7 +1248,7 @@ async function placeSell(ticker,qty){
   const np=impactPrice(co,qty,'sell');
   const nH={...holdings(u)};nH[ticker]=held-qty;if(nH[ticker]<=0)delete nH[ticker];
   await updateUser(u.id,{cash:Math.round((u.cash+qty*np)*100)/100,holdings:nH});
-  const newH=[...co.price_history,{p:np,t:ts()}];
+  const newH=[...co.price_history,{p:np,t:isoNow()}];
   await updateCo(ticker,{price:np,shares_avail:co.shares_avail+qty,price_history:newH});
   await recordTrade(ticker,qty,np,'exchange',u.id);
   toast('Sold '+qty+' × '+ticker+' @ '+fmt(np));openPanel(ticker);
@@ -1262,7 +1263,7 @@ async function placeShort(ticker,qty){
   sh[ticker]={qty:tq,avgPrice:Math.round(((ex.avgPrice*ex.qty)+(price*qty))/tq*100)/100,collateral:Math.round((ex.collateral+coll)*100)/100};
   await updateUser(u.id,{cash:Math.round((u.cash-coll)*100)/100,shorts:sh});
   const np=impactPrice(co,qty,'sell');
-  await updateCo(ticker,{price:np,price_history:[...co.price_history,{p:np,t:ts()}]});
+  await updateCo(ticker,{price:np,price_history:[...co.price_history,{p:np,t:isoNow()}]});
   await recordTrade(ticker,qty,price,'short',u.id,'short');
   toast('Shorted '+qty+' × '+ticker+' @ '+fmt(price));openPanel(ticker);
 }
@@ -1275,7 +1276,7 @@ async function coverShort(ticker,qty){
   sh[ticker]={...short,qty:short.qty-qty,collateral:Math.round((short.collateral-cb)*100)/100};
   if(sh[ticker].qty<=0)delete sh[ticker];
   await updateUser(u.id,{cash:Math.round((u.cash+cb+pnl)*100)/100,shorts:sh});
-  await updateCo(ticker,{price:cp,price_history:[...co.price_history,{p:cp,t:ts()}]});
+  await updateCo(ticker,{price:cp,price_history:[...co.price_history,{p:cp,t:isoNow()}]});
   await recordTrade(ticker,qty,cp,u.id,'cover','cover');
   toast('Covered '+qty+' × '+ticker+' | P&L: '+(pnl>=0?'+':'')+fmt(pnl));openPanel(ticker);
 }
@@ -1441,63 +1442,68 @@ async function delistCompany(ticker,silent=false){
 const chartIntervals={};
 function setChartInterval(canvasId,interval,co){
   chartIntervals[canvasId]=interval;
-  // Destroy existing chart
+  // Destroy just this chart
   if(charts[canvasId])try{charts[canvasId].destroy();delete charts[canvasId];}catch(e){}
-  // If it's a company page chart, re-render the whole tab so interval buttons update
-  if(canvasId.startsWith('cp-chart-')||canvasId.startsWith('co-chart-')||canvasId==='panel-chart'){
-    destroyCharts();
-    if(UI.companyPage){
-      document.querySelector('.content').innerHTML=renderCompanyPage(UI.companyPage);
-    } else if(UI.navTab==='mystock'){
-      render();
-    } else {
-      // panel chart — just rebuild in place
-      setTimeout(()=>buildChart(canvasId,co),30);
-      return;
-    }
-    // Rebuild all charts for this page after DOM update
-    setTimeout(()=>{
-      if(UI.companyPage){
-        getCompanyTickers(UI.companyPage).forEach(t=>{
-          const s=getCo(t);if(s)buildChart('cp-chart-'+t,s);
-        });
-      } else {
-        getCompanyTickers(co.ticker||'').forEach(t=>{
-          const s=getCo(t);if(s)buildChart('co-chart-'+t,s);
-        });
-      }
-    },80);
-  } else {
-    setTimeout(()=>buildChart(canvasId,co),30);
+  // Update interval bar buttons in-place without full re-render
+  const barId='ibar-'+canvasId;
+  const bar=document.getElementById(barId);
+  if(bar){
+    bar.innerHTML=buildIntervalButtons(canvasId,co);
   }
+  // Rebuild this specific chart
+  setTimeout(()=>buildChart(canvasId,co),20);
+}
+function buildIntervalButtons(canvasId,co){
+  const intervals=[['1d','1D'],['5d','5D'],['1m','1M'],['max','Max']];
+  const current=chartIntervals[canvasId]||'max';
+  return intervals.map(([val,label])=>`<button style="font-size:11px;padding:2px 8px;border-radius:4px;cursor:pointer;border:1px solid ${current===val?'var(--blue)':'var(--border2)'};background:${current===val?'var(--blue)':'transparent'};color:${current===val?'white':'var(--text2)'};font-family:var(--font)" onclick="setChartInterval('${canvasId}','${val}',getCo('${co.ticker}'))">${label}</button>`).join('');
 }
 function filterByInterval(pts,interval){
   if(!pts||!pts.length)return pts;
   if(interval==='max')return pts;
   const now=Date.now();
-  const ms={['1d']:86400000,['5d']:5*86400000,['1m']:30*86400000}[interval];
+  const ms={'1d':86400000,'5d':5*86400000,'1m':30*86400000}[interval];
   if(!ms)return pts;
-  // Since we store time as strings not timestamps, slice from the end
-  const counts={['1d']:Math.min(pts.length,30),['5d']:Math.min(pts.length,150),['1m']:Math.min(pts.length,500)};
+  const cutoff=now-ms;
+  // Filter by real timestamp if available, else fall back to slicing
+  const withRealTs=pts.filter(p=>p.t&&p.t.includes('T')&&p.t.includes('Z'));
+  if(withRealTs.length>0){
+    const filtered=pts.filter(p=>{
+      if(!p.t||!p.t.includes('T'))return false;
+      try{return new Date(p.t).getTime()>=cutoff;}catch(e){return false;}
+    });
+    return filtered.length>0?filtered:pts.slice(-Math.min(pts.length,10));
+  }
+  // Fallback: slice from end
+  const counts={'1d':Math.min(pts.length,30),'5d':Math.min(pts.length,150),'1m':Math.min(pts.length,500)};
   return pts.slice(-counts[interval]);
 }
 function buildChartIntervalBar(canvasId,co){
-  const intervals=[['1d','1D'],['5d','5D'],['1m','1M'],['max','Max']];
-  const current=chartIntervals[canvasId]||'max';
-  return '<div style="display:flex;gap:2px;margin-bottom:6px">'
-    +intervals.map(([val,label])=>`<button style="font-size:11px;padding:2px 8px;border-radius:4px;cursor:pointer;border:1px solid ${current===val?'var(--blue)':'var(--border2)'};background:${current===val?'var(--blue)':'transparent'};color:${current===val?'white':'var(--text2)'};font-family:var(--font)" onclick="setChartInterval('${canvasId}','${val}',getCo('${co.ticker}'))">${label}</button>`).join('')
-    +'</div>';
+  return '<div id="ibar-'+canvasId+'" style="display:flex;gap:2px;margin-bottom:6px">'+buildIntervalButtons(canvasId,co)+'</div>';
+}
+function fmtChartLabel(t,interval){
+  if(!t)return '';
+  // ISO timestamp
+  if(t.includes('T')&&t.includes('Z')){
+    const d=new Date(t);
+    if(interval==='1d')return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+    if(interval==='5d')return d.toLocaleDateString([],{weekday:'short',hour:'2-digit',minute:'2-digit'});
+    if(interval==='1m')return d.toLocaleDateString([],{month:'short',day:'numeric'});
+    return d.toLocaleDateString([],{month:'short',day:'numeric'});
+  }
+  return t; // fallback for old string labels
 }
 function buildChart(canvasId,co){
   const canvas=get(canvasId);if(!canvas||!window.Chart)return;
   const interval=chartIntervals[canvasId]||'max';
   const allPts=co.price_history||[];
   const pts=filterByInterval(allPts,interval);
-  const prices=pts.map(p=>p.p),labels=pts.map((p,i)=>i===pts.length-1?'Now':p.t);
+  const prices=pts.map(p=>p.p);
+  const labels=pts.map((p,i)=>i===pts.length-1?'Now':fmtChartLabel(p.t,interval));
   const isUp=prices.length>0&&prices[prices.length-1]>=prices[0],lc=isUp?'#00c896':'#ff4d6a';
   charts[canvasId]=new Chart(canvas,{type:'line',data:{labels,datasets:[{data:prices,borderColor:lc,borderWidth:2,pointRadius:pts.length>30?0:3,pointBackgroundColor:lc,fill:false,tension:0.3}]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>fmt(ctx.parsed.y)}}},
-      scales:{x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#4a5568',font:{size:11},maxTicksLimit:8,autoSkip:true}},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#4a5568',font:{size:11},callback:v=>fmt(v)},beginAtZero:false}}}});
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>fmt(ctx.parsed.y),title:ctx=>ctx[0]?.label||''}}},
+      scales:{x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:6,autoSkip:true}},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#4a5568',font:{size:11},callback:v=>fmt(v)},beginAtZero:false}}}});
 }
 function impactPreview(co,qty,dir){if(!qty||qty<=0)return'';const np=impactPrice(co,qty,dir),delta=np-co.price,pct=((delta/co.price)*100).toFixed(2),cls=dir==='buy'?'price-up':'price-down';return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">Fill: <strong>${fmt(np)}</strong> <span class="${cls}">${delta>=0?'+':''}${fmt(delta)} (${delta>=0?'+':''}${pct}%)</span> &nbsp;|&nbsp; Total: <strong>${fmt(np*qty)}</strong></div>`;}
 function shortPrev(co,qty){if(!qty||qty<=0)return'';const c=Math.round(co.price*qty*1.5*100)/100;return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:rgba(83,74,183,0.1);border-radius:var(--radius);color:#AFA9EC">Short ${qty} @ ${fmt(co.price)} | Collateral: <strong>${fmt(c)}</strong></div>`;}
