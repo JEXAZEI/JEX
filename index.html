@@ -307,17 +307,19 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers]=await Promise.all([
       sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_companies','order=created_at.asc'),
       sb.get('jex_trades','order=id.desc&limit=100'),
       sb.get('jex_limit_orders','order=created_at.asc'),
+      sb.get('jex_company_members','order=created_at.asc'),
     ]);
     const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
     DB.session=newSession[0]||DB.session;
     DB.companies=newCompanies;
+    DB.companyMembers=newMembers;
     // Merge new trades (avoid duplicates)
     const existingIds=new Set(DB.trades.map(t=>t.id));
     newTrades.forEach(t=>{if(!existingIds.has(t.id))DB.trades.unshift(t);});
@@ -500,13 +502,8 @@ async function respondToInvite(memberId,accept){
   const u=cu();
 
   if(accept&&co){
-    // Also persist to the founders array on the company record so it survives reloads
-    const currentFounders=co.founders||[];
-    if(!currentFounders.find(f=>f.userId===u.id)){
-      const newFounders=[...currentFounders,{userId:u.id,name:u.name}];
-      await sb.patch('jex_companies','owner_id=eq.'+m.company_user_id,{founders:newFounders});
-      co.founders=newFounders;
-    }
+    // jex_company_members is already patched above — that's the source of truth
+    // No need to also patch co.founders
     await logActivity('cofound',u.name+' joined '+co.name+' as a founder',{ticker:co.ticker,userId:u.id,userName:u.name});
     await pushNotification(
       m.company_user_id,'invite',
@@ -698,13 +695,15 @@ async function applyPriceAdjustment(ticker,pct,reason){
 // ═══════════════════════════════════════════════
 function getCompanyMembers(co){
   const members=[{userId:co.owner_id,name:getUser(co.owner_id)?.name||'Owner',role:'Owner'}];
-  (co.founders||[]).forEach(f=>{
-    if(f.userId!==co.owner_id)members.push({userId:f.userId,name:f.name,role:'Co-founder'});
+  DB.companyMembers.filter(m=>m.company_user_id===co.owner_id&&m.status==='accepted').forEach(m=>{
+    const s=getUser(m.student_id);
+    if(s)members.push({userId:s.id,name:s.name,role:'Founder'});
   });
   return members;
 }
 function isCompanyMember(co,userId){
-  return co.owner_id===userId||(co.founders||[]).some(f=>f.userId===userId);
+  if(co.owner_id===userId)return true;
+  return DB.companyMembers.some(m=>m.company_user_id===co.owner_id&&m.student_id===userId&&m.status==='accepted');
 }
 
 async function sendFounderInvite(ownerId,studentId){
@@ -1804,7 +1803,7 @@ function renderCompanyPage(parentTicker){
   const chg=priceChg(co);
   const canTrade=u.role==='student'||u.role==='company';
   const isOwner=co.owner_id===u.id;
-  const isCoFounder=co.founders&&co.founders.some(f=>f.userId===u.id);
+  const isCoFounder=DB.companyMembers.some(m=>m.company_user_id===co.owner_id&&m.student_id===u.id&&m.status==='accepted');
   const isMember=isOwner||isCoFounder;
   const baseMeta=DB.shareClasses.find(c=>c.ticker===parentTicker);
   const companyVotes=DB.votes.filter(v=>v.parent_ticker===parentTicker);
