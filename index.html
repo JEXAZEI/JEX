@@ -156,15 +156,15 @@ const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='
 // ═══════════════════════════════════════════════
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
-  notifications:[],halts:[],priceAlerts:[],nwHistory:[],earningsTargets:[],
+  notifications:[],halts:[],priceAlerts:[],nwHistory:[],
   founders:[],priceAdjustments:[],companyMembers:[],founderAllocations:[],
-  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,earnings_surprise_pct:10,session_open_prices:{}}};
+  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},leaderboard_snapshot:null}};
 let SHEETS_URL=null;
 let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview'};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
-  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,priceAdjustments,founders]=await Promise.all([
+  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,companyMembers,founderAllocations,priceAdjustments,founders]=await Promise.all([
     sb.get('jex_users','order=created_at.asc'),sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_companies','order=created_at.asc'),sb.get('jex_news','order=created_at.desc'),
     sb.get('jex_ipo_applications','order=created_at.asc'),sb.get('jex_dilution_applications','order=created_at.asc'),
@@ -181,7 +181,6 @@ async function loadAll(){
     sb.get('jex_halts','order=created_at.asc'),
     sb.get('jex_price_alerts','order=created_at.asc'),
     sb.get('jex_nw_history','order=created_at.asc'),
-    sb.get('jex_earnings_targets','order=created_at.desc'),
     sb.get('jex_company_members','order=created_at.asc'),
     sb.get('jex_founder_allocations','order=created_at.desc'),
     sb.get('jex_price_adjustments','order=created_at.desc'),
@@ -189,7 +188,7 @@ async function loadAll(){
   ]);
   DB={users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,
     session:session[0]||DB.session,announcements,limitOrders,activity,
-    shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,
+    shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,
     companyMembers,founderAllocations,priceAdjustments,founders};}
 
 // ═══════════════════════════════════════════════
@@ -231,6 +230,31 @@ const roleBadge=role=>role==='chairman'?'<span class="badge b-chair">Chairman</s
 const avatarClass=role=>role==='chairman'?'av-ch':role==='president'?'av-pr':role==='company'?'av-c':'av-s';
 
 function toast(msg){const t=get('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3200);}
+
+// ── Trade confirmation modal ─────────────────────────────
+function confirmTrade(opts){
+  // opts: {ticker, action, qty, price, total, color, onConfirm}
+  const existing=document.getElementById('trade-confirm-overlay');
+  if(existing)existing.remove();
+  const overlay=document.createElement('div');
+  overlay.id='trade-confirm-overlay';
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:200;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML=`<div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;max-width:360px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,0.4)">
+    <div style="font-size:15px;font-weight:600;margin-bottom:16px">Confirm ${opts.action}</div>
+    <div style="background:var(--bg3);border-radius:var(--radius);padding:14px;margin-bottom:16px;font-size:13px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px"><span style="color:var(--text2)">Ticker</span><span style="font-family:var(--mono);font-weight:500">${opts.ticker}</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px"><span style="color:var(--text2)">Quantity</span><span style="font-weight:500">${opts.qty} shares</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px"><span style="color:var(--text2)">Est. price</span><span style="font-family:var(--mono)">${opts.price}</span></div>
+      <div style="display:flex;justify-content:space-between;padding-top:8px;border-top:1px solid var(--border)"><span style="color:var(--text2);font-weight:500">Total</span><span style="font-family:var(--mono);font-weight:600;color:${opts.color}">${opts.total}</span></div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn" style="flex:1" onclick="document.getElementById('trade-confirm-overlay').remove()">Cancel</button>
+      <button class="btn" style="flex:1;background:${opts.color};color:#fff;border-color:${opts.color}" onclick="document.getElementById('trade-confirm-overlay').remove();(${opts.onConfirm})()">Confirm</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click',e=>{if(e.target===overlay)overlay.remove();});
+}
 function destroyCharts(){Object.values(charts).forEach(c=>{try{c.destroy();}catch(e){}});charts={};}
 
 // ═══════════════════════════════════════════════
@@ -252,12 +276,6 @@ async function saveCBPct(){
   if(isNaN(pct)||pct<1||pct>100)return toast('Enter a value between 1 and 100');
   await saveSession({circuit_breaker_pct:pct});
   toast('Circuit breaker set to '+pct+'%');render();
-}
-async function saveSurprisePct(){
-  const pct=parseInt(document.getElementById('surprise-pct')?.value);
-  if(isNaN(pct)||pct<1||pct>50)return toast('Enter a value between 1 and 50');
-  await saveSession({earnings_surprise_pct:pct});
-  toast('Earnings surprise set to '+pct+'%');render();
 }
 async function saveSheetsUrl(url){
   url=(url||'').trim();
@@ -287,15 +305,15 @@ async function pushBalances(){
   await pushToSheets('balances',{rows});
 }
 async function setSession(status){const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';clearInterval(sessionTimer);sessionTimer=null;await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null});const u=cu();await logActivity('session','Session '+status+(u?' by '+u.name:''),{userId:u?.id,userName:u?.name});
-  if(status==='open'){await pushNotificationToAll('session','🟢 Trading session is now open!');activateAfterHoursOrders();recordSessionOpenPrices();}
-  if(status==='closed')await pushNotificationToAll('session','🔴 Trading session has closed.');
+  if(status==='open'){await clearLeaderboardSnapshot();await pushNotificationToAll('session','🟢 Trading session is now open!');activateAfterHoursOrders();recordSessionOpenPrices();}
+  if(status==='closed'){await snapshotLeaderboard();await pushNotificationToAll('session','🔴 Trading session has closed.');}
   setTimeout(quickRefresh,500);
   render();}
-async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);setTimeout(quickRefresh,500);render();}
-function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
-async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');setTimeout(quickRefresh,500);}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');setTimeout(quickRefresh,500);}render();}
+async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await clearLeaderboardSnapshot();await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);setTimeout(quickRefresh,500);render();}
+function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){snapshotLeaderboard().then(()=>saveSession({status:'closed',label:'Session ended',ends_at:null})).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
+async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');setTimeout(quickRefresh,500);}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});await clearLeaderboardSnapshot();sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');setTimeout(quickRefresh,500);}render();}
 async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');setTimeout(quickRefresh,500);render();}
-function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('Trading session is now open!');});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended.');});}}
+function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;clearLeaderboardSnapshot().then(()=>saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null})).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('Trading session is now open!');});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){snapshotLeaderboard().then(()=>saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null})).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended.');});}}
 setInterval(()=>{checkSchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
 
 // ── Auto-refresh: pull latest data every 20 seconds ──────
@@ -710,6 +728,20 @@ async function snapshotNW(userId){
   const rec={id:uid(),user_id:userId,nw:_nw,cash:Math.round(u.cash*100)/100,portfolio:Math.round(_pv*100)/100,ts:ts()};
   try{await sb.post('jex_nw_history',rec);DB.nwHistory.push(rec);}catch(e){}
 }
+
+async function snapshotLeaderboard(){
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+  const snapshot=students.map(u=>({
+    id:u.id,name:u.name,
+    nw:nw(u),cash:Math.round(u.cash*100)/100,
+    portfolio:Math.round(pv(u)*100)/100,
+    divs:Math.round(divRec(u)*100)/100
+  })).sort((a,b)=>b.nw-a.nw);
+  await saveSession({leaderboard_snapshot:snapshot});
+}
+async function clearLeaderboardSnapshot(){
+  await saveSession({leaderboard_snapshot:null});
+}
 async function snapshotAllNW(){
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
   for(const u of students)await snapshotNW(u.id);
@@ -777,82 +809,6 @@ async function recordSessionOpenPrices(){
 }
 
 // ═══════════════════════════════════════════════
-// EARNINGS SURPRISE
-// ═══════════════════════════════════════════════
-async function submitEarningsTarget(ticker,targetRev,targetProfit){
-  if(!targetRev||!targetProfit)return toast('Enter both targets');
-  const co=getCo(ticker);if(!co)return;
-  const u=cu();if(!u)return;
-  targetRev=parseFloat(targetRev);targetProfit=parseFloat(targetProfit);
-  if(isNaN(targetRev)||isNaN(targetProfit))return toast('Enter valid numbers');
-  if(DB.earningsTargets.find(t=>t.ticker===ticker&&t.status==='pending'))return toast('A target is already pending approval');
-  const rec={id:uid(),ticker,company_name:co.name,target_revenue:targetRev,target_profit:targetProfit,owner_id:u.id,status:'pending',ts:ts()};
-  await sb.post('jex_earnings_targets',rec);
-  DB.earningsTargets.push(rec);
-  toast('Earnings target submitted for approval');render();
-}
-async function reviewEarningsTarget(id,approve){
-  const t=DB.earningsTargets.find(x=>x.id===id);if(!t)return;
-  await sb.patch('jex_earnings_targets','id=eq.'+id,{status:approve?'approved':'rejected'});
-  t.status=approve?'approved':'rejected';
-  toast('Earnings target '+(approve?'approved':'rejected'));setTimeout(quickRefresh,500);render();
-}
-async function applyEarningsSurprise(ticker,actualRev,actualProfit){
-  const target=DB.earningsTargets.find(t=>t.ticker===ticker&&t.status==='approved');
-  if(!target)return; // No approved target = no surprise
-  const co=getCo(ticker);if(!co)return;
-  const surprisePct=DB.session.earnings_surprise_pct||10;
-  const revBeat=actualRev>=target.target_revenue;
-  const profitBeat=actualProfit>=target.target_profit;
-  const bothBeat=revBeat&&profitBeat;
-  const bothMiss=!revBeat&&!profitBeat;
-  if(!bothBeat&&!bothMiss)return; // Mixed result = no auto move
-  const direction=bothBeat?1:-1;
-  const pctChange=direction*(surprisePct/100);
-  const newPrice=Math.max(0.01,Math.round(co.price*(1+pctChange)*100)/100);
-  const newHistory=[...co.price_history,{p:newPrice,t:'Earnings '+(bothBeat?'beat':'miss')}];
-  await updateCo(ticker,{price:newPrice,price_history:newHistory});
-  await pushNotificationToHolders(ticker,'earnings_surprise',(bothBeat?'📈 ':'📉 ')+co.name+' earnings '+(bothBeat?'BEAT':'MISSED')+' targets! Price '+(bothBeat?'jumped':'dropped')+' '+surprisePct+'% to '+fmt(newPrice));
-  await pushNotificationToAll('earnings_surprise',(bothBeat?'📈':'📉')+' '+co.name+' ('+ticker+') earnings '+(bothBeat?'beat':'missed')+' targets — price '+(bothBeat?'+':'-')+surprisePct+'%');
-  await logActivity('earnings_surprise',co.name+' earnings '+(bothBeat?'beat':'missed')+' targets — price '+(bothBeat?'+':'-')+surprisePct+'% to '+fmt(newPrice),{ticker,amount:newPrice-co.price});
-  toast(co.name+' earnings '+(bothBeat?'beat 📈':'miss 📉')+' — price '+(bothBeat?'+':'-')+surprisePct+'%!');
-}
-
-// ═══════════════════════════════════════════════
-// NOTIFICATIONS
-// ═══════════════════════════════════════════════
-async function pushNotification(userId, type, message, ticker=null){
-  try{
-    const rec={id:uid(),user_id:userId,type,message,ticker,read:false,ts:ts()};
-    await sb.post('jex_notifications',rec);
-    // Add to local DB if it's for the current user
-    if(userId===UI.userId)DB.notifications.unshift(rec);
-  }catch(e){console.warn('Notification failed:',e);}
-}
-async function pushNotificationToHolders(ticker,type,message){
-  const holders=DB.users.filter(u=>u.role==='student'&&(holdings(u)[ticker]||0)>0);
-  for(const u of holders) await pushNotification(u.id,type,message,ticker);
-}
-async function pushNotificationToAll(type,message){
-  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
-  for(const u of students) await pushNotification(u.id,type,message);
-}
-async function markAllRead(){
-  const unread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read);
-  for(const n of unread){
-    await sb.patch('jex_notifications','id=eq.'+n.id,{read:true});
-    n.read=true;
-  }
-  render();
-}
-function myUnreadCount(){
-  return DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
-}
-function myNotifications(){
-  return DB.notifications.filter(n=>n.user_id===UI.userId).slice(0,50);
-}
-
-// ═══════════════════════════════════════════════
 // MARKET HALTS
 // ═══════════════════════════════════════════════
 function isHalted(ticker){return !!DB.halts.find(h=>h.ticker===ticker);}
@@ -861,7 +817,6 @@ async function resetExchange(){
   if(!confirm('Last chance — are you absolutely sure you want to reset JEX?'))return;
   toast('Resetting... please wait');
   try{
-    // Clear all trading tables
     await Promise.all([
       sb.del('jex_trades','id=gt.0'),
       sb.del('jex_dividends','id=neq.x'),
@@ -884,15 +839,10 @@ async function resetExchange(){
       sb.del('jex_price_alerts','id=neq.x'),
       sb.del('jex_founders','id=neq.x'),
     ]);
-    // Delete votes (cascades to ballots)
     await sb.del('jex_votes','id=neq.x');
-    // Delete companies
     await sb.del('jex_companies','id=neq.x');
-    // Delete students and company users only
     await sb.del('jex_users','role=in.(student,company)');
-    // Reset session
     await sb.patch('jex_session','id=eq.1',{status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,sheets_url:null});
-    // Reload everything
     await loadAll();
     SHEETS_URL=null;
     UI.navTab='admin';UI.adminTab='session';UI.companyPage=null;
@@ -912,7 +862,6 @@ async function haltStock(ticker,reason,silent=false){
   await sb.post('jex_halts',rec);
   DB.halts.push(rec);
   await logActivity('halt',ticker+' trading halted — '+reason.trim(),{ticker,userId:u?.id,userName:u?.name||'system'});
-  // Notify all students who hold this stock
   await pushNotificationToHolders(ticker,'halt','⚠️ Trading halted on '+ticker+': '+reason.trim());
   await pushNotificationToAll('halt','⚠️ '+ticker+' trading has been halted: '+reason.trim());
   if(!silent){toast(ticker+' halted');setTimeout(quickRefresh,500);render();}
@@ -1040,15 +989,95 @@ async function matchAgainstBook(ticker,side,qty,price,taker){
 }
 
 async function activateAfterHoursOrders(){
-  const ahOrders=DB.limitOrders.filter(o=>o.status==='after_hours');
-  if(!ahOrders.length)return;
-  for(const o of ahOrders){
+  // Activate queued limit orders
+  const ahLimit=DB.limitOrders.filter(o=>o.status==='after_hours');
+  for(const o of ahLimit){
     await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'open'});
     o.status='open';
     const u=getUser(o.user_id);
-    if(u)await pushNotification(u.id,'after_hours','⏰ Your after-hours '+o.side+' order for '+o.qty+'×'+o.ticker+' @ '+fmt(o.limit_price)+' is now active',o.ticker);
+    if(u)await pushNotification(u.id,'after_hours','⏰ Your after-hours limit '+o.side+' for '+o.qty+'×'+o.ticker+' @ '+fmt(o.limit_price)+' is now active',o.ticker);
   }
-  toast(ahOrders.length+' after-hours order'+(ahOrders.length!==1?'s':'')+' activated');
+  // Execute queued market orders immediately at current price
+  const ahMarket=DB.limitOrders.filter(o=>o.status==='after_hours_market');
+  let filled=0,failed=0;
+  for(const o of ahMarket){
+    const u=getUser(o.user_id);const co=getCo(o.ticker);
+    if(!u||!co){await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'cancelled'});o.status='cancelled';failed++;continue;}
+    try{
+      if(o.side==='buy'){
+        if(co.shares_avail<o.qty||u.cash<Math.round(impactPrice(co,o.qty,'buy')*o.qty*100)/100){
+          await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'cancelled'});o.status='cancelled';
+          await pushNotification(u.id,'after_hours','❌ After-hours buy order for '+o.qty+'×'+o.ticker+' cancelled — insufficient funds or shares at open',o.ticker);
+          failed++;continue;
+        }
+        const np=impactPrice(co,o.qty,'buy'),cost=Math.round(np*o.qty*100)/100;
+        const bH={...holdings(u)};bH[o.ticker]=(bH[o.ticker]||0)+o.qty;
+        await updateUser(u.id,{cash:Math.round((u.cash-cost)*100)/100,holdings:bH});
+        await updateCo(o.ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-o.qty),price_history:[...co.price_history,{p:np,t:isoNow()}]});
+        await recordTrade(o.ticker,o.qty,np,u.id,'exchange','market_open');
+        await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'filled',filled_price:np,filled_at:ts()});o.status='filled';
+        await pushNotification(u.id,'after_hours','✅ After-hours buy filled: '+o.qty+'×'+o.ticker+' @ '+fmt(np)+' at session open',o.ticker);
+      } else if(o.side==='sell'){
+        const held=(holdings(u)[o.ticker])||0;
+        if(held<o.qty){
+          await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'cancelled'});o.status='cancelled';
+          await pushNotification(u.id,'after_hours','❌ After-hours sell order for '+o.qty+'×'+o.ticker+' cancelled — you only hold '+held+' shares at open',o.ticker);
+          failed++;continue;
+        }
+        const np=impactPrice(co,o.qty,'sell');
+        const nH={...holdings(u)};nH[o.ticker]=held-o.qty;if(nH[o.ticker]<=0)delete nH[o.ticker];
+        await updateUser(u.id,{cash:Math.round((u.cash+o.qty*np)*100)/100,holdings:nH});
+        await updateCo(o.ticker,{price:np,shares_avail:co.shares_avail+o.qty,price_history:[...co.price_history,{p:np,t:isoNow()}]});
+        await recordTrade(o.ticker,o.qty,np,'exchange',u.id,'market_open');
+        await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'filled',filled_price:np,filled_at:ts()});o.status='filled';
+        await pushNotification(u.id,'after_hours','✅ After-hours sell filled: '+o.qty+'×'+o.ticker+' @ '+fmt(np)+' at session open',o.ticker);
+      } else if(o.side==='short'){
+        const price=co.price,coll=Math.round(price*o.qty*1.5*100)/100;
+        if(u.cash<coll){
+          await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'cancelled'});o.status='cancelled';
+          await pushNotification(u.id,'after_hours','❌ After-hours short for '+o.qty+'×'+o.ticker+' cancelled — insufficient collateral at open',o.ticker);
+          failed++;continue;
+        }
+        const sh={...shorts(u)};if(!sh[o.ticker])sh[o.ticker]={qty:0,avgPrice:0,collateral:0};
+        const ex=sh[o.ticker],tq=ex.qty+o.qty;
+        sh[o.ticker]={qty:tq,avgPrice:Math.round(((ex.avgPrice*ex.qty)+(price*o.qty))/tq*100)/100,collateral:Math.round((ex.collateral+coll)*100)/100};
+        await updateUser(u.id,{cash:Math.round((u.cash-coll)*100)/100,shorts:sh});
+        const np=impactPrice(co,o.qty,'sell');
+        await updateCo(o.ticker,{price:np,price_history:[...co.price_history,{p:np,t:isoNow()}]});
+        await recordTrade(o.ticker,o.qty,price,'short',u.id,'short');
+        await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'filled',filled_price:price,filled_at:ts()});o.status='filled';
+        await pushNotification(u.id,'after_hours','✅ After-hours short filled: '+o.qty+'×'+o.ticker+' @ '+fmt(price)+' at session open',o.ticker);
+      } else if(o.side==='cover'){
+        const sh={...shorts(u)},short=sh[o.ticker];
+        if(!short||short.qty<o.qty){
+          await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'cancelled'});o.status='cancelled';
+          await pushNotification(u.id,'after_hours','❌ After-hours cover for '+o.qty+'×'+o.ticker+' cancelled — insufficient short position at open',o.ticker);
+          failed++;continue;
+        }
+        const cp=impactPrice(co,o.qty,'buy'),pnl=Math.round((short.avgPrice-cp)*o.qty*100)/100;
+        const cb=Math.round((short.collateral*(o.qty/short.qty))*100)/100;
+        sh[o.ticker]={...short,qty:short.qty-o.qty,collateral:Math.round((short.collateral-cb)*100)/100};
+        if(sh[o.ticker].qty<=0)delete sh[o.ticker];
+        await updateUser(u.id,{cash:Math.round((u.cash+cb+pnl)*100)/100,shorts:sh});
+        await updateCo(o.ticker,{price:cp,price_history:[...co.price_history,{p:cp,t:isoNow()}]});
+        await recordTrade(o.ticker,o.qty,cp,u.id,'cover','cover');
+        await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'filled',filled_price:cp,filled_at:ts()});o.status='filled';
+        await pushNotification(u.id,'after_hours','✅ After-hours cover filled: '+o.qty+'×'+o.ticker+' @ '+fmt(cp)+' | P&L: '+(pnl>=0?'+':'')+fmt(pnl),o.ticker);
+      }
+      filled++;
+    }catch(err){
+      await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'cancelled'});o.status='cancelled';
+      failed++;console.warn('After-hours market order failed:',err);
+    }
+  }
+  const total=ahLimit.length+ahMarket.length;
+  if(total>0){
+    const parts=[];
+    if(ahLimit.length)parts.push(ahLimit.length+' limit order'+(ahLimit.length!==1?'s':'')+' activated');
+    if(filled)parts.push(filled+' market order'+(filled!==1?'s':'')+' filled at open');
+    if(failed)parts.push(failed+' cancelled');
+    toast('⏰ '+parts.join(' · '));
+  }
   render();
 }
 async function cancelLimitOrder(id){
@@ -1150,10 +1179,18 @@ async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
 }
 
 async function placeBuy(ticker,qty){
-  if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  const u=cu(),co=getCo(ticker);if(!u||!co)return;
   if(!canTradeTicker(ticker,u.id))return toast(ticker+' is restricted — you are not on the whitelist.');
   if(u.role==='company'&&co.owner_id===u.id)return toast("You can't buy your own company's stock — use Buyback instead.");
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  if(isHalted(ticker))return toast(ticker+' trading is currently halted.');
+  // After-hours: queue as market order
+  if(!isOpen()){
+    const order={id:uid(),user_id:u.id,ticker,side:'buy',qty,limit_price:0,status:'after_hours_market',ts:ts()};
+    await sb.post('jex_limit_orders',order);DB.limitOrders.push(order);
+    toast('After-hours order queued: buy '+qty+'×'+ticker+' — executes at open price when session starts');
+    render();return;
+  }
   if(co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
   const np=impactPrice(co,qty,'buy'),cost=Math.round(np*qty*100)/100;
   if(u.cash<cost)return toast('Insufficient funds (need '+fmt(cost)+')');
@@ -1165,10 +1202,18 @@ async function placeBuy(ticker,qty){
   toast('Bought '+qty+' × '+ticker+' @ '+fmt(np));openPanel(ticker);
 }
 async function placeSell(ticker,qty){
-  if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  const u=cu(),co=getCo(ticker);if(!u||!co)return;
   if(!canTradeTicker(ticker,u.id))return toast(ticker+' is restricted — you are not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  if(isHalted(ticker))return toast(ticker+' trading is currently halted.');
   const held=(holdings(u)[ticker])||0;if(held<qty)return toast('You only hold '+held+' shares');
+  // After-hours: queue as market order
+  if(!isOpen()){
+    const order={id:uid(),user_id:u.id,ticker,side:'sell',qty,limit_price:0,status:'after_hours_market',ts:ts()};
+    await sb.post('jex_limit_orders',order);DB.limitOrders.push(order);
+    toast('After-hours order queued: sell '+qty+'×'+ticker+' — executes at open price when session starts');
+    render();return;
+  }
   const np=impactPrice(co,qty,'sell');
   const nH={...holdings(u)};nH[ticker]=held-qty;if(nH[ticker]<=0)delete nH[ticker];
   await updateUser(u.id,{cash:Math.round((u.cash+qty*np)*100)/100,holdings:nH});
@@ -1178,9 +1223,17 @@ async function placeSell(ticker,qty){
   toast('Sold '+qty+' × '+ticker+' @ '+fmt(np));openPanel(ticker);
 }
 async function placeShort(ticker,qty){
-  if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  const u=cu(),co=getCo(ticker);if(!u||!co)return;
   if(!canTradeTicker(ticker,u.id))return toast(ticker+' is restricted — you are not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  if(isHalted(ticker))return toast(ticker+' trading is currently halted.');
+  // After-hours: queue as market order
+  if(!isOpen()){
+    const order={id:uid(),user_id:u.id,ticker,side:'short',qty,limit_price:0,status:'after_hours_market',ts:ts()};
+    await sb.post('jex_limit_orders',order);DB.limitOrders.push(order);
+    toast('After-hours order queued: short '+qty+'×'+ticker+' — executes at open price when session starts');
+    render();return;
+  }
   const price=co.price,coll=Math.round(price*qty*1.5*100)/100;
   if(u.cash<coll)return toast('Need '+fmt(coll)+' collateral');
   const sh={...shorts(u)};if(!sh[ticker])sh[ticker]={qty:0,avgPrice:0,collateral:0};
@@ -1193,10 +1246,18 @@ async function placeShort(ticker,qty){
   toast('Shorted '+qty+' × '+ticker+' @ '+fmt(price));openPanel(ticker);
 }
 async function coverShort(ticker,qty){
-  if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  const u=cu(),co=getCo(ticker);if(!u||!co)return;
   if(!canTradeTicker(ticker,u.id))return toast(ticker+' is restricted — you are not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  if(isHalted(ticker))return toast(ticker+' trading is currently halted.');
   const sh={...shorts(u)},short=sh[ticker];if(!short||short.qty<qty)return toast('You only have '+(short?.qty||0)+' shorted');
+  // After-hours: queue as market order
+  if(!isOpen()){
+    const order={id:uid(),user_id:u.id,ticker,side:'cover',qty,limit_price:0,status:'after_hours_market',ts:ts()};
+    await sb.post('jex_limit_orders',order);DB.limitOrders.push(order);
+    toast('After-hours order queued: cover '+qty+'×'+ticker+' — executes at open price when session starts');
+    render();return;
+  }
   const cp=impactPrice(co,qty,'buy'),pnl=Math.round((short.avgPrice-cp)*qty*100)/100;
   const cb=Math.round((short.collateral*(qty/short.qty))*100)/100;
   sh[ticker]={...short,qty:short.qty-qty,collateral:Math.round((short.collateral-cb)*100)/100};
@@ -1303,7 +1364,6 @@ async function postFinancials(ticker,rev,profit,summary){
   const fins=[{revenue:parseFloat(rev),profit:parseFloat(profit),summary:summary.trim(),ts:ts(),period:'Report '+(co.financials.length+1)},...co.financials];
   await updateCo(ticker,{financials:fins});
   await pushNotificationToHolders(ticker,'earnings','📊 '+co.name+' posted earnings: Rev '+fmt(parseFloat(rev))+', Profit '+fmt(parseFloat(profit)));
-  await applyEarningsSurprise(ticker,parseFloat(rev),parseFloat(profit));
   toast('Financials posted');render();
 }
 async function removeUser(uid2){
@@ -2077,11 +2137,13 @@ function addAlertForm(ticker){
   addPriceAlert(ticker,document.getElementById('alert-price')?.value,document.getElementById('alert-dir')?.value);
 }
 function cpTrade(mode){
-  const t=UI.companyPage;const q=get('cp-qty')?.value;
-  if(mode==='buy')placeBuy(t,q);
-  else if(mode==='sell')placeSell(t,q);
-  else if(mode==='short')placeShort(t,q);
-  else if(mode==='cover')coverShort(t,q);
+  const t=UI.companyPage;const q=parseInt(get('cp-qty')?.value)||0;
+  if(!q||!t)return toast('Enter a valid quantity');
+  const co=getCo(t);if(!co)return;
+  if(mode==='buy'){const np=impactPrice(co,q,'buy');confirmTrade({ticker:t,action:'Buy',qty:q,price:fmt(np),total:fmt(np*q),color:'var(--teal)',onConfirm:()=>placeBuy(t,q)});}
+  else if(mode==='sell'){const np=impactPrice(co,q,'sell');confirmTrade({ticker:t,action:'Sell',qty:q,price:fmt(np),total:fmt(np*q),color:'var(--red)',onConfirm:()=>placeSell(t,q)});}
+  else if(mode==='short'){const coll=Math.round(co.price*q*1.5*100)/100;confirmTrade({ticker:t,action:'Short sell',qty:q,price:fmt(co.price),total:fmt(coll)+' collateral',color:'var(--purple)',onConfirm:()=>placeShort(t,q)});}
+  else if(mode==='cover'){const cp=impactPrice(co,q,'buy');confirmTrade({ticker:t,action:'Cover short',qty:q,price:fmt(cp),total:fmt(cp*q),color:'#BA7517',onConfirm:()=>coverShort(t,q)});}
 }
 function cpLimit(side){
   const t=UI.companyPage;
@@ -2123,7 +2185,7 @@ function openPanel(ticker){
       ${short?`<button class="ot-btn ${mode==='cover'?'ot-cover':''}" onclick="UI.panelMode='cover';openPanel('${ticker}')">Cover</button>`:''}
     </div>
     ${mode==='buy'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Buy pushes price up. Available: <strong>${c.shares_avail}</strong> of ${c.shares.toLocaleString()}.</p>
-    <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${c.shares_avail}"></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="placeBuy('${ticker}',get('t-qty')?.value)">Buy now</button></div></div>
+    <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${c.shares_avail}"></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="(()=>{const q=parseInt(get('t-qty')?.value)||0,co=getCo('${ticker}');if(!q||!co)return;const np=impactPrice(co,q,'buy');confirmTrade({ticker:'${ticker}',action:'Buy',qty:q,price:fmt(np),total:fmt(np*q),color:'var(--teal)',onConfirm:()=>placeBuy('${ticker}',q)});})();">Buy now</button></div></div>
     <div id="t-preview">${impactPreview(c,1,'buy')}</div>
     <hr class="divider" style="margin:10px 0">
     <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy</div>
@@ -2132,7 +2194,7 @@ function openPanel(ticker){
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="placeLimitOrder('${ticker}','buy',get('t-lmt-qty')?.value,get('t-lmt-price')?.value)">Place limit</button></div>
     </div>`
-    :mode==='sell'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Sell pushes price down. You hold: <strong>${held}</strong>.</p>${held>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${held}"></div><div style="padding-bottom:12px"><button class="btn btn-danger" onclick="placeSell('${ticker}',get('t-qty')?.value)">Sell now</button></div></div>
+    :mode==='sell'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Sell pushes price down. You hold: <strong>${held}</strong>.</p>${held>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${held}"></div><div style="padding-bottom:12px"><button class="btn btn-danger" onclick="(()=>{const q=parseInt(get('t-qty')?.value)||0,co=getCo('${ticker}');if(!q||!co)return;const np=impactPrice(co,q,'sell');confirmTrade({ticker:'${ticker}',action:'Sell',qty:q,price:fmt(np),total:fmt(np*q),color:'var(--red)',onConfirm:()=>placeSell('${ticker}',q)});})();">Sell now</button></div></div>
     <div id="t-preview">${impactPreview(c,1,'sell')}</div>
     <hr class="divider" style="margin:10px 0">
     <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell</div>
@@ -2141,8 +2203,8 @@ function openPanel(ticker){
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="placeLimitOrder('${ticker}','sell',get('t-lmt-qty')?.value,get('t-lmt-price')?.value)">Place limit</button></div>
     </div>`:`<div class="empty" style="padding:16px">You don't hold any ${ticker}.</div>`}`
-    :mode==='short'?`<div class="ibox ibox-purple">Borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="placeShort('${ticker}',get('t-qty')?.value)">Short sell</button></div></div><div id="t-preview">${shortPrev(c,1)}</div>`
-    :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="coverShort('${ticker}',get('t-qty')?.value)">Cover short</button></div></div><div id="t-preview">${impactPreview(c,short.qty,'buy')}</div>`:''}
+    :mode==='short'?`<div class="ibox ibox-purple">Borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="(()=>{const q=parseInt(get('t-qty')?.value)||0,co=getCo('${ticker}');if(!q||!co)return;const coll=Math.round(co.price*q*1.5*100)/100;confirmTrade({ticker:'${ticker}',action:'Short sell',qty:q,price:fmt(co.price),total:fmt(coll)+' collateral',color:'var(--purple)',onConfirm:()=>placeShort('${ticker}',q)});})();">Short sell</button></div></div><div id="t-preview">${shortPrev(c,1)}</div>`
+    :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="(()=>{const q=parseInt(get('t-qty')?.value)||0,co=getCo('${ticker}');if(!q||!co)return;const cp=impactPrice(co,q,'buy');confirmTrade({ticker:'${ticker}',action:'Cover short',qty:q,price:fmt(cp),total:fmt(cp*q),color:'#BA7517',onConfirm:()=>coverShort('${ticker}',q)});})();">Cover short</button></div></div><div id="t-preview">${impactPreview(c,short.qty,'buy')}</div>`:''}
     `:`<div class="ibox ibox-red">🔒 <strong>${ticker} is a restricted share class.</strong> You are not on the whitelist and cannot trade this stock.</div>`}
   </div>`;
   const qi=get('t-qty');if(qi){qi.addEventListener('input',()=>{const q=parseInt(qi.value)||0,p=get('t-preview');if(!p)return;if(mode==='buy')p.innerHTML=impactPreview(c,q,'buy');else if(mode==='sell')p.innerHTML=impactPreview(c,q,'sell');else if(mode==='short')p.innerHTML=shortPrev(c,q);else if(mode==='cover')p.innerHTML=impactPreview(c,q,'buy');});}
@@ -2154,9 +2216,23 @@ function closePanel(){UI.panelTicker=null;destroyCharts();document.getElementByI
 // RENDER: LEADERBOARD
 // ═══════════════════════════════════════════════
 function renderLeaderboard(){
-  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nw(u),_divs:divRec(u)})).sort((a,b)=>b._nw-a._nw);
+  const snap=DB.session.leaderboard_snapshot;
   const rc=i=>i===0?'r-gold':i===1?'r-silver':i===2?'r-bronze':'';
-  return `<div class="card"><div class="section-title">Net worth leaderboard</div>${students.length?students.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${u.name}</div><div style="font-size:12px;color:var(--text2)">Cash ${fmt(u.cash)} | Portfolio ${fmt(pv(u))} | Dividends ${fmt(u._divs)}</div></div><div class="lb-val ${u._nw>=(DB.session.starting_cash||10000)?'price-up':'price-down'}">${fmt(u._nw)}</div></div>`).join(''):'<div class="empty">No students yet</div>'}</div>`;
+  const startCash=DB.session.starting_cash||10000;
+  if(snap&&snap.length){
+    // Frozen snapshot — session is closed
+    return `<div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <div class="section-title" style="margin-bottom:0">Net worth leaderboard</div>
+        <span class="badge b-amber" style="font-size:12px;padding:4px 10px">🔒 Frozen — session closed</span>
+      </div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:12px">Rankings locked at session close. Will update live when the next session opens.</div>
+      ${snap.map((s,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${s.name}</div><div style="font-size:12px;color:var(--text2)">Cash ${fmt(s.cash)} | Portfolio ${fmt(s.portfolio)} | Dividends ${fmt(s.divs)}</div></div><div class="lb-val ${s.nw>=startCash?'price-up':'price-down'}">${fmt(s.nw)}</div></div>`).join('')}
+    </div>`;
+  }
+  // Live leaderboard — session open or no snapshot yet
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nw(u),_divs:divRec(u)})).sort((a,b)=>b._nw-a._nw);
+  return `<div class="card"><div class="section-title">Net worth leaderboard <span class="badge b-green" style="font-size:11px;margin-left:6px">● Live</span></div>${students.length?students.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${u.name}</div><div style="font-size:12px;color:var(--text2)">Cash ${fmt(u.cash)} | Portfolio ${fmt(pv(u))} | Dividends ${fmt(u._divs)}</div></div><div class="lb-val ${u._nw>=startCash?'price-up':'price-down'}">${fmt(u._nw)}</div></div>`).join(''):'<div class="empty">No students yet</div>'}</div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -2671,16 +2747,9 @@ function renderNewsPage(){
 }
 
 function renderFinancials(co){
-  const myTarget=DB.earningsTargets.find(t=>t.ticker===co.ticker&&t.status!=='rejected');
-  const surprisePct=DB.session.earnings_surprise_pct||10;
   return`<div class="card"><div class="section-title">Post earnings report</div>
-    ${myTarget&&myTarget.status==='approved'?`<div class="ibox ibox-amber">Approved earnings target — Rev: <strong>${fmt(myTarget.target_revenue)}</strong> · Profit: <strong>${fmt(myTarget.target_profit)}</strong>. If you beat both, stock jumps +${surprisePct}%. If you miss both, it drops -${surprisePct}%.</div>`:''}
-    ${myTarget&&myTarget.status==='pending'?`<div class="ibox ibox-blue">Earnings target pending approval.</div>`:''}
     <div class="row"><div class="frow" style="flex:1"><label class="flabel">Revenue ($)</label><input type="number" id="fin-rev" placeholder="50000" min="0"></div><div class="frow" style="flex:1"><label class="flabel">Profit ($)</label><input type="number" id="fin-profit" placeholder="12000"></div></div><div class="frow"><label class="flabel">Summary (public)</label><textarea id="fin-sum" rows="2" placeholder="Strong Q1 driven by..."></textarea></div><button class="btn btn-primary" onclick="postFinancials('${co.ticker}',get('fin-rev')?.value,get('fin-profit')?.value,get('fin-sum')?.value)">Post report</button></div>
-    ${!myTarget||myTarget.status==='rejected'?`<div class="card"><div class="section-title">Propose an earnings target</div>
-    <div class="ibox ibox-purple">Submit a revenue and profit target to the Chairman. If approved, beating or missing both will auto-move your stock price ${surprisePct}% when you post earnings.</div>
-    <div class="row"><div class="frow" style="flex:1"><label class="flabel">Revenue target ($)</label><input type="number" id="et-rev" placeholder="50000" min="0"></div><div class="frow" style="flex:1"><label class="flabel">Profit target ($)</label><input type="number" id="et-profit" placeholder="12000"></div></div>
-    <button class="btn btn-warning" onclick="submitEarningsTarget('${co.ticker}',get('et-rev')?.value,get('et-profit')?.value)">Submit target</button></div>`:''}${co.financials&&co.financials.length?`<div class="card"><div class="section-title">Past reports</div><table><thead><tr><th>Period</th><th>Revenue</th><th>Profit</th><th>Margin</th><th>Summary</th></tr></thead><tbody>${co.financials.map(f=>`<tr><td style="color:var(--text2)">${f.period}</td><td style="font-family:var(--mono)">${fmt(f.revenue)}</td><td style="font-family:var(--mono);color:${f.profit>=0?'var(--green)':'var(--red)'}">${fmt(f.profit)}</td><td>${f.revenue>0?Math.round((f.profit/f.revenue)*100)+'%':'—'}</td><td style="font-size:12px;color:var(--text2)">${f.summary}</td></tr>`).join('')}</tbody></table></div>`:''}`;}
+    ${co.financials&&co.financials.length?`<div class="card"><div class="section-title">Past reports</div><table><thead><tr><th>Period</th><th>Revenue</th><th>Profit</th><th>Margin</th><th>Summary</th></tr></thead><tbody>${co.financials.map(f=>`<tr><td style="color:var(--text2)">${f.period}</td><td style="font-family:var(--mono)">${fmt(f.revenue)}</td><td style="font-family:var(--mono);color:${f.profit>=0?'var(--green)':'var(--red)'}">${fmt(f.profit)}</td><td>${f.revenue>0?Math.round((f.profit/f.revenue)*100)+'%':'—'}</td><td style="font-size:12px;color:var(--text2)">${f.summary}</td></tr>`).join('')}</tbody></table></div>`:''}`;}
 function renderDivTab(co,myDivs){
   const sh=shareholders(co.ticker),owner=cu();
   return`<div class="card"><div class="section-title">Pay a dividend</div><div class="ibox ibox-teal">Paid immediately from company cash to all shareholders.</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">Shareholders</div><div class="mval">${sh.length}</div></div><div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${(co.shares-co.shares_avail).toLocaleString()}</div></div></div>
@@ -2801,7 +2870,7 @@ function renderAdmin(){
   // President can only see: session, balances, passwords
   const presidentTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
   const sectreTabs=[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
-  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['earnings','Earnings targets'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log']];
+  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log']];
   const tabs=chair?chairmanTabs:isPresident(u)?presidentTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
 
@@ -2818,7 +2887,6 @@ function renderAdmin(){
   :UI.adminTab==='users'?renderAdminUsers(students,companies)
   :UI.adminTab==='dashboard'?renderAdminDashboard()
   :UI.adminTab==='founder_allocs'?renderAdminFounderAllocs()
-  :UI.adminTab==='earnings'?renderAdminEarnings()
   :UI.adminTab==='news'?renderAdminNews()
   :UI.adminTab==='announcements'?renderAdminAnnouncements()
   :UI.adminTab==='classes'?renderAdminClasses()
@@ -3099,32 +3167,6 @@ function renderAdminFounderAllocs(){
         +'</tr>').join('')
       +'</tbody></table></div>':'');
 }
-function renderAdminEarnings(){
-  const pending=DB.earningsTargets.filter(t=>t.status==='pending');
-  const approved=DB.earningsTargets.filter(t=>t.status==='approved');
-  const rejected=DB.earningsTargets.filter(t=>t.status==='rejected');
-  const surprisePct=DB.session.earnings_surprise_pct||10;
-  return`<div class="card"><div class="section-title">Earnings surprise settings</div>
-    <div class="ibox ibox-blue">When a company posts earnings that <strong>beat both targets</strong>, their stock auto-jumps ${surprisePct}%. If they <strong>miss both</strong>, it drops ${surprisePct}%. Mixed results have no auto-effect.</div>
-    <div class="row" style="align-items:flex-end">
-      <div class="frow" style="flex:1"><label class="flabel">Price impact % on beat/miss</label><input type="number" id="surprise-pct" value="${surprisePct}" min="1" max="50" step="1"></div>
-      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="saveSurprisePct()">Save</button></div>
-    </div>
-  </div>
-  <div class="card"><div class="section-title">Pending earnings targets ${pending.length?`<span class="badge b-amber" style="margin-left:4px">${pending.length}</span>`:''}</div>
-    ${pending.length?pending.map(t=>`<div class="app-row"><div class="app-info">
-      <div class="app-name">${t.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></div>
-      <div class="app-meta">Revenue target: ${fmt(t.target_revenue)} · Profit target: ${fmt(t.target_profit)} · ${t.ts}</div>
-    </div><div class="btn-row">
-      <button class="btn btn-success btn-sm" onclick="reviewEarningsTarget('${t.id}',true)">Approve</button>
-      <button class="btn btn-danger btn-sm" onclick="reviewEarningsTarget('${t.id}',false)">Reject</button>
-    </div></div>`).join(''):'<div class="empty">No pending targets</div>'}
-  </div>
-  ${approved.length?`<div class="card"><div class="section-title">Approved targets</div>
-    <table><thead><tr><th>Company</th><th>Ticker</th><th>Rev target</th><th>Profit target</th><th>Submitted</th></tr></thead>
-    <tbody>${approved.map(t=>`<tr><td>${t.company_name}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.target_revenue)}</td><td style="font-family:var(--mono)">${fmt(t.target_profit)}</td><td style="color:var(--text2)">${t.ts}</td></tr>`).join('')}
-    </tbody></table></div>`:''}`;
-}
 
 function renderAdminNews(){
   const items=DB.news;
@@ -3182,7 +3224,7 @@ function renderNotifications(){
   const notifs=myNotifications();
   const u=cu();
   const unread=notifs.filter(n=>!n.read).length;
-  const typeIcon={dividend:'💰',news:'📰',earnings:'📊',vote:'🗳️',vote_closed:'🗳️',ipo:'🏢',session:'🟢',limit_fill:'⚡',after_hours:'⏰',halt:'⚠️',resume:'✅',invite:'🤝',founder_alloc:'🎁',price_adj:'📊',earnings_surprise:'📈'};
+  const typeIcon={dividend:'💰',news:'📰',earnings:'📊',vote:'🗳️',vote_closed:'🗳️',ipo:'🏢',session:'🟢',limit_fill:'⚡',after_hours:'⏰',halt:'⚠️',resume:'✅',invite:'🤝',founder_alloc:'🎁',price_adj:'📊'};
   return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
     Notifications ${unread?`<span class="badge b-red">${unread} unread</span>`:''}
     ${notifs.length?`<button class="btn btn-sm" onclick="markAllRead()">Mark all read</button>`:''}
@@ -3214,20 +3256,26 @@ function renderStudentOrders(){
   const u=cu();if(!u)return'';
   const myOrders=DB.limitOrders.filter(o=>o.user_id===u.id).reverse();
   const open=myOrders.filter(o=>o.status==='open');
-  const afterHours=myOrders.filter(o=>o.status==='after_hours');
-  const closed=myOrders.filter(o=>o.status!=='open'&&o.status!=='after_hours');
+  const afterHoursLimit=myOrders.filter(o=>o.status==='after_hours');
+  const afterHoursMarket=myOrders.filter(o=>o.status==='after_hours_market');
+  const closed=myOrders.filter(o=>o.status!=='open'&&o.status!=='after_hours'&&o.status!=='after_hours_market');
   const openBook=DB.limitOrders.filter(o=>o.status==='open'&&o.user_id===u.id);
   const bookByTicker={};
   openBook.forEach(o=>{if(!bookByTicker[o.ticker])bookByTicker[o.ticker]=[];bookByTicker[o.ticker].push(o);});
-  const ahSection=afterHours.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">After-hours orders <span class="badge b-amber">${afterHours.length} queued</span></div>
-    <div class="ibox ibox-amber">These orders activate automatically when the next session opens.</div>
+  const sideBadge=side=>side==='buy'?'b-teal':side==='sell'?'b-red':side==='short'?'b-purple':'b-amber';
+  const ahMarketSection=afterHoursMarket.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">After-hours market orders <span class="badge b-amber">${afterHoursMarket.length} queued</span></div>
+    <div class="ibox ibox-amber">These market orders will execute automatically at the opening price when the next session starts. They may be cancelled if funds or shares are insufficient at open.</div>
+    <table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>Execution</th><th>Placed</th><th></th></tr></thead>
+    <tbody>${afterHoursMarket.map(o=>`<tr><td><span class="badge b-gray" style="font-family:var(--mono)">${o.ticker}</span></td><td><span class="badge ${sideBadge(o.side)}">${o.side}</span></td><td>${o.qty}</td><td style="color:var(--text2);font-size:12px">Market — at open price</td><td style="color:var(--text2)">${o.ts}</td><td><button class="btn btn-sm btn-danger" onclick="cancelLimitOrder('${o.id}')">Cancel</button></td></tr>`).join('')}</tbody></table></div>`:'';
+  const ahLimitSection=afterHoursLimit.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">After-hours limit orders <span class="badge b-amber">${afterHoursLimit.length} queued</span></div>
+    <div class="ibox ibox-amber">These limit orders activate automatically when the next session opens.</div>
     <table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>Limit price</th><th>Placed</th><th></th></tr></thead>
-    <tbody>${afterHours.map(o=>`<tr><td><span class="badge b-gray" style="font-family:var(--mono)">${o.ticker}</span></td><td><span class="badge ${o.side==='buy'?'b-teal':'b-red'}">${o.side}</span></td><td>${o.qty}</td><td style="font-family:var(--mono);font-weight:500">${fmt(o.limit_price)}</td><td style="color:var(--text2)">${o.ts}</td><td><button class="btn btn-sm btn-danger" onclick="cancelLimitOrder('${o.id}')">Cancel</button></td></tr>`).join('')}</tbody></table></div>`:'';
-  return ahSection+`<div class="card"><div class="section-title">Open limit orders</div>
+    <tbody>${afterHoursLimit.map(o=>`<tr><td><span class="badge b-gray" style="font-family:var(--mono)">${o.ticker}</span></td><td><span class="badge ${sideBadge(o.side)}">${o.side}</span></td><td>${o.qty}</td><td style="font-family:var(--mono);font-weight:500">${fmt(o.limit_price)}</td><td style="color:var(--text2)">${o.ts}</td><td><button class="btn btn-sm btn-danger" onclick="cancelLimitOrder('${o.id}')">Cancel</button></td></tr>`).join('')}</tbody></table></div>`:'';
+  return ahMarketSection+ahLimitSection+`<div class="card"><div class="section-title">Open limit orders</div>
     ${open.length?`<table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>Limit price</th><th>Current price</th><th>Placed</th><th></th></tr></thead>
     <tbody>${open.map(o=>{const co=getCo(o.ticker);return`<tr>
       <td><span class="badge b-gray" style="font-family:var(--mono)">${o.ticker}</span></td>
-      <td><span class="badge ${o.side==='buy'?'b-teal':'b-red'}">${o.side}</span></td>
+      <td><span class="badge ${sideBadge(o.side)}">${o.side}</span></td>
       <td>${o.qty}</td>
       <td style="font-family:var(--mono);font-weight:500">${fmt(o.limit_price)}</td>
       <td style="font-family:var(--mono)">${co?fmt(co.price):'—'}</td>
@@ -3239,11 +3287,11 @@ function renderStudentOrders(){
     <table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>Limit</th><th>Fill price</th><th>Status</th><th>Placed</th></tr></thead>
     <tbody>${closed.map(o=>`<tr>
       <td><span class="badge b-gray" style="font-family:var(--mono)">${o.ticker}</span></td>
-      <td><span class="badge ${o.side==='buy'?'b-teal':'b-red'}">${o.side}</span></td>
+      <td><span class="badge ${sideBadge(o.side)}">${o.side}</span></td>
       <td>${o.qty}</td>
-      <td style="font-family:var(--mono)">${fmt(o.limit_price)}</td>
+      <td style="font-family:var(--mono)">${o.limit_price?fmt(o.limit_price):'market'}</td>
       <td style="font-family:var(--mono)">${o.filled_price?fmt(o.filled_price):'—'}</td>
-      <td><span class="badge ${o.status==='filled'?'b-green':'b-gray'}">${o.status}</span></td>
+      <td><span class="badge ${o.status==='filled'?'b-green':o.status==='cancelled'?'b-red':'b-gray'}">${o.status.replace('_',' ')}</span></td>
       <td style="color:var(--text2)">${o.ts}</td>
     </tr>`).join('')}</tbody></table></div>`:''}`;
 }
