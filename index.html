@@ -1789,7 +1789,7 @@ function renderTopbar(){
 function renderBanner(){
   const s=DB.session,cls=s.status==='open'?'s-open':s.status==='paused'?'s-paused':'s-closed';
   const timer=s.ends_at?'<span id="timer-el" class="timer">...</span>':'';
-  const u=cu();const canControl=isAdmin(u);
+  const u=cu();const canControl=isChairman(u)||isPresident(u);
   const ann=DB.announcements&&DB.announcements[0]||null;
   let annHtml='';
   if(ann){
