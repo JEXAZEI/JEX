@@ -211,10 +211,10 @@ const pv=u=>Object.entries(holdings(u)).reduce((s,[t,q])=>{const c=getCo(t);retu
 const sPnl=u=>Object.entries(shorts(u)).reduce((s,[t,pos])=>{const c=getCo(t);if(!c)return s;return s+Math.round((pos.avgPrice-c.price)*pos.qty*100)/100;},0);
 const divRec=u=>DB.dividends.reduce((s,d)=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);return s+(p?p.payout:0);},0);
 const nw=u=>Math.round((u.cash+pv(u)+sPnl(u))*100)/100;
-const isAdmin=u=>(['chairman','president'].includes(u?.role));
+const isAdmin=u=>(['chairman','president','secretary','treasurer'].includes(u?.role));
 const isChairman=u=>u?.role==='chairman';
 const isPresident=u=>u?.role==='president';
-const isSecTre=u=>false; // secretary/treasurer roles not in DB schema
+const isSecTre=u=>u?.role==='secretary'||u?.role==='treasurer';
 const isOpen=()=>DB.session.status==='open';
 const requireOpen=(ticker=null)=>{
   if(!isOpen()){toast('Trading is '+DB.session.status+'. Wait for the session to open.');return false;}
@@ -226,8 +226,8 @@ const divTotal=(ticker,ps)=>shareholders(ticker).reduce((s,u)=>s+Math.round(((ho
 const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);return Math.max(0.01,Math.round((dir==='buy'?co.price*(1+impact):co.price*(1-impact))*100)/100);};
 const isWatched=ticker=>{const u=cu();return u&&watchlist(u).includes(ticker);};
 const sharesBar=co=>{const pct=co.shares>0?Math.round((co.shares_avail/co.shares)*100):0;return `<div class="sbar-wrap"><div style="font-size:12px;font-weight:500;font-family:var(--mono)">${co.shares_avail.toLocaleString()} <span style="font-weight:400;color:var(--text2)">/ ${co.shares.toLocaleString()}</span></div><div style="font-size:11px;color:var(--text3);margin-top:1px">${pct}% available</div><div class="sbar-bg"><div class="sbar-fill" style="width:${pct}%"></div></div></div>`;};
-const roleBadge=role=>role==='chairman'?'<span class="badge b-chair">Chairman</span>':role==='president'?'<span class="badge b-pres">President</span>':role==='student'?'<span class="badge b-blue">Student</span>':role==='company'?'<span class="badge b-amber">Company</span>':'';
-const avatarClass=role=>role==='chairman'?'av-ch':role==='president'?'av-pr':role==='company'?'av-c':'av-s';
+const roleBadge=role=>role==='chairman'?'<span class="badge b-chair">Chairman</span>':role==='president'?'<span class="badge b-pres">President</span>':role==='secretary'?'<span class="badge b-sec">Secretary</span>':role==='treasurer'?'<span class="badge b-tre">Treasurer</span>':role==='student'?'<span class="badge b-blue">Student</span>':role==='company'?'<span class="badge b-amber">Company</span>':'';
+const avatarClass=role=>role==='chairman'?'av-ch':role==='president'?'av-pr':role==='secretary'?'av-sec':role==='treasurer'?'av-tre':role==='company'?'av-c':'av-s';
 
 function toast(msg){const t=get('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3200);}
 
@@ -1754,6 +1754,8 @@ function renderLogin(){
   const companies=DB.users.filter(u=>u.role==='company'&&u.status==='approved');
   const chairman=DB.users.find(u=>u.role==='chairman');
   const president=DB.users.find(u=>u.role==='president');
+  const secretary=DB.users.find(u=>u.role==='secretary');
+  const treasurer=DB.users.find(u=>u.role==='treasurer');
   const pending=DB.pending.length;
   const acctRow=(u,cls)=>`<div class="acct-item" onclick="UI.pendingLoginId='${u.id}';UI.loginView='password';render()"><div class="avatar ${cls}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><div><div class="acct-name">${u.name} ${roleBadge(u.role)}${isAdmin(u)&&pending?` <span class="badge b-blue">${pending} pending</span>`:''}</div>${!isAdmin(u)?`<div class="acct-email">${u.email}</div>`:''}</div></div>`;
   if(UI.loginView==='password'){const u=getUser(UI.pendingLoginId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Sign in as ${u?.name||'user'}</div>${!isAdmin(u)?`<div class="frow"><label class="flabel">Email</label><div style="padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;color:var(--text2);background:var(--bg3)">${u?.email||''}</div></div>`:``}<div class="frow"><label class="flabel">Password</label><input type="password" id="login-pw" placeholder="Enter password" onkeydown="if(event.key==='Enter')loginWith(UI.pendingLoginId,get('login-pw')?.value)"></div><div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn btn-primary" onclick="loginWith(UI.pendingLoginId,get('login-pw')?.value)">Sign in</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div><button class="link-btn" onclick="UI.loginView='forgot-email';render()">Forgot password?</button></div></div>`;}
@@ -1764,6 +1766,8 @@ function renderLogin(){
   return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span> — JTED Stock Exchange</div><div class="login-sub">Sign in to your account</div><div class="acct-list">
     ${chairman?acctRow(chairman,'av-ch'):''}
     ${president?acctRow(president,'av-pr'):''}
+    ${secretary?acctRow(secretary,'av-sec'):''}
+    ${treasurer?acctRow(treasurer,'av-tre'):''}
     ${companies.map(u=>acctRow(u,'av-c')).join('')}
     ${students.map(u=>acctRow(u,'av-s')).join('')}
   </div><div style="display:flex;justify-content:flex-start;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)"><button class="btn btn-sm btn-primary" onclick="UI.loginView='register';render()">Register new account</button></div></div></div>`;
@@ -3598,7 +3602,7 @@ async function boot(){
       UI.userId=savedId;const u=DB.users.find(u=>u.id===savedId);
       const coIsListed=u?.role==='company'&&DB.companies.some(c=>c.owner_id===u.id);
       UI.navTab=isAdmin(u)?'admin':u?.role==='company'?(coIsListed?'mystock':'apply'):'market';
-    if(isAdmin(u))UI.adminTab='dashboard';
+    if(isAdmin(u))UI.adminTab=isChairman(u)||isPresident(u)?'dashboard':'announcements';
     }
     if(DB.session.ends_at&&DB.session.status==='open')sessionTimer=setInterval(tickTimer,500);
     SHEETS_URL=DB.session.sheets_url||null;
