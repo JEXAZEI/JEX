@@ -888,7 +888,7 @@ async function resetExchange(){
     await sb.del('jex_votes','id=neq.x');
     await sb.del('jex_companies','id=neq.x');
     await sb.del('jex_users','role=in.(student,company)');
-    await sb.patch('jex_session','id=eq.1',{status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,sheets_url:null});
+    await sb.patch('jex_session','id=eq.1',{status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,sheets_url:null,leaderboard_snapshot:null,session_open_prices:{}});
     await loadAll();
     SHEETS_URL=null;
     UI.navTab='admin';UI.adminTab='session';UI.companyPage=null;
@@ -944,8 +944,9 @@ async function placeLimitOrder(ticker,side,qty,limitPrice){
   qty=parseInt(qty);limitPrice=parseFloat(limitPrice);
   if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(isNaN(limitPrice)||limitPrice<=0)return toast('Enter a valid limit price');
+  if(DB.session.status==='paused')return toast('Trading is paused. Wait for the session to resume.');
   // After-hours: queue for session open
-  if(!isOpen()){
+  if(DB.session.status==='closed'){
     if(side==='buy'){const maxCost=Math.round(limitPrice*qty*100)/100;if(u.cash<maxCost)return toast('Insufficient funds (need '+fmt(maxCost)+' at limit price)');}
     else{const held=(holdings(u)[ticker])||0;if(held<qty)return toast('You only hold '+held+' shares');}
     const order={id:uid(),user_id:u.id,ticker,side,qty,limit_price:limitPrice,status:'after_hours',ts:ts()};
