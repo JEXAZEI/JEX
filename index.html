@@ -404,6 +404,7 @@ async function registerStudent(name,email,pw,secQ,secA){
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
   if(DB.users.find(u=>norm(u.email)===norm(email))||DB.pending.find(r=>norm(r.email)===norm(email)))return toast('Email already registered or pending');
+  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'student',sec_q:secQ,sec_a:norm(secA),ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';render();
 }
@@ -417,6 +418,7 @@ async function registerCompany(name,email,pw,desc,secQ,secA){
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
   if(DB.users.find(u=>norm(u.email)===norm(email))||DB.pending.find(r=>norm(r.email)===norm(email)))return toast('Email already registered or pending');
+  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';render();
 }
