@@ -275,7 +275,7 @@ async function saveCBPct(){
   const pct=parseInt(document.getElementById('cb-pct')?.value);
   if(isNaN(pct)||pct<1||pct>100)return toast('Enter a value between 1 and 100');
   await saveSession({circuit_breaker_pct:pct});
-  toast('Circuit breaker set to '+pct+'%');setTimeout(fullRefresh,500);
+  toast('Circuit breaker set to '+pct+'%');render();
 }
 async function saveSheetsUrl(url){
   url=(url||'').trim();
@@ -320,13 +320,13 @@ async function pushBalances(){
 async function setSession(status){const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';clearInterval(sessionTimer);sessionTimer=null;await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null});const u=cu();await logActivity('session','Session '+status+(u?' by '+u.name:''),{userId:u?.id,userName:u?.name});
   if(status==='open'){await clearLeaderboardSnapshot();await pushNotificationToAll('session','🟢 Trading session is now open!');activateAfterHoursOrders();recordSessionOpenPrices();}
   if(status==='closed'){await snapshotLeaderboard();await pushNotificationToAll('session','🔴 Trading session has closed.');}
-  setTimeout(fullRefresh,500);
+  setTimeout(quickRefresh,500);
   render();}
-async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await clearLeaderboardSnapshot();await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);setTimeout(fullRefresh,500);render();}
-function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){snapshotLeaderboard().then(()=>saveSession({status:'closed',label:'Session ended',ends_at:null})).then(()=>{clearInterval(sessionTimer);sessionTimer=null;toast('Session ended!');fullRefresh();});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
-async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');setTimeout(fullRefresh,500);}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});await clearLeaderboardSnapshot();sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');setTimeout(fullRefresh,500);}render();}
-async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');setTimeout(fullRefresh,500);render();}
-function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;clearLeaderboardSnapshot().then(()=>saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null})).then(()=>{sessionTimer=setInterval(tickTimer,500);toast('Trading session is now open!');fullRefresh();});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){snapshotLeaderboard().then(()=>saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null})).then(()=>{clearInterval(sessionTimer);sessionTimer=null;toast('Session ended.');fullRefresh();});}}
+async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await clearLeaderboardSnapshot();await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);setTimeout(quickRefresh,500);render();}
+function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){snapshotLeaderboard().then(()=>saveSession({status:'closed',label:'Session ended',ends_at:null})).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
+async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');setTimeout(quickRefresh,500);}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});await clearLeaderboardSnapshot();sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');setTimeout(quickRefresh,500);}render();}
+async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');setTimeout(quickRefresh,500);render();}
+function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;clearLeaderboardSnapshot().then(()=>saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null})).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('Trading session is now open!');});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){snapshotLeaderboard().then(()=>saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null})).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended.');});}}
 setInterval(()=>{checkSchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
 
 // ── Auto-refresh: pull latest data every 20 seconds ──────
@@ -338,7 +338,7 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newUsers]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs]=await Promise.all([
       sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_companies','order=created_at.asc'),
@@ -346,12 +346,11 @@ async function autoRefresh(){
       sb.get('jex_limit_orders','order=created_at.asc'),
       sb.get('jex_company_members','order=created_at.asc'),
       sb.get('jex_founder_allocations','order=created_at.desc'),
-      sb.get('jex_users','order=created_at.asc'),
     ]);
+    const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
     DB.session=newSession[0]||DB.session;
     DB.companies=newCompanies;
-    DB.users=newUsers;
     DB.companyMembers=newMembers;
     DB.founderAllocations=newAllocs;
     // Merge new trades (avoid duplicates)
@@ -360,67 +359,32 @@ async function autoRefresh(){
     DB.limitOrders=newLimitOrders;
     // Update session timer if needed
     if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
-    render();
+    // Re-render topbar + banner silently (just update bell count and session banner)
+    const newUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
+    const bannerHasStatus=document.querySelector('.session-banner')?.classList.contains('s-'+DB.session.status);
+    if(newUnread!==prevUnread||!bannerHasStatus){
+      render(); // full render only if something actually changed
+    }
   }catch(e){/* silent fail */}
 }
 setInterval(autoRefresh,20000);
 
-// ── Quick refresh: fires after trades — reloads prices, users, session ──
+// ── Quick refresh: fires after trades, session changes, dividends ──
+// Only fetches companies (prices) + current user's data
 async function quickRefresh(){
   if(!UI.userId)return;
   try{
-    const [newCompanies,newSession,newNotifs,newUsers]=await Promise.all([
+    const [newCompanies,newSession,newNotifs]=await Promise.all([
       sb.get('jex_companies','order=created_at.asc'),
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
-      sb.get('jex_users','order=created_at.asc'),
     ]);
     DB.companies=newCompanies;
     DB.session=newSession[0]||DB.session;
     DB.notifications=newNotifs;
-    DB.users=newUsers;
     if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
     render();
   }catch(e){console.warn('quickRefresh failed:',e);}
-}
-
-// ── Full refresh: fires after admin actions that touch many tables ──
-async function fullRefresh(){
-  if(!UI.userId)return;
-  try{
-    const [users,companies,session,notifications,trades,limitOrders,dividends,ipoApps,dilApps,founderAllocations,companyMembers,halts,announcements,pending]=await Promise.all([
-      sb.get('jex_users','order=created_at.asc'),
-      sb.get('jex_companies','order=created_at.asc'),
-      sb.get('jex_session','id=eq.1'),
-      sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
-      sb.get('jex_trades','order=id.desc&limit=200'),
-      sb.get('jex_limit_orders','order=created_at.asc'),
-      sb.get('jex_dividends','order=created_at.asc'),
-      sb.get('jex_ipo_applications','order=created_at.asc'),
-      sb.get('jex_dilution_applications','order=created_at.asc'),
-      sb.get('jex_founder_allocations','order=created_at.desc'),
-      sb.get('jex_company_members','order=created_at.asc'),
-      sb.get('jex_halts','order=created_at.asc'),
-      sb.get('jex_announcements','order=created_at.desc'),
-      sb.get('jex_pending','order=created_at.asc'),
-    ]);
-    DB.users=users;
-    DB.companies=companies;
-    DB.session=session[0]||DB.session;
-    DB.notifications=notifications;
-    DB.trades=trades;
-    DB.limitOrders=limitOrders;
-    DB.dividends=dividends;
-    DB.ipoApps=ipoApps;
-    DB.dilApps=dilApps;
-    DB.founderAllocations=founderAllocations;
-    DB.companyMembers=companyMembers;
-    DB.halts=halts;
-    DB.announcements=announcements;
-    DB.pending=pending;
-    if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
-    render();
-  }catch(e){console.warn('fullRefresh failed:',e);}
 }
 
 // ═══════════════════════════════════════════════
@@ -437,17 +401,6 @@ async function registerStudent(name,email,pw,secQ,secA){
   if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
-  // Check email uniqueness live against DB (local cache may be stale)
-  try{
-    const [existU,existP]=await Promise.all([
-      sb.get('jex_users','email=eq.'+norm(email)+'&limit=1'),
-      sb.get('jex_pending','email=eq.'+norm(email)+'&limit=1'),
-    ]);
-    if(existU.length||existP.length)return toast('Email already registered or pending');
-  }catch(e){
-    // Fall back to local check if live check fails
-    if(DB.users.find(u=>norm(u.email)===norm(email))||DB.pending.find(r=>norm(r.email)===norm(email)))return toast('Email already registered or pending');
-  }
   const rec={id:uid(),name:n,email:norm(email),password:pw,role:'student',sec_q:secQ,sec_a:norm(secA),ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';render();
@@ -461,16 +414,6 @@ async function registerCompany(name,email,pw,desc,secQ,secA){
   if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
-  // Check email uniqueness live against DB (local cache may be stale)
-  try{
-    const [existU,existP]=await Promise.all([
-      sb.get('jex_users','email=eq.'+norm(email)+'&limit=1'),
-      sb.get('jex_pending','email=eq.'+norm(email)+'&limit=1'),
-    ]);
-    if(existU.length||existP.length)return toast('Email already registered or pending');
-  }catch(e){
-    if(DB.users.find(u=>norm(u.email)===norm(email))||DB.pending.find(r=>norm(r.email)===norm(email)))return toast('Email already registered or pending');
-  }
   const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';render();
@@ -485,9 +428,9 @@ async function approveReg(id,startCash){
   await sb.post('jex_users',u);await sb.del('jex_pending','id=eq.'+id);
   DB.users.push(u);DB.pending=DB.pending.filter(x=>x.id!==id);
   await logActivity('registration',r.name+' approved ('+r.role+') with '+fmt(startCash),{userId:r.id,userName:r.name,amount:startCash});
-  toast(r.name+' approved with '+fmt(startCash));setTimeout(fullRefresh,500);render();
+  toast(r.name+' approved with '+fmt(startCash));setTimeout(quickRefresh,500);render();
 }
-async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');setTimeout(fullRefresh,500);render();}
+async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');setTimeout(quickRefresh,500);render();}
 function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u||u.password!==pw)return toast('Wrong password');UI.userId=uid2;const r=u.role;const coIsListed=r==='company'&&DB.companies.some(c=>c.owner_id===uid2);UI.navTab=isAdmin(u)?'admin':r==='company'?(coIsListed?'mystock':'apply'):'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}render();}
 function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
 async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;if(u.password!==cur)return toast('Current password incorrect');if(!nw2||nw2.length<4)return toast('Min 4 characters');if(nw2!==conf)return toast('Passwords do not match');await sb.patch('jex_users','id=eq.'+uid2,{password:nw2});u.password=nw2;toast('Password changed');render();}
@@ -507,13 +450,13 @@ async function postNews(ticker,headline,body){
   await sb.post('jex_news',rec);
   DB.news.unshift(rec);
   await pushNotificationToHolders(ticker,'news','📰 '+co.name+': '+headline.trim());
-  toast('News posted');UI.companyTab='news';setTimeout(quickRefresh,500);
+  toast('News posted');UI.companyTab='news';render();
 }
 async function deleteNews(id){
   if(!confirm('Delete this news post?'))return;
   await sb.del('jex_news','id=eq.'+id);
   DB.news=DB.news.filter(n=>n.id!==id);
-  toast('News deleted');setTimeout(quickRefresh,500);
+  toast('News deleted');render();
 }
 
 // ── Activity log ────────────────────────────────────────
@@ -536,13 +479,13 @@ async function postAnnouncement(title,body,level){
   await sb.post('jex_announcements',rec);
   DB.announcements.unshift(rec);
   await logActivity('announcement','Announcement posted: '+title.trim(),{userId:u.id,userName:u.name});
-  toast('Announcement posted');setTimeout(fullRefresh,500);render();
+  toast('Announcement posted');setTimeout(quickRefresh,500);render();
 }
 async function deleteAnnouncement(id){
   if(!confirm('Delete this announcement?'))return;
   await sb.del('jex_announcements','id=eq.'+id);
   DB.announcements=DB.announcements.filter(a=>a.id!==id);
-  toast('Announcement deleted');setTimeout(fullRefresh,500);render();
+  toast('Announcement deleted');setTimeout(quickRefresh,500);render();
 }
 
 // ── Limit orders ────────────────────────────────────────
@@ -612,7 +555,7 @@ async function respondToInvite(memberId,accept){
     );
     toast('Invitation declined');
   }
-  setTimeout(fullRefresh,500);
+  render();
 }
 
 // ── Founder share allocations ─────────────────────────────
@@ -663,7 +606,7 @@ async function reviewFounderAllocation(id,approve){
     await pushNotification(a.student_id,'founder_alloc','❌ Founder share request for '+a.company_name+' was rejected.');
     toast('Allocation rejected');
   }
-  setTimeout(fullRefresh,500);
+  setTimeout(quickRefresh,500);
   render();
 }
 
@@ -731,7 +674,7 @@ async function inviteFounder(ticker,studentName){
   await sb.post('jex_founders',rec);DB.founders.push(rec);
   await logActivity('founder',student.name+' added as co-founder of '+co.name,{ticker,userId:student.id,userName:student.name});
   await pushNotification(student.id,'founder','🏢 You have been added as a co-founder of '+co.name+'!',ticker);
-  toast(student.name+' added as co-founder');setTimeout(fullRefresh,500);
+  toast(student.name+' added as co-founder');render();
 }
 
 async function removeFounder(ticker,studentId){
@@ -741,7 +684,7 @@ async function removeFounder(ticker,studentId){
   await sb.patch('jex_founders','id=eq.'+f.id,{status:'removed'});
   f.status='removed';
   await pushNotification(studentId,'founder','You have been removed as a co-founder of '+f.company_name+'.',ticker);
-  toast('Co-founder removed');setTimeout(fullRefresh,500);
+  toast('Co-founder removed');render();
 }
 
 
@@ -781,7 +724,7 @@ async function sendFounderInvite(ownerId,studentId){
     '🤝 '+u.name+' has invited you to join '+co.name+' as a founder. Accept or decline below.',
     co.ticker
   );
-  toast('Invitation sent to '+student.name);setTimeout(fullRefresh,500);
+  toast('Invitation sent to '+student.name);render();
 }
 
 // (respondToInvite uses jex_company_members)
@@ -795,7 +738,7 @@ async function sendFounderInvite(ownerId,studentId){
 async function snapshotNW(userId){
   const u=getUser(userId);if(!u||u.role!=='student')return;
   const _nw=nw(u),_pv=pv(u);
-  const rec={id:uid(),user_id:userId,nw:_nw,cash:Math.round(u.cash*100)/100,portfolio:Math.round(_pv*100)/100,ts:isoNow()};
+  const rec={id:uid(),user_id:userId,nw:_nw,cash:Math.round(u.cash*100)/100,portfolio:Math.round(_pv*100)/100,ts:ts()};
   try{await sb.post('jex_nw_history',rec);DB.nwHistory.push(rec);}catch(e){}
 }
 
@@ -895,7 +838,7 @@ async function checkCircuitBreakers(){
     const pctMove=Math.abs((co.price-openPrice)/openPrice*100);
     if(pctMove>=threshold){
       const reason='Circuit breaker: '+co.ticker+' moved '+Math.round(pctMove)+'% from session open (threshold: '+threshold+'%)';
-      await haltStock(co.ticker,reason,true);
+      await haltStock(co.ticker,reason);
       toast('⚡ Circuit breaker triggered on '+co.ticker+' — trading halted');
       // Auto-resume after 5 minutes
       setTimeout(async()=>{
@@ -967,7 +910,7 @@ async function haltStock(ticker,reason,silent=false){
   await logActivity('halt',ticker+' trading halted — '+reason.trim(),{ticker,userId:u?.id,userName:u?.name||'system'});
   await pushNotificationToHolders(ticker,'halt','⚠️ Trading halted on '+ticker+': '+reason.trim());
   await pushNotificationToAll('halt','⚠️ '+ticker+' trading has been halted: '+reason.trim());
-  if(!silent){toast(ticker+' halted');setTimeout(fullRefresh,500);render();}
+  if(!silent){toast(ticker+' halted');setTimeout(quickRefresh,500);render();}
 }
 async function resumeStock(ticker,silent=false){
   if(!silent&&!confirm('Resume trading on '+ticker+'?'))return;
@@ -976,7 +919,7 @@ async function resumeStock(ticker,silent=false){
   const u=cu();
   await logActivity('resume',ticker+' trading resumed',{ticker,userId:u?.id,userName:u?.name||'system'});
   await pushNotificationToAll('resume','✅ '+ticker+' trading has resumed');
-  toast(ticker+' trading resumed');setTimeout(fullRefresh,500);render();
+  toast(ticker+' trading resumed');setTimeout(quickRefresh,500);render();
 }
 
 // ═══════════════════════════════════════════════
@@ -1063,8 +1006,6 @@ async function matchAgainstBook(ticker,side,qty,price,taker){
       await updateUser(taker.id,{cash:Math.round((taker.cash-cost)*100)/100,holdings:tH});
       const mH={...holdings(makerUser)};mH[ticker]=(mH[ticker]||0)-fillQty;if(mH[ticker]<=0)delete mH[ticker];
       await updateUser(makerUser.id,{cash:Math.round((makerUser.cash+cost)*100)/100,holdings:mH});
-      // Seller returned shares to pool
-      const co2=getCo(ticker);if(co2)await updateCo(ticker,{shares_avail:co2.shares_avail+fillQty});
     } else {
       // Taker sells to maker (maker is buyer)
       const proceeds=Math.round(fillPrice*fillQty*100)/100;
@@ -1073,8 +1014,6 @@ async function matchAgainstBook(ticker,side,qty,price,taker){
       await updateUser(taker.id,{cash:Math.round((taker.cash+proceeds)*100)/100,holdings:tH});
       const mH={...holdings(makerUser)};mH[ticker]=(mH[ticker]||0)+fillQty;
       await updateUser(makerUser.id,{cash:Math.round((makerUser.cash-proceeds)*100)/100,holdings:mH});
-      // Buyer took shares from pool
-      const co2=getCo(ticker);if(co2)await updateCo(ticker,{shares_avail:Math.max(0,co2.shares_avail-fillQty)});
     }
     // Update maker order (partial or full fill)
     const newQty=maker.qty-fillQty;
@@ -1192,7 +1131,7 @@ async function cancelLimitOrder(id){
   const o=DB.limitOrders.find(x=>x.id===id);if(!o)return;
   await sb.patch('jex_limit_orders','id=eq.'+id,{status:'cancelled'});
   o.status='cancelled';
-  toast('Order cancelled');setTimeout(quickRefresh,500);
+  toast('Order cancelled');render();
 }
 
 // ── Periodic check: match crossed orders & fill vs pool ───
@@ -1283,7 +1222,7 @@ async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
   pushToSheets('trades',{trades:[{ticker,qty,price,type,ts:ts(),
     buyer:['exchange','short'].includes(buyerId)?'JEX':getUser(buyerId)?.name||buyerId,
     seller:['exchange','cover'].includes(sellerId)?'JEX':getUser(sellerId)?.name||sellerId}]});
-  setTimeout(quickRefresh,500);
+  setTimeout(quickRefresh,1500);
 }
 
 async function placeBuy(ticker,qty){
@@ -1409,7 +1348,7 @@ async function issueDividend(ticker,perShare,note){
   await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(total),{ticker,userId:owner.id,userName:owner.name,amount:total});
   await pushNotificationToHolders(ticker,'dividend','💰 '+co.name+' paid a dividend of '+fmt(perShare)+'/share');
   pushBalances();
-  setTimeout(fullRefresh,500);
+  setTimeout(quickRefresh,1500);
   toast(co.name+' paid '+fmt(perShare)+'/share');UI.companyTab='dividends';render();
 }
 function submitIPOForm(){
@@ -1430,7 +1369,7 @@ async function submitIPO(name,ticker,price,shares,desc){
   await updateUser(UI.userId,{app_status:'pending'});
   toast('✓ IPO application submitted! Awaiting Chairman approval.');
   UI.appTab='status';
-  setTimeout(quickRefresh,500);
+  render();
 }
 async function reviewIPO(id,approve){
   const app=DB.ipoApps.find(a=>a.id===id);if(!app)return;
@@ -1448,7 +1387,7 @@ async function reviewIPO(id,approve){
     await pushNotification(app.user_id,'ipo','❌ Your IPO application for '+app.name+' was rejected.');
     toast('IPO application rejected');
   }
-  setTimeout(fullRefresh,500);
+  setTimeout(quickRefresh,500);
   render();
 }
 async function submitDilution(ticker,newShares,reason){
@@ -1459,7 +1398,7 @@ async function submitDilution(ticker,newShares,reason){
   newShares=parseInt(newShares);
   const app={id:uid(),ticker,company_name:co.name,current_shares:co.shares,new_shares:newShares,pct_increase:Math.round((newShares/co.shares)*100),reason:reason.trim(),status:'pending',user_id:UI.userId,ts:ts()};
   await sb.post('jex_dilution_applications',app);DB.dilApps.push(app);
-  toast('Dilution application submitted');UI.companyTab='dilution';setTimeout(quickRefresh,500);
+  toast('Dilution application submitted');UI.companyTab='dilution';render();
 }
 async function reviewDilution(id,approve){
   const app=DB.dilApps.find(d=>d.id===id);if(!app)return;
@@ -1467,7 +1406,7 @@ async function reviewDilution(id,approve){
   app.status=approve?'approved':'rejected';
   if(approve){const co=getCo(app.ticker);if(!co)return;const old=co.shares,ns=co.shares+app.new_shares,np=Math.max(0.01,Math.round(co.price*(old/ns)*100)/100);await updateCo(app.ticker,{shares:ns,shares_avail:co.shares_avail+app.new_shares,price:np,price_history:[...co.price_history,{p:np,t:'Dilution'}]});toast(app.company_name+': +'+app.new_shares+' shares');}
   else toast('Dilution rejected');
-  setTimeout(fullRefresh,500);
+  setTimeout(quickRefresh,500);
   render();
 }
 async function postFinancials(ticker,rev,profit,summary){
@@ -1476,7 +1415,7 @@ async function postFinancials(ticker,rev,profit,summary){
   const fins=[{revenue:parseFloat(rev),profit:parseFloat(profit),summary:summary.trim(),ts:ts(),period:'Report '+(co.financials.length+1)},...co.financials];
   await updateCo(ticker,{financials:fins});
   await pushNotificationToHolders(ticker,'earnings','📊 '+co.name+' posted earnings: Rev '+fmt(parseFloat(rev))+', Profit '+fmt(parseFloat(profit)));
-  toast('Financials posted');setTimeout(quickRefresh,500);
+  toast('Financials posted');render();
 }
 async function removeUser(uid2){
   const u=getUser(uid2);if(!u)return;
@@ -1484,7 +1423,7 @@ async function removeUser(uid2){
   await sb.del('jex_users','id=eq.'+uid2);
   DB.users=DB.users.filter(x=>x.id!==uid2);
   DB.dividends.forEach(d=>{d.payouts=(d.payouts||[]).filter(p=>p.userId!==uid2);});
-  toast(u.name+' removed');setTimeout(fullRefresh,500);render();
+  toast(u.name+' removed');setTimeout(quickRefresh,500);render();
 }
 async function removeCompany(uid2){
   const u=getUser(uid2);if(!u)return;
@@ -1495,7 +1434,7 @@ async function removeCompany(uid2){
   DB.users=DB.users.filter(x=>x.id!==uid2);
   DB.ipoApps=DB.ipoApps.filter(a=>a.user_id!==uid2);
   DB.dilApps=DB.dilApps.filter(d=>d.user_id!==uid2);
-  toast(u.name+' removed');setTimeout(fullRefresh,500);render();
+  toast(u.name+' removed');setTimeout(quickRefresh,500);render();
 }
 async function removeShareClass(ticker){
   const meta=DB.shareClasses.find(c=>c.ticker===ticker);
@@ -1522,7 +1461,7 @@ async function removeShareClass(ticker){
   DB.classApps=DB.classApps.filter(a=>a.proposed_ticker!==ticker);
   await logActivity('class_removed',(isConversion?'Class '+meta.class+' stripped from':'Share class '+ticker+' removed from')+' '+meta?.company_name,{ticker});
   toast(isConversion?ticker+' class stripped — stock remains listed':ticker+' class removed and delisted');
-  setTimeout(fullRefresh,500);
+  setTimeout(quickRefresh,500);
   render();
 }
 async function delistCompany(ticker,silent=false){
@@ -1534,7 +1473,7 @@ async function delistCompany(ticker,silent=false){
   DB.companies=DB.companies.filter(c=>c.ticker!==ticker);
   DB.dilApps=DB.dilApps.filter(d=>d.ticker!==ticker);
   DB.news=DB.news.filter(n=>n.ticker!==ticker);
-  if(!silent){toast(co.name+' delisted');setTimeout(fullRefresh,500);render();}
+  if(!silent){toast(co.name+' delisted');setTimeout(quickRefresh,500);render();}
 }
 
 // ═══════════════════════════════════════════════
@@ -1672,7 +1611,7 @@ async function submitClassApplication(parentTicker,classType,votesPerShare,share
   DB.classApps.push(app);
   await logActivity('class_app',u.name+' applied for '+co.name+' Class '+classType+' ('+proposedTicker+')',{ticker:parentTicker,userId:u.id,userName:u.name});
   toast('Class '+classType+' application submitted — awaiting Chairman approval');
-  UI.companyTab='classes';setTimeout(quickRefresh,500);
+  UI.companyTab='classes';render();
 }
 
 // ── Chairman: approve / reject class application ─────────
@@ -1709,7 +1648,7 @@ async function reviewClassApp(id,approve){
   } else {
     toast('Class application rejected');
   }
-  setTimeout(fullRefresh,500);
+  setTimeout(quickRefresh,500);
   render();
 }
 
@@ -1735,7 +1674,7 @@ async function castVote(voteId,choice){
   if(power<=0)return toast('You have no voting shares in this company');
   const ballot={id:uid(),vote_id:voteId,voter_id:u.id,voter_name:u.name,choice,voting_power:power,ts:ts()};
   await sb.post('jex_vote_ballots',ballot);DB.ballots.push(ballot);
-  toast('Vote cast — '+power+' vote'+(power!==1?'s':'')+' counted');setTimeout(quickRefresh,500);
+  toast('Vote cast — '+power+' vote'+(power!==1?'s':'')+' counted');render();
 }
 async function closeVote(voteId){
   if(!confirm('Close this vote?'))return;
@@ -1746,7 +1685,7 @@ async function closeVote(voteId){
     const voters=[...new Set(DB.ballots.filter(b=>b.vote_id===voteId).map(b=>b.voter_id))];
     for(const vid of voters) await pushNotification(vid,'vote_closed','🗳️ Vote closed: "'+v.question+'" — '+v.company_name,v.parent_ticker);
   }
-  toast('Vote closed');setTimeout(quickRefresh,500);
+  toast('Vote closed');render();
 }
 function postVoteForm(parentTicker){
   postVote(parentTicker,
@@ -1761,7 +1700,7 @@ async function deleteVote(voteId){
   await sb.del('jex_vote_ballots','vote_id=eq.'+voteId);
   DB.votes=DB.votes.filter(x=>x.id!==voteId);
   DB.ballots=DB.ballots.filter(b=>b.vote_id!==voteId);
-  toast('Vote deleted');setTimeout(quickRefresh,500);
+  toast('Vote deleted');render();
 }
 function getVoteResults(voteId){
   const ballots=DB.ballots.filter(b=>b.vote_id===voteId);
@@ -1872,8 +1811,7 @@ function renderNav(){
   const u=cu();
   let tabs;
   if(isChairman(u))tabs=[['admin','Chairman'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
-  else if(isPresident(u))tabs=[['admin','President'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
-  else if(isSecTre(u))tabs=[['admin',u.role==='secretary'?'Secretary':'Treasurer'],['market','Market'],['settings','Settings']];
+  else if(isAdmin(u))tabs=[['admin','Chairman'],['market','Market'],['settings','Settings']];
   else if(u.role==='company')tabs=[['market','Market'],['portfolio','Portfolio'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   else tabs=[['market','Market'],['portfolio','Portfolio'],['leaderboard','Leaderboard'],['orders','Orders'],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   return `<div class="nav">${tabs.map(([k,v])=>`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
@@ -2417,7 +2355,7 @@ function renderPortfolio(){
 // ═══════════════════════════════════════════════
 function renderTrades(adminView){
   const u=cu();const trades=adminView?DB.trades:[...DB.trades].filter(t=>t.buyer_id===u.id||t.seller_id===u.id);
-  return `<div class="card"><div class="section-title">${adminView?'All trades':'Your trades'}</div><table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th>${adminView?'<th>Buyer</th><th>Seller</th>':''}</tr></thead><tbody>${trades.length?[...trades].reverse().map(t=>`<tr><td style="color:var(--text2)">${t.ts}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.price)}</td><td>${t.qty}</td><td><span class="badge ${t.type==='short'?'b-purple':t.type==='cover'?'b-amber':t.type==='book_match'?'b-teal':t.type==='limit_buy'||t.type==='limit_sell'?'b-blue':'b-gray'}">${t.type==='book_match'?'matched':t.type==='limit_buy'?'limit buy':t.type==='limit_sell'?'limit sell':t.type||'market'}</span></td>${adminView?`<td>${['exchange','short'].includes(t.buyer_id)?'JEX':getUser(t.buyer_id)?.name||'?'}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':getUser(t.seller_id)?.name||'?'}</td>`:''}</tr>`).join(''):`<tr><td colspan="${adminView?7:5}"><div class="empty">No trades yet</div></td></tr>`}</tbody></table></div>`;
+  return `<div class="card"><div class="section-title">${adminView?'All trades':'Your trades'}</div><table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th>${adminView?'<th>Buyer</th><th>Seller</th>':''}</tr></thead><tbody>${trades.length?[...trades].reverse().map(t=>`<tr><td style="color:var(--text2)">${t.ts}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.price)}</td><td>${t.qty}</td><td><span class="badge ${t.type==='short'?'b-purple':t.type==='cover'?'b-amber':t.type==='book_match'?'b-teal':t.type==='limit_buy'||t.type==='limit_sell'?'b-blue':'b-gray'}">${t.type==='book_match'?'matched':t.type==='limit_buy'?'limit buy':t.type==='limit_sell'?'limit sell':t.type||'market'}</span></td>${adminView?`<td>${['exchange','short'].includes(t.buyer_id)?'JEX':getUser(t.buyer_id)?.name||'?'}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':getUser(t.seller_id)?.name||'?'}</td>`:''}</tr>`).join(''):`<tr><td colspan="7"><div class="empty">No trades yet</div></td></tr>`}</tbody></table></div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -2531,7 +2469,7 @@ async function convertBaseClass(parentTicker,classType,votesPerShare,restricted,
   await sb.post('jex_class_applications',app);
   DB.classApps.push(app);
   toast('Conversion request submitted — awaiting Chairman approval');
-  UI.companyTab='classes';setTimeout(quickRefresh,500);
+  UI.companyTab='classes';render();
 }
 function convertBaseClassForm(parentTicker){
   const classType=document.getElementById('conv-type')?.value;
@@ -3116,7 +3054,7 @@ async function adjustCompanyCash(uid2){
   await updateUser(uid2,{cash:newCash});
   await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
   pushBalances();
-  toast(u.name+"'s balance updated to "+fmt(newCash));setTimeout(fullRefresh,500);render();
+  toast(u.name+"'s balance updated to "+fmt(newCash));setTimeout(quickRefresh,500);render();
 }
 async function adjustCash(uid2){
   const u=getUser(uid2);if(!u)return;
@@ -3132,7 +3070,7 @@ async function adjustCash(uid2){
   await updateUser(uid2,{cash:newCash});
   await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:''+u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
   pushBalances();
-  toast(u.name+"'s balance updated to "+fmt(newCash));setTimeout(fullRefresh,500);render();
+  toast(u.name+"'s balance updated to "+fmt(newCash));setTimeout(quickRefresh,500);render();
 }
 function renderAdminUsers(students,companies){
   return`<div class="card"><div class="section-title">Students — balance adjustment</div>
@@ -3458,8 +3396,7 @@ function renderTradingHistory(){
   return`<div class="tab-row" style="margin-bottom:14px"><span style="font-size:13px;color:var(--text2)">Per-stock breakdown — ${Object.keys(byTicker).length} stock${Object.keys(byTicker).length!==1?'s':''} traded</span></div>
   ${Object.values(byTicker).map(g=>{
     const co=getCo(g.ticker);
-    const avgBuyPrice=g.bought>0?g.boughtVal/g.bought:0;
-    const realised=Math.round((g.soldVal-avgBuyPrice*g.sold)*100)/100;
+    const realised=Math.round((g.soldVal-g.boughtVal*(g.sold/Math.max(g.bought,1)))*100)/100;
     return`<div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
         <div><span style="font-weight:500;font-size:15px">${co?.name||g.ticker}</span> <span class="badge b-gray" style="font-family:var(--mono)">${g.ticker}</span></div>
