@@ -338,7 +338,7 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newUsers]=await Promise.all([
       sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_companies','order=created_at.asc'),
@@ -346,11 +346,13 @@ async function autoRefresh(){
       sb.get('jex_limit_orders','order=created_at.asc'),
       sb.get('jex_company_members','order=created_at.asc'),
       sb.get('jex_founder_allocations','order=created_at.desc'),
+      sb.get('jex_users','order=created_at.asc'),
     ]);
     const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
     DB.session=newSession[0]||DB.session;
     DB.companies=newCompanies;
+    DB.users=newUsers;
     DB.companyMembers=newMembers;
     DB.founderAllocations=newAllocs;
     // Merge new trades (avoid duplicates)
@@ -401,7 +403,7 @@ async function registerStudent(name,email,pw,secQ,secA){
   if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
-  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'student',sec_q:secQ,sec_a:norm(secA),ts:ts()};
+  if(DB.users.find(u=>norm(u.email)===norm(email))||DB.pending.find(r=>norm(r.email)===norm(email)))return toast('Email already registered or pending');
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';render();
 }
@@ -414,7 +416,7 @@ async function registerCompany(name,email,pw,desc,secQ,secA){
   if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
-  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),ts:ts()};
+  if(DB.users.find(u=>norm(u.email)===norm(email))||DB.pending.find(r=>norm(r.email)===norm(email)))return toast('Email already registered or pending');
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';render();
 }
@@ -738,7 +740,7 @@ async function sendFounderInvite(ownerId,studentId){
 async function snapshotNW(userId){
   const u=getUser(userId);if(!u||u.role!=='student')return;
   const _nw=nw(u),_pv=pv(u);
-  const rec={id:uid(),user_id:userId,nw:_nw,cash:Math.round(u.cash*100)/100,portfolio:Math.round(_pv*100)/100,ts:ts()};
+  const rec={id:uid(),user_id:userId,nw:_nw,cash:Math.round(u.cash*100)/100,portfolio:Math.round(_pv*100)/100,ts:isoNow()};
   try{await sb.post('jex_nw_history',rec);DB.nwHistory.push(rec);}catch(e){}
 }
 
@@ -838,7 +840,7 @@ async function checkCircuitBreakers(){
     const pctMove=Math.abs((co.price-openPrice)/openPrice*100);
     if(pctMove>=threshold){
       const reason='Circuit breaker: '+co.ticker+' moved '+Math.round(pctMove)+'% from session open (threshold: '+threshold+'%)';
-      await haltStock(co.ticker,reason);
+      await haltStock(co.ticker,reason,true);
       toast('⚡ Circuit breaker triggered on '+co.ticker+' — trading halted');
       // Auto-resume after 5 minutes
       setTimeout(async()=>{
@@ -1006,6 +1008,8 @@ async function matchAgainstBook(ticker,side,qty,price,taker){
       await updateUser(taker.id,{cash:Math.round((taker.cash-cost)*100)/100,holdings:tH});
       const mH={...holdings(makerUser)};mH[ticker]=(mH[ticker]||0)-fillQty;if(mH[ticker]<=0)delete mH[ticker];
       await updateUser(makerUser.id,{cash:Math.round((makerUser.cash+cost)*100)/100,holdings:mH});
+      // Seller returned shares to pool
+      const co2=getCo(ticker);if(co2)await updateCo(ticker,{shares_avail:co2.shares_avail+fillQty});
     } else {
       // Taker sells to maker (maker is buyer)
       const proceeds=Math.round(fillPrice*fillQty*100)/100;
@@ -1014,6 +1018,8 @@ async function matchAgainstBook(ticker,side,qty,price,taker){
       await updateUser(taker.id,{cash:Math.round((taker.cash+proceeds)*100)/100,holdings:tH});
       const mH={...holdings(makerUser)};mH[ticker]=(mH[ticker]||0)+fillQty;
       await updateUser(makerUser.id,{cash:Math.round((makerUser.cash-proceeds)*100)/100,holdings:mH});
+      // Buyer took shares from pool
+      const co2=getCo(ticker);if(co2)await updateCo(ticker,{shares_avail:Math.max(0,co2.shares_avail-fillQty)});
     }
     // Update maker order (partial or full fill)
     const newQty=maker.qty-fillQty;
@@ -1811,7 +1817,8 @@ function renderNav(){
   const u=cu();
   let tabs;
   if(isChairman(u))tabs=[['admin','Chairman'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
-  else if(isAdmin(u))tabs=[['admin','Chairman'],['market','Market'],['settings','Settings']];
+  else if(isPresident(u))tabs=[['admin','President'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
+  else if(isSecTre(u))tabs=[['admin',u.role==='secretary'?'Secretary':'Treasurer'],['market','Market'],['settings','Settings']];
   else if(u.role==='company')tabs=[['market','Market'],['portfolio','Portfolio'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   else tabs=[['market','Market'],['portfolio','Portfolio'],['leaderboard','Leaderboard'],['orders','Orders'],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   return `<div class="nav">${tabs.map(([k,v])=>`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
@@ -2355,7 +2362,7 @@ function renderPortfolio(){
 // ═══════════════════════════════════════════════
 function renderTrades(adminView){
   const u=cu();const trades=adminView?DB.trades:[...DB.trades].filter(t=>t.buyer_id===u.id||t.seller_id===u.id);
-  return `<div class="card"><div class="section-title">${adminView?'All trades':'Your trades'}</div><table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th>${adminView?'<th>Buyer</th><th>Seller</th>':''}</tr></thead><tbody>${trades.length?[...trades].reverse().map(t=>`<tr><td style="color:var(--text2)">${t.ts}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.price)}</td><td>${t.qty}</td><td><span class="badge ${t.type==='short'?'b-purple':t.type==='cover'?'b-amber':t.type==='book_match'?'b-teal':t.type==='limit_buy'||t.type==='limit_sell'?'b-blue':'b-gray'}">${t.type==='book_match'?'matched':t.type==='limit_buy'?'limit buy':t.type==='limit_sell'?'limit sell':t.type||'market'}</span></td>${adminView?`<td>${['exchange','short'].includes(t.buyer_id)?'JEX':getUser(t.buyer_id)?.name||'?'}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':getUser(t.seller_id)?.name||'?'}</td>`:''}</tr>`).join(''):`<tr><td colspan="7"><div class="empty">No trades yet</div></td></tr>`}</tbody></table></div>`;
+  return `<div class="card"><div class="section-title">${adminView?'All trades':'Your trades'}</div><table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th>${adminView?'<th>Buyer</th><th>Seller</th>':''}</tr></thead><tbody>${trades.length?[...trades].reverse().map(t=>`<tr><td style="color:var(--text2)">${t.ts}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.price)}</td><td>${t.qty}</td><td><span class="badge ${t.type==='short'?'b-purple':t.type==='cover'?'b-amber':t.type==='book_match'?'b-teal':t.type==='limit_buy'||t.type==='limit_sell'?'b-blue':'b-gray'}">${t.type==='book_match'?'matched':t.type==='limit_buy'?'limit buy':t.type==='limit_sell'?'limit sell':t.type||'market'}</span></td>${adminView?`<td>${['exchange','short'].includes(t.buyer_id)?'JEX':getUser(t.buyer_id)?.name||'?'}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':getUser(t.seller_id)?.name||'?'}</td>`:''}</tr>`).join(''):`<tr><td colspan="${adminView?7:5}"><div class="empty">No trades yet</div></td></tr>`}</tbody></table></div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -3396,7 +3403,8 @@ function renderTradingHistory(){
   return`<div class="tab-row" style="margin-bottom:14px"><span style="font-size:13px;color:var(--text2)">Per-stock breakdown — ${Object.keys(byTicker).length} stock${Object.keys(byTicker).length!==1?'s':''} traded</span></div>
   ${Object.values(byTicker).map(g=>{
     const co=getCo(g.ticker);
-    const realised=Math.round((g.soldVal-g.boughtVal*(g.sold/Math.max(g.bought,1)))*100)/100;
+    const avgBuyPrice=g.bought>0?g.boughtVal/g.bought:0;
+    const realised=Math.round((g.soldVal-avgBuyPrice*g.sold)*100)/100;
     return`<div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
         <div><span style="font-weight:500;font-size:15px">${co?.name||g.ticker}</span> <span class="badge b-gray" style="font-family:var(--mono)">${g.ticker}</span></div>
