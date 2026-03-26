@@ -232,10 +232,12 @@ const avatarClass=role=>role==='chairman'?'av-ch':role==='president'?'av-pr':rol
 function toast(msg){const t=get('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3200);}
 
 // ── Trade confirmation modal ─────────────────────────────
+let _pendingTradeConfirm=null;
 function confirmTrade(opts){
   // opts: {ticker, action, qty, price, total, color, onConfirm}
   const existing=document.getElementById('trade-confirm-overlay');
   if(existing)existing.remove();
+  _pendingTradeConfirm=opts.onConfirm;
   const overlay=document.createElement('div');
   overlay.id='trade-confirm-overlay';
   overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:200;display:flex;align-items:center;justify-content:center;padding:20px';
@@ -248,12 +250,12 @@ function confirmTrade(opts){
       <div style="display:flex;justify-content:space-between;padding-top:8px;border-top:1px solid var(--border)"><span style="color:var(--text2);font-weight:500">Total</span><span style="font-family:var(--mono);font-weight:600;color:${opts.color}">${opts.total}</span></div>
     </div>
     <div style="display:flex;gap:8px">
-      <button class="btn" style="flex:1" onclick="document.getElementById('trade-confirm-overlay').remove()">Cancel</button>
-      <button class="btn" style="flex:1;background:${opts.color};color:#fff;border-color:${opts.color}" onclick="document.getElementById('trade-confirm-overlay').remove();(${opts.onConfirm})()">Confirm</button>
+      <button class="btn" style="flex:1" onclick="document.getElementById('trade-confirm-overlay').remove();_pendingTradeConfirm=null;">Cancel</button>
+      <button class="btn" style="flex:1;background:${opts.color};color:#fff;border-color:${opts.color}" onclick="document.getElementById('trade-confirm-overlay').remove();if(_pendingTradeConfirm){_pendingTradeConfirm();_pendingTradeConfirm=null;}">Confirm</button>
     </div>
   </div>`;
   document.body.appendChild(overlay);
-  overlay.addEventListener('click',e=>{if(e.target===overlay)overlay.remove();});
+  overlay.addEventListener('click',e=>{if(e.target===overlay){overlay.remove();_pendingTradeConfirm=null;}});
 }
 function destroyCharts(){Object.values(charts).forEach(c=>{try{c.destroy();}catch(e){}});charts={};}
 
