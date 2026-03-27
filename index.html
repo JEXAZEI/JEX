@@ -2149,7 +2149,7 @@ function renderCompanyPage(parentTicker){
     else{
       html+='<div class="card"><div class="section-title">Dividend history</div>'
         +'<table><thead><tr><th>Time</th><th>Per share</th><th>Total paid</th><th>Recipients</th><th>Note</th></tr></thead><tbody>'
-        +companyDivs.map(d=>'<tr><td style="color:var(--text2)">'+fmtTs(d.ts)+</td><td style="font-family:var(--mono)">'+fmt(d.per_share)+'</td><td style="color:var(--green);font-family:var(--mono)">'+fmt(d.total)+'</td><td>'+(d.payouts||[]).length+'</td><td style="font-size:12px;color:var(--text2)">'+d.note+'</td></tr>').join('')
+        +companyDivs.map(d=>'<tr><td style="color:var(--text2)">'+fmtTs(d.ts)+'</td><td style="font-family:var(--mono)">'+fmt(d.per_share)+'</td><td style="color:var(--green);font-family:var(--mono)">'+fmt(d.total)+'</td><td>'+(d.payouts||[]).length+'</td><td style="font-size:12px;color:var(--text2)">'+d.note+'</td></tr>').join('')
         +'</tbody></table></div>';
     }
   }
@@ -2159,7 +2159,7 @@ function renderCompanyPage(parentTicker){
     else{
       html+='<div class="card"><div class="section-title">Recent trades</div>'
         +'<table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Value</th><th>Type</th></tr></thead><tbody>'
-        +companyTrades.map(t=>'<tr><td style="color:var(--text2)">'+fmtTs(t.ts)+</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+t.ticker+'</span></td><td style="font-family:var(--mono)">'+fmt(t.price)+'</td><td>'+t.qty+'</td><td style="font-family:var(--mono)">'+fmt(t.price*t.qty)+'</td><td><span class="badge '+(t.type==='short'?'b-purple':t.type==='cover'?'b-amber':'b-gray')+'">'+( t.type||'market')+'</span></td></tr>').join('')
+        +companyTrades.map(t=>'<tr><td style="color:var(--text2)">'+fmtTs(t.ts)+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+t.ticker+'</span></td><td style="font-family:var(--mono)">'+fmt(t.price)+'</td><td>'+t.qty+'</td><td style="font-family:var(--mono)">'+fmt(t.price*t.qty)+'</td><td><span class="badge '+(t.type==='short'?'b-purple':t.type==='cover'?'b-amber':'b-gray')+'">'+( t.type||'market')+'</span></td></tr>').join('')
         +'</tbody></table></div>';
     }
   }
@@ -2177,7 +2177,9 @@ function renderTickerBar(){
   return `<div class="ticker-bar">${sorted.map(c=>{const chg=priceChg(c),w=isWatched(c.ticker),halted=isHalted(c.ticker),canTrade=canTradeTicker(c.ticker,u?.id),meta=getClassMeta(c.ticker),isRestricted=!!(meta&&meta.restricted);return `<div class="ticker-item ${UI.panelTicker===c.ticker?'active-t':''} ${w?'watched':''} ${halted?'halted-ticker':''}" onclick="openCompanyPage('${c.ticker}')" style="${c.brand_color?'border-color:'+c.brand_color+'30':''}${isRestricted&&!canTrade?';opacity:0.5':''}">
   ${c.logo?`<img src="${c.logo}" style="width:24px;height:24px;object-fit:cover;border-radius:4px;margin-bottom:3px">`:''}
   <div class="tsym">${c.ticker}${w?' ★':''}${halted?' ⚠️':''}${isRestricted?' 🔒':''}</div><div class="tprice" style="${halted?'color:var(--red)':''}">${fmt(c.price)}</div><div class="tchg ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</div></div>`;}).join('')}${watched.length?`<div style="display:flex;align-items:center;padding:0 8px;font-size:11px;color:var(--text2);white-space:nowrap;border-left:1px solid var(--border);margin-left:4px">★ ${watched.length} watched</div>`:''}
-  </div>`;function renderMarket(){
+  </div>`;
+}
+function renderMarket(){
   const u=cu();
   const searchQ=(document.getElementById('market-search')?.value||'').toLowerCase();
   const listed=DB.companies.filter(c=>c.status==='listed'
@@ -2386,7 +2388,7 @@ function renderPortfolio(){
 
   // dividends tab
   if(!myDivs.length)return tabs+'<div class="empty">No dividends received yet</div>';
-  const divRows=myDivs.map(d=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);if(!p)return'';return '<tr><td style="color:var(--text2)">'+fmtTs(d.ts)+</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+d.ticker+'</span></td><td style="font-family:var(--mono)">'+fmt(d.per_share)+'</td><td>'+p.shares+'</td><td style="color:var(--green);font-family:var(--mono)">'+fmt(p.payout)+'</td><td style="font-size:12px;color:var(--text2)">'+d.note+'</td></tr>';}).join('');
+  const divRows=myDivs.map(d=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);if(!p)return'';return '<tr><td style="color:var(--text2)">'+fmtTs(d.ts)+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+d.ticker+'</span></td><td style="font-family:var(--mono)">'+fmt(d.per_share)+'</td><td>'+p.shares+'</td><td style="color:var(--green);font-family:var(--mono)">'+fmt(p.payout)+'</td><td style="font-size:12px;color:var(--text2)">'+d.note+'</td></tr>';}).join('');
   return tabs+'<div class="card"><div class="section-title">Dividend history</div><table><thead><tr><th>Time</th><th>Company</th><th>Per share</th><th>Shares</th><th>Received</th><th>Note</th></tr></thead><tbody>'+divRows+'</tbody></table></div>';
 }
 
@@ -2597,7 +2599,7 @@ function renderFoundersTab(co,u){
       const invCo=DB.companies.find(c=>c.owner_id===inv.company_user_id);
       html+='<div class="app-row"><div class="app-info">'
         +'<div class="app-name">Founder invitation: <strong>'+(invCo?.name||'Unknown')+'</strong></div>'
-        +'<div class="app-meta">Invited by '+inv.invited_by+' · '+fmtTs(inv.ts)+</div></div>'
+        +'<div class="app-meta">Invited by '+inv.invited_by+' · '+fmtTs(inv.ts)+'</div></div>'
         +'<div class="btn-row">'
         +'<button class="btn btn-success btn-sm" onclick="respondToInvite(&quot;'+inv.id+'&quot;,true)">Accept</button>'
         +'<button class="btn btn-danger btn-sm" onclick="respondToInvite(&quot;'+inv.id+'&quot;,false)">Decline</button>'
@@ -2758,7 +2760,7 @@ function renderClassesTab(co){
       return '<div class="app-row"><div class="app-info">'
         +'<div class="app-name">'+(isConv?'Convert ':'New class ')+'<span class="badge b-gray" style="font-family:var(--mono)">'+a.proposed_ticker+'</span> Class '+a.class+'</div>'
         +'<div class="app-meta">'+a.votes_per_share+' vote'+(a.votes_per_share!==1?'s':'')+'/share'+(isConv?'':' · '+a.shares.toLocaleString()+' shares @ '+fmt(a.price))+(a.restricted?' · Restricted':'')+'</div>'
-        +'<div class="app-meta">'+fmtTs(a.ts)+</div></div>'
+        +'<div class="app-meta">'+fmtTs(a.ts)+'</div></div>'
         +'<span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-amber')+'">'+a.status+'</span></div>';
     }).join('')+'</div>';
   }
@@ -2900,7 +2902,7 @@ function renderBBTab(co,myBBs){
     html+='<div class="card"><div class="section-title">Buyback history</div>'
       +'<table><thead><tr><th>Time</th><th>Ticker</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>'
       +myBBs.map(b=>'<tr>'
-        +'<td style="color:var(--text2)">'+fmtTs(b.ts)+</td>'
+        +'<td style="color:var(--text2)">'+fmtTs(b.ts)+'</td>'
         +'<td><span class="badge b-gray" style="font-family:var(--mono)">'+b.ticker+'</span></td>'
         +'<td>'+b.qty+'</td>'
         +'<td style="font-family:var(--mono)">'+fmt(b.price)+'</td>'
@@ -2938,7 +2940,7 @@ function renderDilTab(co){
     if(history.length){
       html+='<hr class="divider"><div class="section-title" style="font-size:13px;margin-bottom:8px">History</div>'
         +'<table><thead><tr><th>Time</th><th>New shares</th><th>+%</th><th>Reason</th><th>Status</th></tr></thead><tbody>'
-        +history.map(d=>'<tr><td style="color:var(--text2)">'+fmtTs(d.ts)+</td><td>+'+d.new_shares.toLocaleString()+'</td><td style="color:var(--amber)">+'+d.pct_increase+'%</td><td style="font-size:12px">'+d.reason+'</td><td><span class="badge '+(d.status==='approved'?'b-green':d.status==='rejected'?'b-red':'b-amber')+'">'+d.status+'</span></td></tr>').join('')
+        +history.map(d=>'<tr><td style="color:var(--text2)">'+fmtTs(d.ts)+'</td><td>+'+d.new_shares.toLocaleString()+'</td><td style="color:var(--amber)">+'+d.pct_increase+'%</td><td style="font-size:12px">'+d.reason+'</td><td><span class="badge '+(d.status==='approved'?'b-green':d.status==='rejected'?'b-red':'b-amber')+'">'+d.status+'</span></td></tr>').join('')
         +'</tbody></table>';
     }
     html+='</div>';
@@ -3194,7 +3196,7 @@ function renderAdminClasses(){
     +(reviewed.length?'<div class="card"><div class="section-title">Application history</div>'
       +reviewed.map(a=>'<div class="app-row"><div class="app-info">'
         +'<div class="app-name">'+a.company_name+' — '+a.proposed_ticker+' Class '+a.class+'</div>'
-        +'<div class="app-meta">'+fmtTs(a.ts)+</div></div>'
+        +'<div class="app-meta">'+fmtTs(a.ts)+'</div></div>'
         +'<span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-gray')+'">'+a.status+'</span></div>'
       ).join('')+'</div>':'');
 }
@@ -3249,7 +3251,7 @@ function renderAdminFounderAllocs(){
     +(pending.length?pending.map(a=>'<div class="app-row"><div class="app-info">'
       +'<div class="app-name">'+a.student_name+' <span class="badge b-blue">student</span></div>'
       +'<div class="app-meta"><strong>'+a.shares.toLocaleString()+'</strong> shares of <span style="font-family:var(--mono)">'+a.ticker+'</span> ('+a.company_name+')'+(a.reason?' — '+a.reason:'')+'</div>'
-      +'<div class="app-meta">'+fmtTs(a.ts)+</div>'
+      +'<div class="app-meta">'+fmtTs(a.ts)+'</div>'
       +'</div><div class="btn-row">'
       +'<button class="btn btn-success btn-sm" onclick="reviewFounderAllocation(&quot;'+a.id+'&quot;,true)">Approve</button>'
       +'<button class="btn btn-danger btn-sm" onclick="reviewFounderAllocation(&quot;'+a.id+'&quot;,false)">Reject</button>'
@@ -3264,7 +3266,7 @@ function renderAdminFounderAllocs(){
         +'<td>'+a.shares.toLocaleString()+'</td>'
         +'<td style="font-size:12px;color:var(--text2)">'+(a.reason||'—')+'</td>'
         +'<td><span class="badge '+(a.status==='approved'?'b-green':'b-red')+'">'+a.status+'</span></td>'
-        +'<td style="font-size:12px;color:var(--text2)">'+fmtTs(a.ts)+</td>'
+        +'<td style="font-size:12px;color:var(--text2)">'+fmtTs(a.ts)+'</td>'
         +'</tr>').join('')
       +'</tbody></table></div>':'');
 }
