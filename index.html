@@ -443,6 +443,8 @@ async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del(
 function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u||u.password!==pw)return toast('Wrong password');UI.userId=uid2;const r=u.role;const coIsListed=r==='company'&&DB.companies.some(c=>c.owner_id===uid2);UI.navTab=isAdmin(u)?'admin':r==='company'?(coIsListed?'mystock':'apply'):'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}render();}
 function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
 async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;if(u.password!==cur)return toast('Current password incorrect');if(!nw2||nw2.length<4)return toast('Min 4 characters');if(nw2!==conf)return toast('Passwords do not match');await sb.patch('jex_users','id=eq.'+uid2,{password:nw2});u.password=nw2;toast('Password changed');render();}
+async function changeName(uid2,newName,curPw){const u=getUser(uid2);if(!u)return;newName=(newName||'').trim();if(!newName||newName.length<2)return toast('Enter a valid name');if(u.password!==curPw)return toast('Current password incorrect');if(DB.users.find(x=>x.id!==uid2&&norm(x.name)===norm(newName)))return toast('Name already taken');await sb.patch('jex_users','id=eq.'+uid2,{name:newName});u.name=newName;toast('Name updated');render();}
+async function changeEmail(uid2,newEmail,curPw){const u=getUser(uid2);if(!u)return;newEmail=(newEmail||'').trim().toLowerCase();if(!validEmail(newEmail))return toast('Enter a valid email');if(u.password!==curPw)return toast('Current password incorrect');if(DB.users.find(x=>x.id!==uid2&&norm(x.email)===norm(newEmail)))return toast('Email already in use');await sb.patch('jex_users','id=eq.'+uid2,{email:newEmail});u.email=newEmail;toast('Email updated');render();}
 async function adminResetPw(uid2,pw){if(!pw||pw.length<4)return toast('Min 4 characters');const u=getUser(uid2);if(!u)return;await sb.patch('jex_users','id=eq.'+uid2,{password:pw});u.password=pw;toast(u.name+"'s password reset");render();}
 async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)return;if(u.password!==curPw)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');await sb.patch('jex_users','id=eq.'+uid2,{sec_q:newQ,sec_a:norm(newA)});u.sec_q=newQ;u.sec_a=norm(newA);toast('Security question updated');render();}
 function forgotStep1(email){const u=DB.users.find(u=>u.email&&norm(u.email)===norm(email)&&u.status==='approved');if(!u)return toast('No account found with that email');UI.forgotUserId=u.id;UI.loginView='forgot-secq';render();}
@@ -2405,6 +2407,10 @@ function renderTrades(adminView){
 // ═══════════════════════════════════════════════
 function renderSettings(){
   const u=cu();
+  const isOfficer=isAdmin(u);
+  // Section title: Chairman sees "Chairman", Comptroller sees "Comptroller", others see "User"
+  const accountLabel=u.role==='chairman'?'Chairman':u.role==='treasurer'?'Comptroller':'User';
+
   const sheetsSection=(isChairman(u)||isPresident(u))?`<div class="card"><div class="section-title">Google Sheets sync</div>
     <div class="ibox ibox-blue">Paste your Google Apps Script web app URL here. JEX will automatically push balance updates to your sheet after every trade, dividend, and balance adjustment.</div>
     <div class="frow"><label class="flabel">Web app URL</label><input type="text" id="sheets-url" placeholder="https://script.google.com/macros/s/..." value="${SHEETS_URL||''}"></div>
@@ -2415,16 +2421,53 @@ function renderSettings(){
     </div>
     ${SHEETS_URL?'<div style="font-size:12px;color:var(--text2);margin-top:8px">✓ Sync active — pushing to Sheets automatically</div>':''}
   </div>`:'';
-  return sheetsSection+`<div class="card"><div class="section-title">Account</div><div class="grid2"><div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${u.name}</div></div><div class="mcard"><div class="mlabel">Email</div><div class="mval" style="font-size:14px;margin-top:4px">${u.email}</div></div></div></div>
-  <div class="card"><div class="section-title">Change password</div><div class="frow"><label class="flabel">Current password</label><input type="password" id="pw-cur" placeholder="Current password"></div><div class="frow"><label class="flabel">New password</label><input type="password" id="pw-new" placeholder="New password (min 4 characters)"></div><div class="frow"><label class="flabel">Confirm new password</label><input type="password" id="pw-conf" placeholder="Repeat new password"></div><button class="btn btn-primary" onclick="changePw('${u.id}',get('pw-cur')?.value,get('pw-new')?.value,get('pw-conf')?.value)">Update password</button></div>
-  ${u.role==='company'?`<div class="card"><div class="section-title">Company branding</div>
+
+  // Account info card — no email shown for officers
+  const accountCard=`<div class="card"><div class="section-title">${accountLabel}</div>
+    <div class="grid2">
+      <div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${u.name}</div></div>
+      ${!isOfficer?`<div class="mcard"><div class="mlabel">Email</div><div class="mval" style="font-size:14px;margin-top:4px">${u.email}</div></div>`:''}
+    </div>
+  </div>`;
+
+  // Change name
+  const nameCard=`<div class="card"><div class="section-title">Change name</div>
+    <div class="frow"><label class="flabel">New name</label><input type="text" id="name-new" placeholder="Enter new name" value="${u.name}"></div>
+    <div class="frow"><label class="flabel">Confirm with current password</label><input type="password" id="name-pw" placeholder="Current password"></div>
+    <button class="btn btn-primary" onclick="changeName('${u.id}',get('name-new')?.value,get('name-pw')?.value)">Update name</button>
+  </div>`;
+
+  // Change email — only for non-officers (officers don't show/use email)
+  const emailCard=!isOfficer?`<div class="card"><div class="section-title">Change email</div>
+    <div class="frow"><label class="flabel">New email</label><input type="email" id="email-new" placeholder="newemail@school.edu"></div>
+    <div class="frow"><label class="flabel">Confirm with current password</label><input type="password" id="email-pw" placeholder="Current password"></div>
+    <button class="btn btn-primary" onclick="changeEmail('${u.id}',get('email-new')?.value,get('email-pw')?.value)">Update email</button>
+  </div>`:'';
+
+  const pwCard=`<div class="card"><div class="section-title">Change password</div>
+    <div class="frow"><label class="flabel">Current password</label><input type="password" id="pw-cur" placeholder="Current password"></div>
+    <div class="frow"><label class="flabel">New password</label><input type="password" id="pw-new" placeholder="New password (min 4 characters)"></div>
+    <div class="frow"><label class="flabel">Confirm new password</label><input type="password" id="pw-conf" placeholder="Repeat new password"></div>
+    <button class="btn btn-primary" onclick="changePw('${u.id}',get('pw-cur')?.value,get('pw-new')?.value,get('pw-conf')?.value)">Update password</button>
+  </div>`;
+
+  const brandingCard=u.role==='company'?`<div class="card"><div class="section-title">Company branding</div>
     <div class="ibox ibox-blue" style="margin-bottom:10px">Upload a logo image for your company. Shown on your ticker chip and company page. Max 200KB recommended.</div>
     ${(()=>{const co=DB.companies.find(c=>c.owner_id===u.id);return co&&co.logo?`<div style="margin-bottom:10px"><img src="${co.logo}" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:1px solid var(--border)"></div>`:'';})()}
     <div class="frow"><label class="flabel">Logo image</label><input type="file" id="logo-upload" accept="image/*" onchange="previewLogo(this)"></div>
     <div id="logo-preview" style="margin-bottom:10px"></div>
     <button class="btn btn-primary" onclick="saveLogo()">Save logo</button>
-  </div>`:''}
-  <div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><input type="password" id="settings-secq-pw" placeholder="Current password"></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`;
+  </div>`:'';
+
+  const secqCard=`<div class="card"><div class="section-title">Security question</div>
+    <div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div>
+    <div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div>
+    <div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div>
+    <div class="frow"><label class="flabel">Confirm with current password</label><input type="password" id="settings-secq-pw" placeholder="Current password"></div>
+    <button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button>
+  </div>`;
+
+  return sheetsSection+accountCard+nameCard+emailCard+pwCard+brandingCard+secqCard;
 }
 
 // ═══════════════════════════════════════════════
