@@ -216,7 +216,7 @@ const sPnl=u=>Object.entries(shorts(u)).reduce((s,[t,pos])=>{const c=getCo(t);if
 const divRec=u=>DB.dividends.reduce((s,d)=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);return s+(p?p.payout:0);},0);
 const nw=u=>Math.round((u.cash+pv(u)+sPnl(u))*100)/100;
 const isAdmin=u=>(['chairman','president','secretary','treasurer','compliance_officer'].includes(u?.role));
-const isChairman=u=>u?.role==='chairman';
+const isChairman=u=>u?.role==='chairman'||u?.role==='president';
 const isPresident=u=>u?.role==='president';
 const isSecTre=u=>(u?.role==='secretary'||u?.role==='treasurer');
 const isOpen=()=>DB.session.status==='open';
@@ -2873,10 +2873,8 @@ function renderAdmin(){
   const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags']];
   const openFlags=(DB.flags||[]).filter(f=>f.status==='open').length;
   const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['earnings','Earnings targets'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags']];
-  const tabs=chair?chairmanTabs:isPresident(u)?presidentTabs:u.role==='compliance_officer'?complianceTabs:sectreTabs;
+  const tabs=(chair||isPresident(u))?chairmanTabs:u.role==='compliance_officer'?complianceTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
-
-  // Block access to tabs not in allowed list
   if(!allowedTabs.includes(UI.adminTab))UI.adminTab=tabs[0][0];
 
   return`<div class="tab-row">${tabs.map(([k,v])=>`<button class="tab ${UI.adminTab===k?'active':''}" onclick="UI.adminTab='${k}';render()">${v}${k==='registrations'&&DB.pending.length?` <span class="badge b-blue" style="margin-left:4px">${DB.pending.length}</span>`:''} ${k==='ipo'&&pIPO.length?`<span class="badge b-amber" style="margin-left:4px">${pIPO.length}</span>`:''} ${k==='dilution'&&pDil.length?`<span class="badge b-coral" style="margin-left:4px">${pDil.length}</span>`:''}</button>`).join('')}</div>
