@@ -1062,6 +1062,9 @@ async function activateAfterHoursOrders(){
         const np=impactPrice(co,o.qty,'buy'),cost=Math.round(np*o.qty*100)/100;
         const bH={...holdings(u)};bH[o.ticker]=(bH[o.ticker]||0)+o.qty;
         await updateUser(u.id,{cash:Math.round((u.cash-cost)*100)/100,holdings:bH});
+        // Primary market: company receives proceeds
+        const coOwnerAH=getUser(co.owner_id);
+        if(coOwnerAH)await updateUser(co.owner_id,{cash:Math.round((coOwnerAH.cash+cost)*100)/100});
         await updateCo(o.ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-o.qty),price_history:[...co.price_history,{p:np,t:isoNow()}]});
         await recordTrade(o.ticker,o.qty,np,u.id,'exchange','market_open');
         await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'filled',filled_price:np,filled_at:ts()});o.status='filled';
@@ -1186,6 +1189,9 @@ async function checkLimitOrders(){
         if(u.cash<cost)continue;
         const bH={...holdings(u)};bH[o.ticker]=(bH[o.ticker]||0)+o.qty;
         await updateUser(u.id,{cash:Math.round((u.cash-cost)*100)/100,holdings:bH});
+        // Primary market: company receives proceeds
+        const coOwnerLmt=getUser(co.owner_id);
+        if(coOwnerLmt)await updateUser(co.owner_id,{cash:Math.round((coOwnerLmt.cash+cost)*100)/100});
         await updateCo(ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-o.qty),price_history:[...co.price_history,{p:np,t:isoNow()}]});
         await recordTrade(ticker,o.qty,np,u.id,'exchange','limit_buy');
       } else {
@@ -1246,6 +1252,9 @@ async function placeBuy(ticker,qty){
   if(u.cash<cost)return toast('Insufficient funds (need '+fmt(cost)+')');
   const bH={...holdings(u)};bH[ticker]=(bH[ticker]||0)+qty;
   await updateUser(u.id,{cash:Math.round((u.cash-cost)*100)/100,holdings:bH});
+  // Primary market: company receives proceeds from selling its own shares
+  const coOwner=getUser(co.owner_id);
+  if(coOwner)await updateUser(co.owner_id,{cash:Math.round((coOwner.cash+cost)*100)/100});
   const newH=[...co.price_history,{p:np,t:isoNow()}];
   await updateCo(ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-qty),price_history:newH});
   await recordTrade(ticker,qty,np,u.id,'exchange');
