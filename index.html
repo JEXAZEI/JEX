@@ -158,14 +158,14 @@ let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[]
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],nwHistory:[],earningsTargets:[],
   founderShares:[],companyInvites:[],priceAdjustments:[],
-  founders:[],founderAllocs:[],priceAdjustments:[],companyMembers:[],founderAllocations:[],
+  founders:[],founderAllocs:[],priceAdjustments:[],companyMembers:[],founderAllocations:[],flags:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,earnings_surprise_pct:10,session_open_prices:{}}};
 let SHEETS_URL=null;
 let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview'};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
-  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,priceAdjustments]=await Promise.all([
+  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,priceAdjustments,flags]=await Promise.all([
     sb.get('jex_users','order=created_at.asc'),sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_companies','order=created_at.asc'),sb.get('jex_news','order=created_at.desc'),
     sb.get('jex_ipo_applications','order=created_at.asc'),sb.get('jex_dilution_applications','order=created_at.asc'),
@@ -192,7 +192,7 @@ async function loadAll(){
     session:session[0]||DB.session,announcements,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,
     companyMembers,founderAllocations,
-    founders:DB.founders||[],founderAllocs:DB.founderAllocs||[],priceAdjustments:DB.priceAdjustments||[]};
+    founders:DB.founders||[],founderAllocs:DB.founderAllocs||[],priceAdjustments:DB.priceAdjustments||[],flags};
 }
 
 // ═══════════════════════════════════════════════
@@ -309,7 +309,7 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags]=await Promise.all([
       sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_companies','order=created_at.asc'),
@@ -317,6 +317,7 @@ async function autoRefresh(){
       sb.get('jex_limit_orders','order=created_at.asc'),
       sb.get('jex_company_members','order=created_at.asc'),
       sb.get('jex_founder_allocations','order=created_at.desc'),
+      sb.get('jex_flags','order=created_at.desc'),
     ]);
     const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
@@ -324,6 +325,7 @@ async function autoRefresh(){
     DB.companies=newCompanies;
     DB.companyMembers=newMembers;
     DB.founderAllocations=newAllocs;
+    DB.flags=newFlags;
     // Merge new trades (avoid duplicates)
     const existingIds=new Set(DB.trades.map(t=>t.id));
     newTrades.forEach(t=>{if(!existingIds.has(t.id))DB.trades.unshift(t);});
@@ -806,6 +808,40 @@ async function applyPriceAdjustment(ticker,pct,reason){
 }
 
 // ═══════════════════════════════════════════════
+// COMPLIANCE FLAGS
+// ═══════════════════════════════════════════════
+async function flagAccount(targetId,targetName,targetType,reason){
+  if(!reason||reason.trim().length<5)return toast('Enter a reason (at least 5 characters)');
+  const u=cu();
+  const rec={id:uid(),target_id:targetId,target_name:targetName,target_type:targetType,
+    reason:reason.trim(),flagged_by:u.id,flagged_by_name:u.name,
+    status:'open',resolution_note:null,resolved_by:null,ts:ts()};
+  await sb.post('jex_flags',rec);
+  DB.flags.push(rec);
+  // Notify Chairman and President
+  const admins=DB.users.filter(u2=>u2.role==='chairman'||u2.role==='president');
+  for(const a of admins){
+    await pushNotification(a.id,'flag','🚩 Compliance flag: '+targetName+' ('+targetType+') — '+reason.trim(),null);
+  }
+  await logActivity('flag','🚩 '+u.name+' flagged '+targetName+' ('+targetType+'): '+reason.trim(),{userId:u.id,userName:u.name});
+  toast('🚩 '+targetName+' flagged and Chairman notified');render();
+}
+async function resolveFlag(flagId,action,note){
+  const f=DB.flags.find(x=>x.id===flagId);if(!f)return;
+  const u=cu();
+  await sb.patch('jex_flags','id=eq.'+flagId,{status:action,resolution_note:(note||'').trim(),resolved_by:u.name});
+  f.status=action;f.resolution_note=(note||'').trim();f.resolved_by=u.name;
+  await logActivity('flag_resolve',u.name+' '+(action==='resolved'?'resolved':'dismissed')+' flag on '+f.target_name+(note?' — '+note:''),{userId:u.id,userName:u.name});
+  toast('Flag '+(action==='resolved'?'resolved':'dismissed'));render();
+}
+function flagForm(targetId,targetName,targetType){
+  const reason=prompt('Reason for flagging '+targetName+':');
+  if(reason===null)return;
+  if(!reason||reason.trim().length<5)return toast('Enter a reason (at least 5 characters)');
+  flagAccount(targetId,targetName,targetType,reason);
+}
+
+// ═══════════════════════════════════════════════
 // NET WORTH HISTORY
 // ═══════════════════════════════════════════════
 async function snapshotNW(userId){
@@ -1016,10 +1052,11 @@ async function haltStock(ticker,reason){
   toast(ticker+' halted');render();
 }
 async function resumeStock(ticker){
+  const u=cu();
+  if(u.role==='compliance_officer')return toast('Only Chairman or President can resume a halted stock');
   if(!confirm('Resume trading on '+ticker+'?'))return;
   await sb.del('jex_halts','ticker=eq.'+ticker);
   DB.halts=DB.halts.filter(h=>h.ticker!==ticker);
-  const u=cu();
   await logActivity('resume',ticker+' trading resumed',{ticker,userId:u.id,userName:u.name});
   await pushNotificationToAll('resume','✅ '+ticker+' trading has resumed');
   toast(ticker+' trading resumed');render();
@@ -2833,8 +2870,9 @@ function renderAdmin(){
   // President can only see: session, balances, passwords
   const presidentTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
   const sectreTabs=[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
-  const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['activity','Activity log'],['listed','Listed'],['news','News']];
-  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['earnings','Earnings targets'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log']];
+  const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags']];
+  const openFlags=(DB.flags||[]).filter(f=>f.status==='open').length;
+  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['earnings','Earnings targets'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags']];
   const tabs=chair?chairmanTabs:isPresident(u)?presidentTabs:u.role==='compliance_officer'?complianceTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
 
@@ -2850,6 +2888,7 @@ function renderAdmin(){
   :UI.adminTab==='balances'?renderAdminBalances(students)
   :UI.adminTab==='users'?renderAdminUsers(students,companies)
   :UI.adminTab==='dashboard'?renderAdminDashboard()
+  :UI.adminTab==='flags'?renderAdminFlags()
   :UI.adminTab==='founder_allocs'?renderAdminFounderAllocs()
   :UI.adminTab==='earnings'?renderAdminEarnings()
   :UI.adminTab==='news'?renderAdminNews()
@@ -3060,6 +3099,108 @@ function renderAdminClasses(){
         +'<span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-gray')+'">'+a.status+'</span></div>'
       ).join('')+'</div>':'');
 }
+function renderAdminFlags(){
+  const u=cu();
+  const isCO=u.role==='compliance_officer';
+  const isChairPres=u.role==='chairman'||u.role==='president';
+  const openFlags=DB.flags.filter(f=>f.status==='open');
+  const closedFlags=DB.flags.filter(f=>f.status!=='open');
+  const students=DB.users.filter(u2=>u2.role==='student'&&u2.status==='approved');
+  const companies=DB.companies.filter(c=>c.status==='listed');
+
+  let html='';
+
+  // Flag creation form (CO only)
+  if(isCO){
+    html+=`<div class="card"><div class="section-title">Flag an account or trade</div>
+      <div class="ibox ibox-purple">Flagging notifies the Chairman and President immediately. Use this when you observe rule violations, suspicious trading patterns, or misleading disclosures.</div>
+      <div class="grid2" style="margin-bottom:12px">
+        <div><label class="flabel">Type</label>
+          <select id="flag-type" onchange="updateFlagTargets()">
+            <option value="student">Student</option>
+            <option value="company">Company</option>
+          </select>
+        </div>
+        <div><label class="flabel">Target</label>
+          <select id="flag-target">
+            <option value="">— Select —</option>
+            ${students.map(s=>`<option value="${s.id}|${s.name}|student">${s.name}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="frow"><label class="flabel">Reason for flagging</label>
+        <textarea id="flag-reason" rows="3" placeholder="e.g. Suspected wash trading — student bought and sold BWV 12 times in 5 minutes to inflate price artificially..."></textarea>
+      </div>
+      <button class="btn btn-danger" onclick="submitFlagForm()">🚩 Submit flag</button>
+    </div>`;
+  }
+
+  // Open flags
+  html+=`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+    Open flags ${openFlags.length?`<span class="badge b-red">${openFlags.length}</span>`:''}
+  </div>`;
+  if(!openFlags.length){
+    html+='<div class="empty">No open flags</div>';
+  } else {
+    openFlags.forEach(f=>{
+      const flaggedUser=getUser(f.target_id);
+      const isHaltedTarget=f.target_type==='company'&&DB.companies.find(c=>c.owner_id===f.target_id||c.ticker===f.target_id);
+      html+=`<div style="padding:12px;border:1px solid var(--red);border-radius:var(--radius);margin-bottom:10px;background:rgba(255,77,106,0.04)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span style="font-size:16px">🚩</span>
+          <strong>${f.target_name}</strong>
+          <span class="badge b-red">${f.target_type}</span>
+          <span style="font-size:11px;color:var(--text2);margin-left:auto">${f.ts} — flagged by ${f.flagged_by_name}</span>
+        </div>
+        <div style="font-size:13px;color:var(--text2);margin-bottom:10px">${f.reason}</div>
+        ${isChairPres?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="text" id="res-note-${f.id}" placeholder="Resolution note (optional)" style="flex:1;font-size:12px;padding:5px 8px">
+          <button class="btn btn-sm btn-success" onclick="resolveFlagForm('${f.id}','resolved')">✓ Resolve</button>
+          <button class="btn btn-sm btn-warning" onclick="resolveFlagForm('${f.id}','dismissed')">Dismiss</button>
+        </div>`:'<div style="font-size:12px;color:var(--text2)">Awaiting Chairman/President review</div>'}
+      </div>`;
+    });
+  }
+  html+='</div>';
+
+  // Closed flags history
+  if(closedFlags.length){
+    html+=`<div class="card"><div class="section-title">Resolved / dismissed flags</div>
+      <table><thead><tr><th>Target</th><th>Type</th><th>Reason</th><th>Status</th><th>Resolved by</th><th>Note</th><th>Time</th></tr></thead>
+      <tbody>${closedFlags.map(f=>`<tr>
+        <td style="font-weight:500">${f.target_name}</td>
+        <td><span class="badge b-gray">${f.target_type}</span></td>
+        <td style="font-size:12px;color:var(--text2);max-width:200px">${f.reason}</td>
+        <td><span class="badge ${f.status==='resolved'?'b-green':'b-gray'}">${f.status}</span></td>
+        <td style="font-size:12px;color:var(--text2)">${f.resolved_by||'—'}</td>
+        <td style="font-size:12px;color:var(--text2)">${f.resolution_note||'—'}</td>
+        <td style="font-size:12px;color:var(--text2)">${f.ts||''}</td>
+      </tr>`).join('')}</tbody></table>
+    </div>`;
+  }
+  return html;
+}
+function submitFlagForm(){
+  const typeEl=document.getElementById('flag-type');
+  const targetEl=document.getElementById('flag-target');
+  const reason=document.getElementById('flag-reason')?.value;
+  if(!targetEl?.value)return toast('Select a target');
+  const [targetId,targetName,targetType]=targetEl.value.split('|');
+  flagAccount(targetId,targetName,targetType,reason);
+}
+function updateFlagTargets(){
+  const type=document.getElementById('flag-type')?.value;
+  const sel=document.getElementById('flag-target');if(!sel)return;
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+  const companies=DB.companies.filter(c=>c.status==='listed');
+  sel.innerHTML='<option value="">— Select —</option>'
+    +(type==='student'?students.map(s=>`<option value="${s.id}|${s.name}|student">${s.name}</option>`).join('')
+    :companies.map(c=>`<option value="${c.owner_id}|${c.name}|company">${c.name} (${c.ticker})</option>`).join(''));
+}
+function resolveFlagForm(flagId,action){
+  const note=document.getElementById('res-note-'+flagId)?.value;
+  resolveFlag(flagId,action,note);
+}
 function renderAdminDashboard(){
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
   const companies=DB.companies.filter(c=>c.status==='listed');
@@ -3086,6 +3227,12 @@ function renderAdminDashboard(){
     <div class="mcard"><div class="mlabel">Open orders</div><div class="mval">${openOrders}</div></div>
     <div class="mcard"><div class="mlabel">Halted stocks</div><div class="mval" style="color:${halted?'var(--red)':'var(--text)'}">${halted}</div></div>
     <div class="mcard"><div class="mlabel">Pending registrations</div><div class="mval" style="color:${DB.pending.length?'var(--amber)':'var(--text)'}">${DB.pending.length}</div></div>
+  </div>
+  <div class="grid4" style="margin-bottom:14px">
+    <div class="mcard"><div class="mlabel">🚩 Open flags</div><div class="mval" style="color:${(DB.flags||[]).filter(f=>f.status==='open').length?'var(--red)':'var(--text)'}">${(DB.flags||[]).filter(f=>f.status==='open').length}</div></div>
+    <div class="mcard"><div class="mlabel">Price adjustments</div><div class="mval">${(DB.priceAdjustments||[]).length}</div></div>
+    <div class="mcard"><div class="mlabel">Halted stocks</div><div class="mval" style="color:${DB.halts.length?'var(--red)':'var(--text)'}">${DB.halts.length}</div></div>
+    <div class="mcard"><div class="mlabel">Active limit orders</div><div class="mval">${DB.limitOrders.filter(o=>o.status==='open').length}</div></div>
   </div>
   <div class="grid3" style="margin-bottom:14px">
     <div class="mcard"><div class="mlabel">🏆 Leaderboard leader</div><div class="mval" style="font-size:15px;margin-top:4px">${ranked[0]?.name||'—'}</div>${ranked[0]?`<div style="font-size:12px;color:var(--green);font-family:var(--mono);margin-top:2px">${fmt(ranked[0]._nw)}</div>`:''}
