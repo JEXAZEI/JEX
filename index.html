@@ -1821,8 +1821,8 @@ function renderBanner(){
 function renderNav(){
   const u=cu();
   let tabs;
-  if(isChairman(u))tabs=[['admin','Chairman'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
-  else if(isAdmin(u))tabs=[['admin','Chairman'],['market','Market'],['settings','Settings']];
+  if(isChairman(u)||isPresident(u))tabs=[['admin','Admin'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
+  else if(isAdmin(u))tabs=[['admin','Admin'],['market','Market'],['settings','Settings']];
   else if(u.role==='company')tabs=[['market','Market'],['portfolio','Portfolio'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   else tabs=[['market','Market'],['portfolio','Portfolio'],['leaderboard','Leaderboard'],['orders','Orders'],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   return `<div class="nav">${tabs.map(([k,v])=>`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
@@ -2374,7 +2374,7 @@ function renderTrades(adminView){
 // ═══════════════════════════════════════════════
 function renderSettings(){
   const u=cu();
-  const sheetsSection=isChairman(u)?`<div class="card"><div class="section-title">Google Sheets sync</div>
+  const sheetsSection=(isChairman(u)||isPresident(u))?`<div class="card"><div class="section-title">Google Sheets sync</div>
     <div class="ibox ibox-blue">Paste your Google Apps Script web app URL here. JEX will automatically push balance updates to your sheet after every trade, dividend, and balance adjustment.</div>
     <div class="frow"><label class="flabel">Web app URL</label><input type="text" id="sheets-url" placeholder="https://script.google.com/macros/s/..." value="${SHEETS_URL||''}"></div>
     <div style="display:flex;gap:8px">
@@ -2934,18 +2934,16 @@ function updateDilPrev(ticker){const co=getCo(ticker);if(!co)return;const ns=par
 // ═══════════════════════════════════════════════
 function renderAdmin(){
   const u=cu();
-  const chair=isChairman(u);
+  const chair=isChairman(u)||isPresident(u);
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
   const companies=DB.users.filter(u=>u.role==='company'&&u.status==='approved');
   const pIPO=DB.ipoApps.filter(a=>a.status==='pending'),rIPO=DB.ipoApps.filter(a=>a.status!=='pending');
   const pDil=DB.dilApps.filter(d=>d.status==='pending'),rDil=DB.dilApps.filter(d=>d.status!=='pending');
   const pS=DB.pending.filter(r=>r.role==='student'),pC=DB.pending.filter(r=>r.role==='company');
 
-  // President can only see: session, balances, passwords
-  const presidentTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
   const sectreTabs=[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
   const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log']];
-  const tabs=chair?chairmanTabs:isPresident(u)?presidentTabs:sectreTabs;
+  const tabs=chair?chairmanTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
 
   // Block access to tabs not in allowed list
