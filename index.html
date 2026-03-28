@@ -137,8 +137,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 // ═══════════════════════════════════════════════
 // CONFIG — paste your Supabase values here
 // ═══════════════════════════════════════════════
-const SUPABASE_URL = 'https://hahxemgfkorglaoywybq.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_-moLk6DXyj8L41Ope-RAXw_3YPkyv_8';
+const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 const SESSION_KEY = 'jex-session-v3';
 
 const sb = {
@@ -560,20 +560,35 @@ async function requestFounderAllocation(ticker,studentId,shares,reason){
 }
 async function reviewFounderAllocation(id,approve){
   const a=DB.founderAllocations.find(x=>x.id===id);if(!a)return;
-  await sb.patch('jex_founder_allocations','id=eq.'+id,{status:approve?'approved':'rejected'});
-  a.status=approve?'approved':'rejected';
   if(approve){
-    const co=getCo(a.ticker);const student=getUser(a.student_id);
-    if(!co||!student)return;
-    if(co.shares_avail<a.shares){toast('Insufficient shares available');return;}
-    const h={...holdings(student)};h[a.ticker]=(h[a.ticker]||0)+a.shares;
-    await updateUser(a.student_id,{holdings:h});
+    const co=getCo(a.ticker);
+    // Reload student fresh from DB to get latest holdings
+    let studentArr=await sb.get('jex_users','id=eq.'+a.student_id);
+    const student=studentArr&&studentArr[0];
+    if(!co){toast('Company stock not found for ticker '+a.ticker);return;}
+    if(!student){toast('Student not found: '+a.student_name);return;}
+    if(co.shares_avail<a.shares){toast('Insufficient shares — only '+co.shares_avail+' available in '+a.ticker);return;}
+    // Build updated holdings
+    const currentHoldings=typeof student.holdings==='object'&&student.holdings?student.holdings:{};
+    const newHoldings={...currentHoldings};
+    newHoldings[a.ticker]=(parseInt(newHoldings[a.ticker])||0)+a.shares;
+    // Write to DB
+    await sb.patch('jex_users','id=eq.'+a.student_id,{holdings:newHoldings});
+    // Update local DB user
+    const localStudent=getUser(a.student_id);
+    if(localStudent)localStudent.holdings=newHoldings;
+    // Reduce available shares
     await updateCo(a.ticker,{shares_avail:co.shares_avail-a.shares});
-    await pushNotification(a.student_id,'founder_alloc','🎁 '+a.shares+' founder shares of '+a.company_name+' ('+a.ticker+') granted to you!',a.ticker);
+    // Mark approved
+    await sb.patch('jex_founder_allocations','id=eq.'+id,{status:'approved'});
+    a.status='approved';
+    await pushNotification(a.student_id,'founder_alloc','🎁 '+a.shares+' founder shares of '+a.company_name+' ('+a.ticker+') have been added to your portfolio!',a.ticker);
     await logActivity('founder_alloc',a.student_name+' granted '+a.shares+' founder shares of '+a.company_name,{ticker:a.ticker,amount:a.shares});
-    toast(a.student_name+' granted '+a.shares+' shares of '+a.ticker);
+    toast('✓ '+a.student_name+' granted '+a.shares+'×'+a.ticker+' — portfolio updated');
   } else {
-    await pushNotification(a.student_id,'founder_alloc','❌ Founder share request for '+a.company_name+' was rejected.');
+    await sb.patch('jex_founder_allocations','id=eq.'+id,{status:'rejected'});
+    a.status='rejected';
+    await pushNotification(a.student_id,'founder_alloc','❌ Your founder share request for '+a.shares+'×'+a.ticker+' in '+a.company_name+' was rejected.');
     toast('Allocation rejected');
   }
   render();
