@@ -302,8 +302,22 @@ setInterval(()=>{checkSchedule();if(DB.session.ends_at&&DB.session.status==='ope
 
 // ── Auto-refresh: pull latest data every 20 seconds ──────
 let _lastRefresh=0;
+function userIsFillingForm(){
+  // Check if any input, textarea, or select has focus or has content typed in it
+  const active=document.activeElement;
+  if(active&&['INPUT','TEXTAREA','SELECT'].includes(active.tagName))return true;
+  // Also skip if on a form-heavy tab
+  const formTabs=['apply','register','settings'];
+  if(formTabs.includes(UI.navTab))return true;
+  if(UI.loginView==='register')return true;
+  // Check for any filled-in inputs (user has started typing something)
+  const inputs=document.querySelectorAll('input[type="text"],input[type="number"],input[type="email"],input[type="password"],textarea');
+  for(const inp of inputs){if(inp.value&&inp.value.trim().length>0)return true;}
+  return false;
+}
 async function autoRefresh(){
   if(!UI.userId)return; // not logged in
+  if(userIsFillingForm())return; // don't interrupt forms
   const now=Date.now();
   if(now-_lastRefresh<18000)return; // debounce
   _lastRefresh=now;
