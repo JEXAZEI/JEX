@@ -385,7 +385,7 @@ async function registerCompany(name,email,pw,desc,secQ,secA,cofounders=[]){
   if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
-  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),cofounders,ts:ts()};
+  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';render();
 }
@@ -1381,13 +1381,23 @@ async function issueDividend(ticker,perShare,note){
   perShare=Math.round(parseFloat(perShare)*100)/100;
   if(isNaN(perShare)||perShare<=0)return toast('Enter a valid per-share amount');
   if(!note||note.trim().length<5)return toast('Please add a note');
-  const sh=shareholders(ticker);if(!sh.length)return toast('No shareholders yet');
-  const total=divTotal(ticker,perShare);
+  // Fetch all students fresh from Supabase so founder-allocated holdings are current
+  const freshStudents=await sb.get('jex_users','role=eq.student&status=eq.approved');
+  // Update local DB with fresh data
+  freshStudents.forEach(fs=>{const local=getUser(fs.id);if(local)Object.assign(local,fs);else DB.users.push(fs);});
+  const sh=freshStudents.filter(s=>(s.holdings&&s.holdings[ticker]||0)>0);
+  if(!sh.length)return toast('No shareholders yet');
+  const total=sh.reduce((s,u)=>s+Math.round(((u.holdings&&u.holdings[ticker])||0)*perShare*100)/100,0);
   if(owner.cash<total)return toast('Insufficient funds (need '+fmt(total)+')');
-  if(!confirm('Pay '+fmt(perShare)+'/share? Total: '+fmt(total)))return;
+  if(!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(((s.holdings&&s.holdings[ticker])||0)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
   await updateUser(owner.id,{cash:Math.round((owner.cash-total)*100)/100});
   const payouts=[];
-  for(const s of sh){const shares=(holdings(s)[ticker])||0,payout=Math.round(shares*perShare*100)/100;await updateUser(s.id,{cash:Math.round((s.cash+payout)*100)/100});payouts.push({userId:s.id,name:s.name,shares,payout});}
+  for(const s of sh){
+    const shares=(s.holdings&&s.holdings[ticker])||0;
+    const payout=Math.round(shares*perShare*100)/100;
+    await updateUser(s.id,{cash:Math.round((s.cash+payout)*100)/100});
+    payouts.push({userId:s.id,name:s.name,shares,payout});
+  }
   const div={id:uid(),ticker,company_name:co.name,per_share:perShare,total,note:note.trim(),payouts,ts:ts()};
   await sb.post('jex_dividends',div);DB.dividends.push(div);
   await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(total),{ticker,userId:owner.id,userName:owner.name,amount:total});
@@ -1801,7 +1811,7 @@ function renderLogin(){
   if(UI.loginView==='forgot-email'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 1 of 3</div><div class="frow"><label class="flabel">Your email address</label><input type="email" id="forgot-email" placeholder="you@school.edu" onkeydown="if(event.key==='Enter')forgotStep1(get('forgot-email')?.value)"></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep1(get('forgot-email')?.value)">Continue</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${u?.name}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><input type="password" id="forgot-pw1" placeholder="New password (min 4 characters)"></div><div class="frow"><label class="flabel">Confirm new password</label><input type="password" id="forgot-pw2" placeholder="Repeat new password"></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
-  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><input type="password" id="reg-pw" placeholder="Choose a password"></div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><input type="password" id="reg-co-pw" placeholder="Choose a password"></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="frow"><label class="flabel">Co-founder 1 name (optional)</label><input type="text" id="reg-co-cf1" placeholder="Exact name as they registered"></div><div class="frow"><label class="flabel">Co-founder 2 name (optional)</label><input type="text" id="reg-co-cf2" placeholder="Exact name as they registered"></div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
+  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><input type="password" id="reg-pw" placeholder="Choose a password"></div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><input type="password" id="reg-co-pw" placeholder="Choose a password"></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span> — JTED Stock Exchange</div><div class="login-sub">Sign in to your account</div><div class="acct-list">
     ${chairman?acctRow(chairman,'av-ch'):''}
     ${president?acctRow(president,'av-pr'):''}
@@ -2439,7 +2449,7 @@ function renderMyStock(){
     <button class="tab ${UI.companyTab==='classes'?'active':''}" onclick="UI.companyTab='classes';render()">Share classes ${pendingClassApp?'<span class="badge b-amber" style="margin-left:4px">'+pendingClassApp+'</span>':''}</button>
     <button class="tab ${UI.companyTab==='votes'?'active':''}" onclick="UI.companyTab='votes';render()">Votes ${myVotes.length?'<span class="badge b-purple" style="margin-left:4px">'+myVotes.length+'</span>':''}</button>
     <button class="tab ${UI.companyTab==='news'?'active':''}" onclick="UI.companyTab='news';render()">News ${myNews.length?'<span class="badge b-amber" style="margin-left:4px">'+myNews.length+'</span>':''}</button>
-    <button class="tab ${UI.companyTab==='financials'?'active':''}" onclick="UI.companyTab='financials';render()">Financials</button>
+
     <button class="tab ${UI.companyTab==='dividends'?'active':''}" onclick="UI.companyTab='dividends';render()">Dividends</button>
     <button class="tab ${UI.companyTab==='buyback'?'active':''}" onclick="UI.companyTab='buyback';render()">Buyback</button>
     <button class="tab ${UI.companyTab==='dilution'?'active':''}" onclick="UI.companyTab='dilution';render()">Dilution ${DB.dilApps.filter(d=>getCompanyTickers(co.ticker).includes(d.ticker)&&d.status==='pending').length?'<span class="badge b-amber" style="margin-left:4px">'+DB.dilApps.filter(d=>getCompanyTickers(co.ticker).includes(d.ticker)&&d.status==='pending').length+'</span>':''}</button>
@@ -2449,7 +2459,7 @@ function renderMyStock(){
   :UI.companyTab==='classes'?renderClassesTab(co)
   :UI.companyTab==='votes'?renderCompanyVotesTab(co)
   :UI.companyTab==='news'?renderCompanyNewsTab(co,myNews)
-  :UI.companyTab==='financials'?renderFinancials(co)
+
   :UI.companyTab==='dividends'?renderDivTab(co,myDivs)
   :UI.companyTab==='buyback'?renderBBTab(co,myBBs)
   :renderDilTab(co)}`;
