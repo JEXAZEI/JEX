@@ -137,8 +137,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 // ═══════════════════════════════════════════════
 // CONFIG — paste your Supabase values here
 // ═══════════════════════════════════════════════
-const SUPABASE_URL = 'https://hahxemgfkorglaoywybq.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_-moLk6DXyj8L41Ope-RAXw_3YPkyv_8';
+const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 const SESSION_KEY = 'jex-session-v3';
 
 const sb = {
@@ -764,6 +764,19 @@ function isCompanyMember(co,userId){
   return DB.companyMembers.some(m=>m.company_user_id===co.owner_id&&m.student_id===userId&&m.status==='accepted');
 }
 
+async function removeFounder(memberId,name){
+  if(!confirm('Remove '+name+' as a founder? They will lose access to manage this company.'))return;
+  const m=DB.companyMembers.find(x=>x.id===memberId);if(!m)return;
+  await sb.patch('jex_company_members','id=eq.'+memberId,{status:'removed'});
+  m.status='removed';
+  const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
+  const u=cu();
+  if(co){
+    await pushNotification(m.student_id,'invite','❌ You have been removed as a founder of '+co.name+'.',co.ticker);
+    await logActivity('cofound',name+' removed as founder of '+co.name,{ticker:co.ticker,userId:u.id,userName:u.name});
+  }
+  toast(name+' removed as founder');render();
+}
 async function sendFounderInvite(ownerId,studentId){
   // ownerId = co.owner_id (the company user's id)
   const co=DB.companies.find(c=>c.owner_id===ownerId);
@@ -2609,7 +2622,7 @@ function renderStockOverview(co,u){
   return html;
 }
 function renderFoundersTab(co,u){
-  const members=DB.companyMembers.filter(m=>m.company_user_id===co.owner_id);
+  const members=DB.companyMembers.filter(m=>m.company_user_id===co.owner_id&&m.status!=='removed');
   const accepted=members.filter(m=>m.status==='accepted');
   const pending=members.filter(m=>m.status==='pending');
   const allTickers=getCompanyTickers(co.ticker);
@@ -2643,7 +2656,9 @@ function renderFoundersTab(co,u){
     const s=getUser(m.student_id);
     html+='<div class="app-row"><div class="app-info">'
       +'<div class="app-name">'+(s?.name||'?')+' <span class="badge b-blue">Founder</span></div>'
-      +'<div class="app-meta">'+(s?.email||'')+'</div></div></div>';
+      +'<div class="app-meta">'+(s?.email||'')+'</div></div>'
+      +'<button class="btn btn-sm btn-danger" onclick="removeFounder(&quot;'+m.id+'&quot;,&quot;'+(s?.name||'?')+'&quot;)">Remove</button>'
+      +'</div>';
   });
   pending.forEach(m=>{
     const s=getUser(m.student_id);
@@ -2890,9 +2905,29 @@ function renderFinancials(co){
     <div class="row"><div class="frow" style="flex:1"><label class="flabel">Revenue target ($)</label><input type="number" id="et-rev" placeholder="50000" min="0"></div><div class="frow" style="flex:1"><label class="flabel">Profit target ($)</label><input type="number" id="et-profit" placeholder="12000"></div></div>
     <button class="btn btn-warning" onclick="submitEarningsTarget('${co.ticker}',get('et-rev')?.value,get('et-profit')?.value)">Submit target</button></div>`:''}${co.financials&&co.financials.length?`<div class="card"><div class="section-title">Past reports</div><table><thead><tr><th>Period</th><th>Revenue</th><th>Profit</th><th>Margin</th><th>Summary</th></tr></thead><tbody>${co.financials.map(f=>`<tr><td style="color:var(--text2)">${f.period}</td><td style="font-family:var(--mono)">${fmt(f.revenue)}</td><td style="font-family:var(--mono);color:${f.profit>=0?'var(--green)':'var(--red)'}">${fmt(f.profit)}</td><td>${f.revenue>0?Math.round((f.profit/f.revenue)*100)+'%':'—'}</td><td style="font-size:12px;color:var(--text2)">${f.summary}</td></tr>`).join('')}</tbody></table></div>`:''}`;}
 function renderDivTab(co,myDivs){
-  const sh=shareholders(co.ticker),owner=cu();
-  return`<div class="card"><div class="section-title">Pay a dividend</div><div class="ibox ibox-teal">Paid immediately from company cash to all shareholders.</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">Shareholders</div><div class="mval">${sh.length}</div></div><div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${(co.shares-co.shares_avail).toLocaleString()}</div></div></div>
-    ${sh.length?`<div class="frow"><label class="flabel">Dividend per share ($)</label><input type="number" id="div-ps" placeholder="e.g. 0.50" min="0.01" step="0.01" oninput="updateDivPrev('${co.ticker}')"></div><div id="div-prev"></div><div class="frow" style="margin-top:10px"><label class="flabel">Note to investors</label><input type="text" id="div-note" placeholder="e.g. Q1 earnings dividend"></div><button class="btn btn-success" onclick="issueDividend('${co.ticker}',get('div-ps')?.value,get('div-note')?.value)">Pay dividend now</button>`:'<div class="empty">No shareholders yet.</div>'}
+  const owner=cu();
+  const allT=getCompanyTickers(co.ticker);
+  const totalCirc=allT.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares-c.shares_avail:0);},0);
+  // Fetch fresh holders async and populate
+  sb.get('jex_users','role=eq.student&status=eq.approved').then(freshUsers=>{
+    freshUsers.forEach(fu=>{const local=getUser(fu.id);if(local)Object.assign(local,fu);else DB.users.push(fu);});
+    const freshSh=freshUsers.filter(s=>allT.some(t=>s.holdings&&(s.holdings[t]||0)>0));
+    const el=document.getElementById('div-sh-count');if(el)el.textContent=freshSh.length;
+    const form=document.getElementById('div-form');
+    if(form){
+      if(freshSh.length){
+        form.innerHTML=`<div class="frow"><label class="flabel">Dividend per share ($)</label><input type="number" id="div-ps" placeholder="e.g. 0.50" min="0.01" step="0.01" oninput="updateDivPrev('${co.ticker}')"></div><div id="div-prev"></div><div class="frow" style="margin-top:10px"><label class="flabel">Note to investors</label><input type="text" id="div-note" placeholder="e.g. Q1 earnings dividend"></div><button class="btn btn-success" onclick="issueDividend('${co.ticker}',get('div-ps')?.value,get('div-note')?.value)">Pay dividend now</button>`;
+      } else {
+        form.innerHTML='<div class="empty">No shareholders yet.</div>';
+      }
+    }
+  }).catch(()=>{});
+  return`<div class="card"><div class="section-title">Pay a dividend</div>
+    <div class="ibox ibox-teal">Paid immediately from company cash to all shareholders.</div>
+    <div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div>
+    <div class="mcard"><div class="mlabel">Shareholders</div><div class="mval" id="div-sh-count">loading...</div></div>
+    <div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${totalCirc.toLocaleString()}</div></div></div>
+    <div id="div-form"><div style="font-size:12px;color:var(--text2);padding:8px 0">Loading shareholders...</div></div>
   </div>${myDivs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Per share</th><th>Total</th><th>Recipients</th><th>Note</th></tr></thead><tbody>${myDivs.map(d=>`<tr><td style="color:var(--text2)">${d.ts}</td><td style="font-family:var(--mono)">${fmt(d.per_share)}</td><td style="color:var(--green);font-family:var(--mono)">${fmt(d.total)}</td><td>${(d.payouts||[]).length}</td><td style="font-size:12px;color:var(--text2)">${d.note}</td></tr>`).join('')}</tbody></table></div>`:''}`;
 }
 function updateDivPrev(ticker){const co=getCo(ticker);if(!co)return;const ps=parseFloat(get('div-ps')?.value)||0,p=get('div-prev');if(!p)return;if(ps<=0){p.innerHTML='';return;}const sh=shareholders(ticker),total=divTotal(ticker,ps),owner=cu(),ok=owner.cash>=total;p.innerHTML=`<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px"><div><div style="color:var(--text2);margin-bottom:2px">Shareholders</div><div style="font-weight:500">${sh.length}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Total</div><div style="color:var(--green);font-family:var(--mono)">${fmt(total)}</div></div><div><div style="color:var(--text2);margin-bottom:2px">After</div><div style="font-family:var(--mono);color:${ok?'var(--text)':'var(--red)'}">${fmt(owner.cash-total)}</div></div></div>${!ok?`<div style="color:var(--red);font-weight:500">Insufficient funds</div>`:''}</div>`;}
