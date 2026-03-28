@@ -206,6 +206,15 @@ const validEmail=e=>e&&e.includes('@')&&e.includes('.');
 const cu=()=>DB.users.find(u=>u.id===UI.userId)||null;
 const getUser=id=>DB.users.find(u=>u.id===id);
 const getCo=t=>DB.companies.find(c=>c.ticker===t);
+async function creditCompanyCash(ticker,amount){
+  const meta=getClassMeta(ticker);
+  const parentTicker=meta?meta.parent_ticker:ticker;
+  const co=getCo(parentTicker)||getCo(ticker);
+  if(!co)return;
+  const owner=getUser(co.owner_id);if(!owner)return;
+  const newCash=Math.round((owner.cash+amount)*100)/100;
+  await updateUser(owner.id,{cash:newCash});
+}
 const uid=()=>'id_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
 const ts=()=>new Date().toLocaleTimeString();
 const isoNow=()=>new Date().toISOString(); // full timestamp for price history
@@ -1271,6 +1280,7 @@ async function checkLimitOrders(){
         const bH={...holdings(u)};bH[o.ticker]=(bH[o.ticker]||0)+o.qty;
         await updateUser(u.id,{cash:Math.round((u.cash-cost)*100)/100,holdings:bH});
         await updateCo(ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-o.qty),price_history:[...co.price_history,{p:np,t:isoNow()}]});
+        await creditCompanyCash(ticker,Math.round(np*o.qty*100)/100);
         await recordTrade(ticker,o.qty,np,u.id,'exchange','limit_buy');
       } else {
         const held=(holdings(u)[ticker])||0;if(held<o.qty)continue;
@@ -1305,6 +1315,12 @@ async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
   checkPriceAlerts();
   checkCircuitBreakers();
   pushBalances();
+  // Refresh buyer and seller in DB.users so shareholder lists stay current
+  [buyerId,sellerId].forEach(async uid2=>{
+    if(!uid2||['exchange','short','cover'].includes(uid2))return;
+    try{const fresh=await sb.get('jex_users','id=eq.'+uid2);
+    if(fresh&&fresh[0]){const local=getUser(uid2);if(local)Object.assign(local,fresh[0]);}}catch(e){}
+  });
   pushToSheets('trades',{trades:[{ticker,qty,price,type,ts:ts(),
     buyer:['exchange','short'].includes(buyerId)?'JEX':getUser(buyerId)?.name||buyerId,
     seller:['exchange','cover'].includes(sellerId)?'JEX':getUser(sellerId)?.name||sellerId}]});
@@ -1321,6 +1337,7 @@ async function placeBuy(ticker,qty){
   await updateUser(u.id,{cash:Math.round((u.cash-cost)*100)/100,holdings:bH});
   const newH=[...co.price_history,{p:np,t:isoNow()}];
   await updateCo(ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-qty),price_history:newH});
+  await creditCompanyCash(ticker,cost); // IPO/dilution proceeds go to company
   await recordTrade(ticker,qty,np,u.id,'exchange');
   toast('Bought '+qty+' × '+ticker+' @ '+fmt(np));openPanel(ticker);
 }
@@ -1953,11 +1970,19 @@ function renderCompanyPage(parentTicker){
   if(tab==='overview'){
     // Key stats
     const totalMktCap=allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.price*c.shares:0);},0);
+    // Capital raised = total value of all shares sold from exchange pool
+    const capitalRaised=DB.trades.filter(t=>allTickers.includes(t.ticker)&&t.seller_id==='exchange').reduce((s,t)=>s+Math.round(t.price*t.qty*100)/100,0);
+    const owner=getUser(co.owner_id);
     html+='<div class="grid4" style="margin-bottom:14px">'
       +'<div class="mcard"><div class="mlabel">Price</div><div class="mval" style="font-family:var(--mono)">'+fmt(co.price)+'</div></div>'
       +'<div class="mcard"><div class="mlabel">Total market cap</div><div class="mval" style="font-family:var(--mono)">'+fmt(totalMktCap)+'</div></div>'
       +'<div class="mcard"><div class="mlabel">Shareholders</div><div class="mval">'+shareholders.length+'</div></div>'
       +'<div class="mcard"><div class="mlabel">In circulation</div><div class="mval">'+totalCirculating.toLocaleString()+'</div></div>'
+      +'</div>'
+      +'<div class="grid3" style="margin-bottom:14px">'
+      +'<div class="mcard"><div class="mlabel">Capital raised</div><div class="mval" style="font-family:var(--mono);color:var(--green)">'+fmt(capitalRaised)+'</div></div>'
+      +'<div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">'+(owner?fmt(owner.cash):'—')+'</div></div>'
+      +'<div class="mcard"><div class="mlabel">Available shares</div><div class="mval">'+allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares_avail:0);},0).toLocaleString()+'</div></div>'
       +'</div>';
 
     // All share classes
@@ -2125,12 +2150,41 @@ function renderCompanyPage(parentTicker){
   }
 
   else if(tab==='shareholders'){
-    html+='<div class="card"><div class="section-title">Shareholders</div>';
+    // Fetch fresh user data so new buyers/sellers are shown immediately
+    sb.get('jex_users','role=in.(student,company)&status=eq.approved').then(freshUsers=>{
+      freshUsers.forEach(fu=>{const local=getUser(fu.id);if(local)Object.assign(local,fu);else DB.users.push(fu);});
+      // Rebuild shareholder map with fresh data
+      const freshMap={};
+      allTickers.forEach(t=>{
+        DB.users.filter(u2=>(u2.role==='student'||u2.role==='company')&&(u2.holdings&&u2.holdings[t]||0)>0).forEach(u2=>{
+          if(!freshMap[u2.id])freshMap[u2.id]={name:u2.name,shares:{}};
+          freshMap[u2.id].shares[t]=(u2.holdings&&u2.holdings[t]||0);
+        });
+      });
+      const freshShareholders=Object.values(freshMap);
+      const el=document.getElementById('shareholder-table');
+      if(!el)return;
+      if(!freshShareholders.length){el.innerHTML='<div class="empty">No shareholders yet.</div>';return;}
+      el.innerHTML='<table><thead><tr><th>Holder</th>'
+        +allTickers.map(t=>'<th class="r">'+t+'</th>').join('')
+        +'<th class="r">Total</th><th class="r">Voting power</th></tr></thead><tbody>'
+        +freshShareholders.map(sh=>{
+          const total=Object.values(sh.shares).reduce((s,q)=>s+q,0);
+          const vp=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);
+          return '<tr><td style="font-weight:500">'+sh.name+'</td>'
+            +allTickers.map(t=>'<td class="r" style="font-family:var(--mono)">'+(sh.shares[t]||0)+'</td>').join('')
+            +'<td class="r" style="font-weight:500">'+total+'</td>'
+            +'<td class="r" style="color:var(--amber)">'+vp+'</td></tr>';
+        }).join('')
+        +'</tbody></table>';
+    }).catch(()=>{});
+    html+='<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Shareholders <span style="font-size:11px;font-weight:400;color:var(--text2)">Loading fresh data...</span></div><div id="shareholder-table">';
+    // Show cached data immediately while fresh data loads
     if(!shareholders.length){html+='<div class="empty">No shareholders yet.</div>';}
     else{
-      html+='<table><thead><tr><th>Student</th>'
+      html+='<table><thead><tr><th>Holder</th>'
         +allTickers.map(t=>'<th class="r">'+t+'</th>').join('')
-        +'<th class="r">Total shares</th><th class="r">Voting power</th></tr></thead><tbody>'
+        +'<th class="r">Total</th><th class="r">Voting power</th></tr></thead><tbody>'
         +shareholders.map(sh=>{
           const total=Object.values(sh.shares).reduce((s,q)=>s+q,0);
           const vp=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);
@@ -2141,7 +2195,7 @@ function renderCompanyPage(parentTicker){
         }).join('')
         +'</tbody></table>';
     }
-    html+='</div>';
+    html+='</div></div>';
   }
 
   else if(tab==='alerts'&&(u.role==='student'||u.role==='company')){
