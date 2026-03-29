@@ -168,7 +168,7 @@ let charts={},sessionTimer=null;
 async function loadAll(){
   // ── Phase 1: critical data needed to render login ──────
   const [users,session,companies,announcements,halts]=await Promise.all([
-    sb.get('jex_users','order=created_at.asc&select=id,name,email,role,status,cash,holdings,shorts,watchlist,description,app_status,sec_q,created_at,founders'),
+    sb.get('jex_users','order=created_at.asc&select=id,name,email,role,status,cash,holdings,shorts,watchlist,description,app_status,sec_q,created_at'),
     sb.get('jex_session','id=eq.1'),
     sb.get('jex_companies','order=created_at.asc'),
     sb.get('jex_announcements','order=created_at.desc'),
