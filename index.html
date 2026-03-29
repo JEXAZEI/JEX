@@ -72,6 +72,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 .ot-btn{font-size:13px;padding:6px 18px;cursor:pointer;border:none;background:transparent;color:var(--text2);font-family:var(--font)}
 .ot-buy{background:var(--teal);color:#fff}.ot-sell{background:var(--red);color:#fff}.ot-short{background:var(--purple);color:#fff}.ot-cover{background:#BA7517;color:#fff}
 .price-up{color:var(--green)}.price-down{color:var(--red)}
+  @keyframes progress{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
 .empty{text-align:center;padding:32px;color:var(--text2);font-size:13px}
 .divider{border:none;border-top:1px solid var(--border);margin:14px 0}
 .tab-row{display:flex;gap:2px;margin-bottom:14px;flex-wrap:wrap}
@@ -137,8 +138,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 // ═══════════════════════════════════════════════
 // CONFIG — paste your Supabase values here
 // ═══════════════════════════════════════════════
-const SUPABASE_URL = 'https://hahxemgfkorglaoywybq.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_-moLk6DXyj8L41Ope-RAXw_3YPkyv_8';
+const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 const SESSION_KEY = 'jex-session-v3';
 
 const sb = {
@@ -165,34 +166,58 @@ let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',com
 let charts={},sessionTimer=null;
 
 async function loadAll(){
-  const [users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,session,announcements,limitOrders,activity,shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,priceAdjustments,flags]=await Promise.all([
-    sb.get('jex_users','order=created_at.asc'),sb.get('jex_pending','order=created_at.asc'),
-    sb.get('jex_companies','order=created_at.asc'),sb.get('jex_news','order=created_at.desc'),
-    sb.get('jex_ipo_applications','order=created_at.asc'),sb.get('jex_dilution_applications','order=created_at.asc'),
-    sb.get('jex_trades','order=id.asc'),sb.get('jex_dividends','order=created_at.asc'),
-    sb.get('jex_buybacks','order=created_at.asc'),sb.get('jex_session','id=eq.1'),
+  // ── Phase 1: critical data needed to render login ──────
+  const [users,session,companies,announcements,halts]=await Promise.all([
+    sb.get('jex_users','order=created_at.asc&select=id,name,email,role,status,cash,holdings,shorts,watchlist,description,app_status,sec_q,created_at,founders'),
+    sb.get('jex_session','id=eq.1'),
+    sb.get('jex_companies','order=created_at.asc'),
     sb.get('jex_announcements','order=created_at.desc'),
+    sb.get('jex_halts','order=created_at.asc'),
+  ]);
+  // Apply phase 1 immediately so login renders fast
+  DB.users=users;
+  DB.session=session[0]||DB.session;
+  DB.companies=companies;
+  DB.announcements=announcements;
+  DB.halts=halts;
+  SHEETS_URL=DB.session.sheets_url||null;
+  if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
+  render(); // render login screen immediately with phase 1 data
+
+  // ── Phase 2: everything else in parallel ───────────────
+  const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
+    activity,shareClasses,classApps,votes,ballots,notifications,
+    priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,
+    priceAdjustments,flags]=await Promise.all([
+    sb.get('jex_pending','order=created_at.asc'),
+    sb.get('jex_news','order=created_at.desc&limit=50'),
+    sb.get('jex_ipo_applications','order=created_at.asc'),
+    sb.get('jex_dilution_applications','order=created_at.asc'),
+    sb.get('jex_trades','order=created_at.desc&limit=200&select=id,ticker,qty,price,buyer_id,seller_id,type,ts'),  // only last 200 trades
+    sb.get('jex_dividends','order=created_at.asc'),
+    sb.get('jex_buybacks','order=created_at.asc'),
     sb.get('jex_limit_orders','order=created_at.asc'),
-    sb.get('jex_activity','order=created_at.desc&limit=200'),
+    sb.get('jex_activity','order=created_at.desc&limit=100'),
     sb.get('jex_share_classes','order=created_at.asc'),
     sb.get('jex_class_applications','order=created_at.asc'),
     sb.get('jex_votes','order=created_at.desc'),
     sb.get('jex_vote_ballots','order=created_at.asc'),
-    sb.get('jex_notifications','order=created_at.desc&limit=100'),
-    sb.get('jex_halts','order=created_at.asc'),
-    sb.get('jex_notifications','order=created_at.desc&limit=100'),
-    sb.get('jex_halts','order=created_at.asc'),
+    sb.get('jex_notifications','order=created_at.desc&limit=50'),
     sb.get('jex_price_alerts','order=created_at.asc'),
-    sb.get('jex_nw_history','order=created_at.asc'),
+    sb.get('jex_nw_history','order=created_at.desc&limit=500'),
     sb.get('jex_earnings_targets','order=created_at.desc'),
     sb.get('jex_company_members','order=created_at.asc'),
-    sb.get('jex_founder_allocations','order=created_at.desc')
+    sb.get('jex_founder_allocations','order=created_at.desc'),
+    sb.get('jex_price_adjustments','order=created_at.desc&limit=50'),
+    sb.get('jex_flags','order=created_at.desc'),
   ]);
-  DB={users,pending,companies,news,ipoApps,dilApps,trades,dividends,buybacks,
-    session:session[0]||DB.session,announcements,limitOrders,activity,
-    shareClasses,classApps,votes,ballots,notifications,halts,priceAlerts,nwHistory,earningsTargets,
-    companyMembers,founderAllocations,
-    founders:DB.founders||[],founderAllocs:DB.founderAllocs||[],priceAdjustments:DB.priceAdjustments||[],flags};
+  Object.assign(DB,{pending,news,ipoApps,dilApps,
+    trades,dividends,buybacks,limitOrders,activity,
+    shareClasses,classApps,votes,ballots,notifications,
+    priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,
+    priceAdjustments,flags,
+    founders:DB.founders||[],founderAllocs:DB.founderAllocs||[]});
+  render(); // re-render with full data
 }
 
 // ═══════════════════════════════════════════════
@@ -3786,17 +3811,31 @@ function setTab(t){UI.navTab=t;UI.panelTicker=null;destroyCharts();render();}
 // ═══════════════════════════════════════════════
 async function boot(){
   if(!isConfigured()){document.getElementById('app').innerHTML=renderConfig();return;}
+  // Show loading splash immediately
+  document.getElementById('app').innerHTML=`<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px">
+    <div style="font-family:var(--mono);font-size:28px;font-weight:700"><span style="color:var(--amber)">JEX</span></div>
+    <div style="font-size:13px;color:var(--text2)">Connecting to exchange...</div>
+    <div style="width:200px;height:3px;background:var(--bg3);border-radius:2px;overflow:hidden">
+      <div style="height:100%;background:var(--blue);border-radius:2px;animation:progress 1.5s ease-in-out infinite"></div>
+    </div>
+  </div>`;
   try{
-    await loadAll();
+    // Restore session before loadAll so first render() in phase 1 shows correct nav
     const savedId=localStorage.getItem(SESSION_KEY);
-    if(savedId&&DB.users.find(u=>u.id===savedId)){
-      UI.userId=savedId;const u=DB.users.find(u=>u.id===savedId);
-      UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'apply':'market';
-    if(isAdmin(u))UI.adminTab='dashboard';
+    if(savedId){
+      UI.userId=savedId; // will be validated after users load
     }
-    if(DB.session.ends_at&&DB.session.status==='open')sessionTimer=setInterval(tickTimer,500);
-    SHEETS_URL=DB.session.sheets_url||null;
-    render();
+    await loadAll();
+    // Validate saved session after load
+    if(UI.userId){
+      const u=DB.users.find(u=>u.id===UI.userId);
+      if(u){
+        UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'apply':'market';
+        if(isAdmin(u))UI.adminTab='dashboard';
+      } else {
+        UI.userId=null; // session invalid
+      }
+    }
   }catch(err){
     document.getElementById('app').innerHTML=`<div class="config-page"><div class="config-card"><div style="font-family:var(--mono);font-size:20px;font-weight:600;margin-bottom:12px;color:var(--red)">Connection failed</div><div class="ibox ibox-red" style="margin-bottom:16px">Could not connect to Supabase.<br><br><strong>Error:</strong> ${err.message}</div><div style="font-size:13px;color:var(--text2);margin-bottom:12px">Check that your Supabase URL and anon key are correct.</div><button class="btn btn-primary" onclick="boot()">Retry</button></div></div>`;
   }
