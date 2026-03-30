@@ -128,6 +128,129 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 .news-headline{font-size:14px;font-weight:500;margin-bottom:4px}
 .news-body{font-size:13px;color:var(--text2);line-height:1.6;margin-bottom:8px}
 .news-meta{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--text3)}
+
+/* ═══════════════════════════════════════════════
+   MOBILE RESPONSIVE — max-width: 640px
+═══════════════════════════════════════════════ */
+@media(max-width:640px){
+  /* Core layout */
+  .content{padding:12px;max-width:100%}
+  .topbar{padding:8px 12px}
+  .logo .full{display:none} /* hide "JTED Stock Exchange" text on mobile */
+  .user-pill span:not(.badge){display:none} /* hide name, show only avatar + badge */
+  .logout-btn{padding:3px 6px;font-size:11px}
+
+  /* Nav tabs — horizontal scroll */
+  .nav{padding:4px 10px;gap:2px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+  .nav::-webkit-scrollbar{display:none}
+  .nav-btn{font-size:12px;padding:5px 10px;white-space:nowrap;flex-shrink:0}
+
+  /* Admin tabs — horizontal scroll */
+  .tab-row{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;padding-bottom:4px}
+  .tab-row::-webkit-scrollbar{display:none}
+  .tab{white-space:nowrap;flex-shrink:0;font-size:12px;padding:5px 10px}
+
+  /* Session banner */
+  .session-banner{padding:5px 12px;font-size:11px}
+  .timer{font-size:13px}
+
+  /* Cards */
+  .card{padding:12px;border-radius:var(--radius)}
+
+  /* Grids — collapse to 2 or 1 col on mobile */
+  .grid4{grid-template-columns:1fr 1fr}
+  .grid3{grid-template-columns:1fr 1fr}
+  .grid2{grid-template-columns:1fr}
+
+  /* Metric cards */
+  .mval{font-size:18px}
+
+  /* Tables — horizontal scroll */
+  .card table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:thin}
+  table{font-size:12px}
+  th,td{padding:6px 8px}
+
+  /* Market table — hide sparkline and shares bar on mobile */
+  .sparkline-cell{display:none}
+  .sbar-wrap{display:none}
+  th:nth-child(5),td:nth-child(5){display:none} /* sparkline col */
+  th:nth-child(6),td:nth-child(6){display:none} /* shares bar col */
+
+  /* Ticker bar */
+  .ticker-item{min-width:72px;padding:6px 8px}
+  .tprice{font-size:13px}
+
+  /* Forms */
+  .row{flex-direction:column}
+  .row > .frow{width:100%}
+  .row > div[style*="padding-bottom"]{padding-bottom:0 !important;margin-top:4px}
+  .btn-row{flex-wrap:wrap}
+
+  /* App rows */
+  .app-row{flex-direction:column;gap:8px}
+  .app-row .btn-row{margin-top:4px}
+
+  /* Trade toggle buttons */
+  .ot-toggle{width:100%;border-radius:var(--radius)}
+  .ot-btn{flex:1;font-size:12px;padding:8px 4px;text-align:center}
+
+  /* Company page header */
+  .content > div[style*="display:flex"][style*="align-items:center"][style*="gap:12px"]{flex-wrap:wrap}
+
+  /* Login card */
+  .login-card{padding:20px}
+
+  /* Leaderboard */
+  .lb-row{padding:8px 10px;gap:8px}
+  .lb-rank{font-size:15px;min-width:24px}
+  .lb-val{font-size:13px}
+
+  /* Announcements banner */
+  .session-banner > div:last-child{display:none} /* hide right side on tiny screens */
+
+  /* Admin dashboard grids */
+  .grid4 .mcard .mval{font-size:16px}
+
+  /* Order book — stack columns */
+  div[style*="grid-template-columns:1fr 1fr"]{grid-template-columns:1fr !important}
+
+  /* Inputs full width in rows */
+  .grid2 input,.grid2 select,.grid3 input,.grid3 select{font-size:13px}
+
+  /* Notification buttons */
+  div[style*="display:flex;gap:6px;margin-top:8px"]{gap:4px}
+  div[style*="display:flex;gap:6px;margin-top:8px"] .btn{flex:1}
+
+  /* Section title with actions */
+  .section-title{font-size:13px}
+
+  /* Price chart interval bars */
+  div[id^="ibar-"]{gap:1px}
+  div[id^="ibar-"] button{padding:2px 5px;font-size:10px}
+
+  /* Badges — smaller */
+  .badge{font-size:10px;padding:1px 5px}
+
+  /* Toast */
+  .toast{bottom:12px;right:12px;left:12px;max-width:none}
+
+  /* Halted ticker indicator */
+  .halted-ticker{opacity:0.7}
+}
+
+/* ── Nav abbreviations on mobile ── */
+@media(max-width:480px){
+  .nav-btn[data-short]::before{content:attr(data-short)}
+  .nav-btn[data-short] .nav-text{display:none}
+}
+/* ── Slightly cramped tablets ── */
+@media(max-width:900px) and (min-width:641px){
+  .content{padding:16px}
+  .grid4{grid-template-columns:1fr 1fr}
+  .nav{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+  .nav::-webkit-scrollbar{display:none}
+  table{font-size:13px}
+}
 .news-ticker{font-family:var(--mono);font-size:11px;padding:1px 6px;border-radius:3px;background:rgba(240,165,0,0.1);color:var(--amber)}
 </style>
 </head>
@@ -1975,12 +2098,12 @@ function renderCompanyPage(parentTicker){
   const tab=UI.companyPageTab;
 
   let html=`
-  <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
-    <button class="btn btn-sm" onclick="closeCompanyPage()">← Back to market</button>
-    ${co.logo?`<img src="${co.logo}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid var(--border)">`:''}
-    <div style="flex:1">
-      <div style="display:flex;align-items:center;gap:10px">
-        <span style="font-size:22px;font-weight:500">${co.name}</span>
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+    <button class="btn btn-sm" onclick="closeCompanyPage()">← Back</button>
+    ${co.logo?`<img src="${co.logo}" style="width:40px;height:40px;object-fit:cover;border-radius:8px;border:1px solid var(--border)">`:''}
+    <div style="flex:1;min-width:0">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:18px;font-weight:500">${co.name}</span>
         ${baseMeta?'<span class="badge b-amber">Class '+baseMeta.class+' · '+baseMeta.votes_per_share+'v</span>':''}
         <span class="badge b-gray" style="font-family:var(--mono)">${parentTicker}</span>
         ${canTrade?'<button class="wstar '+(isWatched(parentTicker)?'on':'')+'" onclick="toggleWatchAndRefresh(&quot;'+parentTicker+'&quot;)">'+(isWatched(parentTicker)?'★':'☆')+'</button>':''}
