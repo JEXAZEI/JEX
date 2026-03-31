@@ -326,8 +326,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 // ═══════════════════════════════════════════════
 // CONFIG — paste your Supabase values here
 // ═══════════════════════════════════════════════
-const SUPABASE_URL = 'https://hahxemgfkorglaoywybq.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_-moLk6DXyj8L41Ope-RAXw_3YPkyv_8';
+const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 const SESSION_KEY = 'jex-session-v3';
 
 const sb = {
@@ -347,8 +347,8 @@ let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[]
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],nwHistory:[],earningsTargets:[],
   founderShares:[],companyInvites:[],priceAdjustments:[],
-  founders:[],founderAllocs:[],priceAdjustments:[],companyMembers:[],founderAllocations:[],flags:[],
-  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,earnings_surprise_pct:10,session_open_prices:{}}};
+  founders:[],founderAllocs:[],priceAdjustments:[],companyMembers:[],founderAllocations:[],flags:[],minutes:[],divApprovals:[],
+  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,earnings_surprise_pct:10,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000}};
 let SHEETS_URL=null;
 let _lastActivity=Date.now();
 const INACTIVITY_TIMEOUT=30*60*1000; // 30 minutes
@@ -412,6 +412,8 @@ async function loadAll(){
     sb.get('jex_founder_allocations','order=created_at.desc'),
     sb.get('jex_price_adjustments','order=created_at.desc&limit=50'),
     sb.get('jex_flags','order=created_at.desc'),
+    sb.get('jex_minutes','order=created_at.desc&limit=50'),
+    sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
   ]);
   Object.assign(DB,{pending,news,ipoApps,dilApps,
     trades,dividends,buybacks,limitOrders,activity,
@@ -489,6 +491,32 @@ function adjStockForm(){
     document.getElementById('adj-pct')?.value,
     document.getElementById('adj-reason')?.value
   );
+}
+async function saveBudgetThreshold(){
+  const val=parseFloat(document.getElementById('bw-threshold')?.value);
+  if(isNaN(val)||val<0)return toast('Enter a valid amount');
+  await saveSession({budget_warning_threshold:val});
+  toast('Warning threshold set to '+fmt(val));render();
+}
+async function saveDivThreshold(){
+  const val=parseFloat(document.getElementById('div-threshold')?.value);
+  if(isNaN(val)||val<0)return toast('Enter a valid amount');
+  await saveSession({dividend_approval_threshold:val});
+  toast('Dividend approval threshold set to '+fmt(val));render();
+}
+async function reviewDivApproval(id,approve){
+  const da=DB.divApprovals.find(x=>x.id===id);if(!da)return;
+  const u=cu();
+  await sb.patch('jex_dividend_approvals','id=eq.'+id,{status:approve?'approved':'rejected',approved_by:u.name});
+  da.status=approve?'approved':'rejected';da.approved_by=u.name;
+  if(approve){
+    // Execute the dividend now
+    await issueDividend(da.ticker,da.per_share,da.note||'Treasurer-approved dividend');
+  } else {
+    await pushNotification(da.requested_by,'div_approval','❌ Your dividend request for '+da.company_name+' was rejected by the Treasurer.',da.ticker);
+    toast('Dividend rejected');
+  }
+  render();
 }
 async function saveCBPct(){
   const pct=parseInt(document.getElementById('cb-pct')?.value);
@@ -577,7 +605,7 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newMinutes,newDivApprovals]=await Promise.all([
       sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_companies','order=created_at.asc'),
@@ -586,6 +614,8 @@ async function autoRefresh(){
       sb.get('jex_company_members','order=created_at.asc'),
       sb.get('jex_founder_allocations','order=created_at.desc'),
       sb.get('jex_flags','order=created_at.desc'),
+      sb.get('jex_minutes','order=created_at.desc&limit=50'),
+      sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
     ]);
     const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
@@ -594,6 +624,8 @@ async function autoRefresh(){
     DB.companyMembers=newMembers;
     DB.founderAllocations=newAllocs;
     DB.flags=newFlags;
+    DB.minutes=newMinutes;
+    DB.divApprovals=newDivApprovals;
     // Merge new trades (avoid duplicates)
     const existingIds=new Set(DB.trades.map(t=>t.id));
     newTrades.forEach(t=>{if(!existingIds.has(t.id))DB.trades.unshift(t);});
@@ -1688,6 +1720,20 @@ async function issueDividend(ticker,perShare,note){
   if(!sh.length)return toast('No shareholders yet');
   const total=sh.reduce((s,u)=>s+Math.round(((u.holdings&&u.holdings[ticker])||0)*perShare*100)/100,0);
   if(owner.cash<total)return toast('Insufficient funds (need '+fmt(total)+')');
+  // Check if Treasurer approval required
+  const divApprovalThreshold=DB.session.dividend_approval_threshold||1000;
+  if(total>=divApprovalThreshold){
+    const treasurer=DB.users.find(u=>u.role==='treasurer');
+    if(treasurer){
+      if(!confirm('This dividend total ('+fmt(total)+') requires Treasurer approval. Submit for approval?'))return;
+      const req={id:uid(),ticker,company_name:co.name,per_share:perShare,total,note:(document.getElementById('div-note')?.value||'').trim(),requested_by:owner.id,requested_by_name:owner.name,status:'pending',ts:ts()};
+      await sb.post('jex_dividend_approvals',req);
+      DB.divApprovals.push(req);
+      await pushNotification(treasurer.id,'div_approval','💰 Dividend approval needed: '+co.name+' wants to pay '+fmt(total)+' total ('+fmt(perShare)+'/share)',ticker);
+      toast('Dividend submitted for Treasurer approval ('+fmt(total)+' exceeds '+fmt(divApprovalThreshold)+' threshold)');
+      UI.companyTab='dividends';render();return;
+    }
+  }
   if(!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(((s.holdings&&s.holdings[ticker])||0)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
   await updateUser(owner.id,{cash:Math.round((owner.cash-total)*100)/100});
   const payouts=[];
@@ -2548,6 +2594,7 @@ function renderMarket(){
     return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
     </div>
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
+      +(DB.minutes.length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${m.title}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}${DB.minutes.length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.length-3} older entries</div>`:''}</div>`:'')
       +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
       +'</div>':''}
     ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.news.length} post${DB.news.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${n.headline}</div>${n.body?`<div class="news-body">${n.body}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${n.company_name}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${DB.news.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${DB.news.length} posts</div>`:''}</div>`:''}
@@ -3275,11 +3322,12 @@ function renderAdmin(){
 
   // President can only see: session, balances, passwords
   const presidentTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
-  const sectreTabs=[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
+  const sectreTabs=[['announcements','Announcements'],['minutes','Minutes'],['shareholders','Shareholder registry'],['votes_all','Vote oversight'],['balances','Balances'],['news','News'],['activity','Activity log']];
   const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags']];
   const openFlags=(DB.flags||[]).filter(f=>f.status==='open').length;
   const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['earnings','Earnings targets'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags']];
-  const tabs=(chair||isPresident(u))?chairmanTabs:u.role==='compliance_officer'?complianceTabs:sectreTabs;
+  const treasurerTabs=[['balances','Balances'],['cashflow','Cash flow'],['dividends_audit','Dividend audit'],['price_adj_log','Price adjustments'],['budget_warnings','Budget warnings'],['activity','Activity log']];
+  const tabs=(chair||isPresident(u))?chairmanTabs:u.role==='compliance_officer'?complianceTabs:u.role==='treasurer'?treasurerTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
   if(!allowedTabs.includes(UI.adminTab))UI.adminTab=tabs[0][0];
 
@@ -3293,6 +3341,13 @@ function renderAdmin(){
   :UI.adminTab==='users'?renderAdminUsers(students,companies)
   :UI.adminTab==='dashboard'?renderAdminDashboard()
   :UI.adminTab==='flags'?renderAdminFlags()
+  :UI.adminTab==='minutes'?renderAdminMinutes()
+  :UI.adminTab==='shareholders'?renderAdminShareholderRegistry()
+  :UI.adminTab==='votes_all'?renderAdminVoteOversight()
+  :UI.adminTab==='cashflow'?renderTreasurerCashFlow()
+  :UI.adminTab==='dividends_audit'?renderTreasurerDividendAudit()
+  :UI.adminTab==='price_adj_log'?renderTreasurerPriceLog()
+  :UI.adminTab==='budget_warnings'?renderTreasurerBudgetWarnings()
   :UI.adminTab==='founder_allocs'?renderAdminFounderAllocs()
   :UI.adminTab==='earnings'?renderAdminEarnings()
   :UI.adminTab==='news'?renderAdminNews()
@@ -3945,6 +4000,228 @@ function renderTradingHistory(){
 // ═══════════════════════════════════════════════
 // RENDER: ACTIVITY LOG (Chairman only)
 // ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════════
+// SECRETARY FEATURES
+// ═══════════════════════════════════════════════
+async function postMinutes(title,body){
+  const u=cu();
+  if(!title||title.trim().length<3)return toast('Enter a title');
+  if(!body||body.trim().length<10)return toast('Enter meeting notes (at least 10 characters)');
+  const rec={id:uid(),title:title.trim(),body:body.trim(),author_id:u.id,author_name:u.name,ts:ts()};
+  await sb.post('jex_minutes',rec);
+  DB.minutes.unshift(rec);
+  await logActivity('minutes','Meeting minutes posted: '+title.trim(),{userId:u.id,userName:u.name});
+  await pushNotificationToAll('minutes','📋 New meeting minutes posted: '+title.trim());
+  toast('Meeting minutes posted');render();
+}
+async function deleteMinutes(id){
+  if(!confirm('Delete these minutes?'))return;
+  await sb.del('jex_minutes','id=eq.'+id);
+  DB.minutes=DB.minutes.filter(m=>m.id!==id);
+  toast('Minutes deleted');render();
+}
+async function postOfficialNotice(title,body){
+  // Official notice = styled announcement from Secretary
+  const u=cu();
+  if(!title||!body)return toast('Enter title and body');
+  const rec={id:uid(),title:'📋 OFFICIAL NOTICE: '+title.trim(),body:body.trim(),level:'info',author_id:u.id,author_name:u.name,ts:ts()};
+  await sb.post('jex_announcements',rec);
+  DB.announcements.unshift(rec);
+  toast('Official notice posted');render();
+}
+function renderAdminMinutes(){
+  const u=cu();
+  return`<div class="card"><div class="section-title">Post meeting minutes</div>
+    <div class="ibox ibox-blue">Minutes are visible to all students on the market page noticeboard.</div>
+    <div class="frow"><label class="flabel">Title</label><input type="text" id="min-title" placeholder="e.g. Board meeting — March 21"></div>
+    <div class="frow"><label class="flabel">Minutes</label><textarea id="min-body" rows="6" placeholder="Attendees: ...&#10;&#10;Agenda:&#10;1. ...&#10;&#10;Decisions made:&#10;..."></textarea></div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-primary" onclick="postMinutes(get('min-title')?.value,get('min-body')?.value)">Post minutes</button>
+      <button class="btn" onclick="postOfficialNotice(get('min-title')?.value,get('min-body')?.value)">Post as official notice</button>
+    </div>
+  </div>
+  ${DB.minutes.length?`<div class="card"><div class="section-title">Posted minutes (${DB.minutes.length})</div>
+    ${DB.minutes.map(m=>`<div style="padding:12px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <strong>${m.title}</strong>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span>
+          <button class="btn btn-sm btn-danger" onclick="deleteMinutes('${m.id}')">Delete</button>
+        </div>
+      </div>
+      <div style="font-size:13px;color:var(--text2);white-space:pre-line">${m.body}</div>
+    </div>`).join('')}
+  </div>`:''}`;
+}
+function renderAdminShareholderRegistry(){
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+  const listed=DB.companies.filter(c=>c.status==='listed');
+  const allTickers=[...new Set([...listed.map(c=>c.ticker),...DB.shareClasses.map(s=>s.ticker)])];
+  return`<div class="card"><div class="section-title">Complete shareholder registry</div>
+    <div class="ibox ibox-blue">All students, their holdings, and voting power across every listed company. Read-only.</div>
+    <div style="overflow-x:auto"><table><thead><tr>
+      <th>Student</th>
+      ${allTickers.map(t=>`<th class="r">${t}</th>`).join('')}
+      <th class="r">Total value</th><th class="r">Total votes</th>
+    </tr></thead><tbody>
+    ${students.map(u=>{
+      const totalVal=allTickers.reduce((s,t)=>{const co=getCo(t);const q=(u.holdings&&u.holdings[t])||0;return s+(co?q*co.price:0);},0);
+      const totalVotes=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;const q=(u.holdings&&u.holdings[t])||0;return s+q*vps;},0);
+      const hasHoldings=allTickers.some(t=>(u.holdings&&u.holdings[t]||0)>0);
+      if(!hasHoldings&&totalVal===0)return'';
+      return`<tr>
+        <td style="font-weight:500">${u.name}</td>
+        ${allTickers.map(t=>`<td class="r" style="font-family:var(--mono)">${(u.holdings&&u.holdings[t])||0||'—'}</td>`).join('')}
+        <td class="r" style="font-family:var(--mono);color:var(--green)">${fmt(totalVal)}</td>
+        <td class="r" style="color:var(--amber)">${totalVotes||'—'}</td>
+      </tr>`;
+    }).join('')}
+    </tbody></table></div>
+  </div>`;
+}
+function renderAdminVoteOversight(){
+  const open=DB.votes.filter(v=>v.status==='open');
+  const closed=DB.votes.filter(v=>v.status!=='open');
+  function voteCard(v){
+    const co=getCo(v.parent_ticker)||DB.companies.find(c=>c.ticker===v.parent_ticker);
+    const ballots=DB.ballots.filter(b=>b.vote_id===v.id);
+    const opt1=ballots.filter(b=>b.choice===v.option1).reduce((s,b)=>s+b.weight,0);
+    const opt2=ballots.filter(b=>b.choice===v.option2).reduce((s,b)=>s+b.weight,0);
+    const total=opt1+opt2||1;
+    return`<div style="padding:12px;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div><strong>${v.question}</strong> <span class="badge b-gray" style="font-family:var(--mono)">${v.parent_ticker}</span></div>
+        <span class="badge ${v.status==='open'?'b-green':'b-gray'}">${v.status}</span>
+      </div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">${co?.name||v.parent_ticker} · ${ballots.length} voters · ${v.ts}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
+        <div style="background:var(--bg3);border-radius:4px;padding:6px 8px">${v.option1}: <strong>${opt1}</strong> votes (${Math.round(opt1/total*100)}%)</div>
+        <div style="background:var(--bg3);border-radius:4px;padding:6px 8px">${v.option2}: <strong>${opt2}</strong> votes (${Math.round(opt2/total*100)}%)</div>
+      </div>
+    </div>`;
+  }
+  return`<div class="card"><div class="section-title">Open votes (${open.length})</div>
+    ${open.length?open.map(voteCard).join(''):'<div class="empty">No open votes</div>'}
+  </div>
+  ${closed.length?`<div class="card"><div class="section-title">Closed votes (${closed.length})</div>
+    ${closed.map(voteCard).join('')}
+  </div>`:''}`;
+}
+
+// ═══════════════════════════════════════════════
+// TREASURER FEATURES  
+// ═══════════════════════════════════════════════
+function renderTreasurerCashFlow(){
+  const totalCapitalRaised=DB.trades.filter(t=>t.seller_id==='exchange').reduce((s,t)=>s+(t.price*t.qty),0);
+  const totalDividendsPaid=DB.dividends.reduce((s,d)=>s+d.total,0);
+  const totalBuybacks=DB.buybacks.reduce((s,b)=>s+b.total,0);
+  const totalCompanyCash=DB.companies.filter(c=>c.status==='listed').reduce((s,c)=>{const owner=getUser(c.owner_id);return s+(owner?owner.cash:0);},0);
+  const totalStudentCash=DB.users.filter(u=>u.role==='student'&&u.status==='approved').reduce((s,u)=>s+u.cash,0);
+  const totalMarketCap=DB.companies.filter(c=>c.status==='listed').reduce((s,c)=>s+c.price*c.shares,0);
+  return`<div class="grid3" style="margin-bottom:14px">
+    <div class="mcard"><div class="mlabel">💰 Total capital raised</div><div class="mval" style="font-family:var(--mono);color:var(--green)">${fmt(totalCapitalRaised)}</div><div style="font-size:11px;color:var(--text2);margin-top:4px">From IPO & dilution share sales</div></div>
+    <div class="mcard"><div class="mlabel">💸 Total dividends paid</div><div class="mval" style="font-family:var(--mono);color:var(--red)">${fmt(totalDividendsPaid)}</div><div style="font-size:11px;color:var(--text2);margin-top:4px">Across ${DB.dividends.length} payments</div></div>
+    <div class="mcard"><div class="mlabel">🔁 Total buybacks</div><div class="mval" style="font-family:var(--mono)">${fmt(totalBuybacks)}</div><div style="font-size:11px;color:var(--text2);margin-top:4px">Across ${DB.buybacks.length} buybacks</div></div>
+  </div>
+  <div class="grid3" style="margin-bottom:14px">
+    <div class="mcard"><div class="mlabel">🏦 Total company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(totalCompanyCash)}</div></div>
+    <div class="mcard"><div class="mlabel">👤 Total student cash</div><div class="mval" style="font-family:var(--mono)">${fmt(totalStudentCash)}</div></div>
+    <div class="mcard"><div class="mlabel">📈 Total market cap</div><div class="mval" style="font-family:var(--mono)">${fmt(totalMarketCap)}</div></div>
+  </div>
+  <div class="card"><div class="section-title">Exchange cash flows over time</div>
+    <table><thead><tr><th>Time</th><th>Type</th><th>Company</th><th>Amount</th><th>Detail</th></tr></thead><tbody>
+    ${[...DB.dividends.map(d=>({ts:d.ts,type:'Dividend',company:d.company_name,amount:-d.total,detail:fmt(d.per_share)+'/share to '+d.payouts.length+' holders'})),
+       ...DB.buybacks.map(b=>({ts:b.ts,type:'Buyback',company:DB.companies.find(c=>c.ticker===b.ticker)?.name||b.ticker,amount:-b.total,detail:b.qty+' shares @ '+fmt(b.price)})),
+    ].sort((a,b)=>b.ts>a.ts?1:-1).slice(0,50).map(r=>`<tr>
+      <td style="color:var(--text2)">${r.ts}</td>
+      <td><span class="badge b-gray">${r.type}</span></td>
+      <td>${r.company}</td>
+      <td class="r" style="font-family:var(--mono);color:var(--red)">${fmt(r.amount)}</td>
+      <td style="font-size:12px;color:var(--text2)">${r.detail}</td>
+    </tr>`).join('')}
+    </tbody></table>
+  </div>`;
+}
+function renderTreasurerDividendAudit(){
+  return`<div class="card"><div class="section-title">Dividend audit — all payments</div>
+    ${DB.dividends.length?`<table><thead><tr><th>Time</th><th>Company</th><th>Per share</th><th>Total paid</th><th>Recipients</th><th>Note</th></tr></thead><tbody>
+    ${[...DB.dividends].reverse().map(d=>{
+      const owner=DB.users.find(u=>u.id===DB.companies.find(c=>c.name===d.company_name)?.owner_id);
+      return`<tr>
+        <td style="color:var(--text2)">${d.ts}</td>
+        <td style="font-weight:500">${d.company_name}</td>
+        <td style="font-family:var(--mono)">${fmt(d.per_share)}</td>
+        <td style="font-family:var(--mono);font-weight:500;color:var(--red)">${fmt(d.total)}</td>
+        <td>${(d.payouts||[]).length} students</td>
+        <td style="font-size:12px;color:var(--text2)">${d.note}</td>
+      </tr>`;
+    }).join('')}
+    </tbody></table>`:'<div class="empty">No dividends paid yet</div>'}
+  </div>`;
+}
+function renderTreasurerPriceLog(){
+  return`<div class="card"><div class="section-title">Price adjustment log</div>
+    <div class="ibox ibox-blue">All manual price adjustments made by administrators.</div>
+    ${(DB.priceAdjustments||[]).length?`<table><thead><tr><th>Time</th><th>Ticker</th><th>Change</th><th>Old price</th><th>New price</th><th>Reason</th><th>By</th></tr></thead><tbody>
+    ${DB.priceAdjustments.map(a=>`<tr>
+      <td style="color:var(--text2)">${a.ts||''}</td>
+      <td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${a.ticker}')">${a.ticker}</span></td>
+      <td class="${a.pct>=0?'price-up':'price-down'}" style="font-family:var(--mono)">${a.pct>=0?'+':''}${a.pct}%</td>
+      <td style="font-family:var(--mono)">${fmt(a.old_price)}</td>
+      <td style="font-family:var(--mono);font-weight:500">${fmt(a.new_price)}</td>
+      <td style="font-size:12px;color:var(--text2)">${a.reason||'—'}</td>
+      <td style="font-size:12px;color:var(--text2)">${a.applied_by||'—'}</td>
+    </tr>`).join('')}
+    </tbody></table>`:'<div class="empty">No price adjustments yet</div>'}
+  </div>`;
+}
+function renderTreasurerBudgetWarnings(){
+  const threshold=DB.session.budget_warning_threshold||500;
+  const divThreshold=DB.session.dividend_approval_threshold||1000;
+  const listed=DB.companies.filter(c=>c.status==='listed');
+  const warnings=listed.map(co=>{const owner=getUser(co.owner_id);return{co,owner,cash:owner?owner.cash:0};}).filter(w=>w.cash<threshold).sort((a,b)=>a.cash-b.cash);
+  return`<div class="card"><div class="section-title">Budget warning settings</div>
+    <div class="grid2">
+      <div class="frow"><label class="flabel">Low cash warning threshold ($)</label>
+        <div class="row" style="align-items:flex-end">
+          <input type="number" id="bw-threshold" value="${threshold}" min="0" step="100" style="flex:1">
+          <button class="btn btn-primary btn-sm" onclick="saveBudgetThreshold()">Save</button>
+        </div>
+      </div>
+      <div class="frow"><label class="flabel">Dividend approval required above ($)</label>
+        <div class="row" style="align-items:flex-end">
+          <input type="number" id="div-threshold" value="${divThreshold}" min="0" step="100" style="flex:1">
+          <button class="btn btn-primary btn-sm" onclick="saveDivThreshold()">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="card"><div class="section-title">Low cash warnings ${warnings.length?`<span class="badge b-red">${warnings.length}</span>`:''}</div>
+    ${warnings.length?`<div class="ibox ibox-amber">These companies have less than ${fmt(threshold)} in cash. Consider alerting the Chairman.</div>
+    ${warnings.map(w=>`<div class="app-row">
+      <div class="app-info">
+        <div class="app-name">${w.co.name} <span class="badge b-gray" style="font-family:var(--mono)">${w.co.ticker}</span></div>
+        <div class="app-meta">Cash: <strong style="color:var(--red);font-family:var(--mono)">${fmt(w.cash)}</strong> · Price: ${fmt(w.co.price)} · Market cap: ${fmt(w.co.price*w.co.shares)}</div>
+      </div>
+      <button class="btn btn-sm btn-warning" onclick="flagForm('${w.co.owner_id}','${w.co.name}','company')">🚩 Flag</button>
+    </div>`).join('')}`:'<div class="empty" style="color:var(--green)">✓ All companies are above the warning threshold</div>'}
+  </div>
+  <div class="card"><div class="section-title">Pending dividend approvals ${DB.divApprovals.filter(d=>d.status==='pending').length?`<span class="badge b-amber">${DB.divApprovals.filter(d=>d.status==='pending').length}</span>`:''}</div>
+    <div class="ibox ibox-blue">Dividends above ${fmt(divThreshold)} require Treasurer approval before they execute.</div>
+    ${DB.divApprovals.filter(d=>d.status==='pending').length?DB.divApprovals.filter(d=>d.status==='pending').map(d=>`<div class="app-row">
+      <div class="app-info">
+        <div class="app-name">${d.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div>
+        <div class="app-meta">${fmt(d.per_share)}/share · Total: <strong style="font-family:var(--mono)">${fmt(d.total)}</strong> · Requested by ${d.requested_by_name} · ${d.ts}</div>
+        ${d.note?`<div class="app-meta">${d.note}</div>`:''}
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-success btn-sm" onclick="reviewDivApproval('${d.id}',true)">Approve</button>
+        <button class="btn btn-danger btn-sm" onclick="reviewDivApproval('${d.id}',false)">Reject</button>
+      </div>
+    </div>`).join(''):'<div class="empty">No pending dividend approvals</div>'}
+  </div>`;
+}
+
 function renderActivityLog(){
   const f=UI.activityFilter||{};
   const typeIcon={trade:'↔',ipo:'🏢',dividend:'💰',news:'📰',announcement:'📢',limit_fill:'⚡',balance_adj:'💵',session:'🕐',registration:'✓',limit_order:'📋',flag:'🚩',cofound:'👥',founder_alloc:'🎁'};
