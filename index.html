@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230f1117'/><text x='16' y='23' font-family='monospace' font-size='20' font-weight='700' fill='%23f0a500' text-anchor='middle'>J</text></svg>">
 <title>JEX — JTED Stock Exchange</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -17,6 +18,10 @@
   --radius:8px;--radius-lg:12px;
   --font:'DM Sans',system-ui,sans-serif;--mono:'IBM Plex Mono',monospace;
 }
+body.light-mode{
+  --bg:#f4f6fa;--bg2:#ffffff;--bg3:#eef1f7;--border:#d1d9e6;--border2:#bcc8db;
+  --text:#1a2233;--text2:#4a5a72;--text3:#8896a8;
+}
 body{font-family:var(--font);font-size:14px;color:var(--text);background:var(--bg);min-height:100vh}
 #app{display:flex;flex-direction:column;min-height:100vh}
 .topbar{display:flex;align-items:center;justify-content:space-between;padding:10px 20px;border-bottom:1px solid var(--border);background:var(--bg2);position:sticky;top:0;z-index:40}
@@ -28,6 +33,11 @@ body{font-family:var(--font);font-size:14px;color:var(--text);background:var(--b
 .av-ch{background:rgba(201,162,39,0.2);color:var(--chair)}.av-pr{background:rgba(124,109,250,0.2);color:var(--pres)}
 .av-sec{background:rgba(0,200,150,0.15);color:#00c896}.av-tre{background:rgba(255,77,106,0.15);color:#ff4d6a}.av-co{background:rgba(139,92,246,0.15);color:#8b5cf6}
 .logout-btn{font-size:12px;cursor:pointer;padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:transparent;color:var(--text2);font-family:var(--font)}
+.theme-btn{font-size:14px;cursor:pointer;padding:3px 7px;border:1px solid var(--border);border-radius:4px;background:transparent;line-height:1}
+.pw-wrap{position:relative}.pw-wrap input{padding-right:36px}
+.pw-eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:15px;color:var(--text2);padding:0;line-height:1}
+.copy-ticker{cursor:pointer;user-select:none}
+.copy-ticker:active{opacity:0.6}
 .logout-btn:hover{background:var(--bg3)}
 .session-banner{display:flex;align-items:center;justify-content:space-between;padding:7px 20px;font-size:12px;border-bottom:1px solid var(--border)}
 .s-open{background:rgba(0,200,150,0.08);color:var(--green)}.s-closed{background:rgba(255,77,106,0.08);color:var(--red)}.s-paused{background:rgba(240,165,0,0.08);color:var(--amber)}
@@ -340,7 +350,21 @@ let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[]
   founders:[],founderAllocs:[],priceAdjustments:[],companyMembers:[],founderAllocations:[],flags:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,earnings_surprise_pct:10,session_open_prices:{}}};
 let SHEETS_URL=null;
-let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview'};
+let _lastActivity=Date.now();
+const INACTIVITY_TIMEOUT=30*60*1000; // 30 minutes
+function resetActivityTimer(){_lastActivity=Date.now();}
+function checkInactivity(){
+  if(!UI.userId)return;
+  if(Date.now()-_lastActivity>INACTIVITY_TIMEOUT){
+    toast('Logged out due to inactivity');
+    logout();
+  }
+}
+setInterval(checkInactivity,60000); // check every minute
+document.addEventListener('mousemove',resetActivityTimer,{passive:true});
+document.addEventListener('keydown',resetActivityTimer,{passive:true});
+document.addEventListener('touchstart',resetActivityTimer,{passive:true});
+let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''}};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
@@ -402,6 +426,7 @@ async function loadAll(){
 // HELPERS
 // ═══════════════════════════════════════════════
 const get=id=>document.getElementById(id);
+function togglePw(id){const el=get(id);if(!el)return;el.type=el.type==='password'?'text':'password';const btn=el.parentElement?.querySelector('.pw-eye');if(btn)btn.textContent=el.type==='password'?'👁':'🙈';}
 const fmt=n=>'$'+Number(n).toFixed(2);
 const fmtChg=n=>(n>=0?'+':'')+Number(n).toFixed(2)+'%';
 const norm=s=>(s||'').trim().toLowerCase();
@@ -409,6 +434,9 @@ const validEmail=e=>e&&e.includes('@')&&e.includes('.');
 const cu=()=>DB.users.find(u=>u.id===UI.userId)||null;
 const getUser=id=>DB.users.find(u=>u.id===id);
 const getCo=t=>DB.companies.find(c=>c.ticker===t);
+function copyTicker(ticker){
+  navigator.clipboard?.writeText(ticker).then(()=>toast('Copied: '+ticker)).catch(()=>toast(ticker+' (copy manually)'));
+}
 async function creditCompanyCash(ticker,amount){
   const meta=getClassMeta(ticker);
   const parentTicker=meta?meta.parent_ticker:ticker;
@@ -501,10 +529,24 @@ async function pushBalances(){
   })).sort((a,b)=>b.nw-a.nw).map((r,i)=>({...r,rank:i+1}));
   await pushToSheets('balances',{rows});
 }
-async function setSession(status){const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';clearInterval(sessionTimer);sessionTimer=null;await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null});const u=cu();await logActivity('session','Session '+status+(u?' by '+u.name:''),{userId:u?.id,userName:u?.name});
+let _sessionOpenedAt=null;
+async function setSession(status){
+  const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';
+  clearInterval(sessionTimer);sessionTimer=null;
+  await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null});
+  const u=cu();
+  let description='Session '+status+(u?' by '+u.name:'');
+  if(status==='closed'&&_sessionOpenedAt){
+    const mins=Math.round((Date.now()-_sessionOpenedAt)/60000);
+    description+=' — ran for '+mins+' minute'+(mins!==1?'s':'');
+    _sessionOpenedAt=null;
+  }
+  if(status==='open')_sessionOpenedAt=Date.now();
+  await logActivity('session',description,{userId:u?.id,userName:u?.name});
   if(status==='open'){await pushNotificationToAll('session','🟢 Trading session is now open!');activateAfterHoursOrders();recordSessionOpenPrices();}
   if(status==='closed')await pushNotificationToAll('session','🔴 Trading session has closed.');
-  render();}
+  render();
+}
 async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);render();}
 function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
 async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
@@ -569,6 +611,30 @@ async function autoRefresh(){
   }catch(e){/* silent fail */}
 }
 setInterval(autoRefresh,20000);
+
+// ── Keyboard shortcuts ────────────────────────────────────
+document.addEventListener('keydown',function(e){
+  // Skip if typing in a form field
+  if(['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName))return;
+  if(e.metaKey||e.ctrlKey||e.altKey)return;
+  const key=e.key.toLowerCase();
+  if(key==='escape'){
+    if(UI.companyPage){closeCompanyPage();return;}
+  }
+  if(!UI.userId)return;
+  const u=cu();
+  if(u?.role==='student'||u?.role==='company'){
+    if(key==='m'){setTab('market');return;}
+    if(key==='p'){setTab('portfolio');return;}
+    if(key==='l'){setTab('leaderboard');return;}
+    if(key==='n'&&(u.role==='student'||u.role==='company')){UI.navTab='notifications';render();return;}
+    if(UI.companyPage){
+      if(key==='b'){UI.companyPageTab='trade';UI.panelMode='buy';render();}
+      if(key==='s'){UI.companyPageTab='trade';UI.panelMode='sell';render();}
+      if(key==='o'){UI.companyPageTab='overview';render();}
+    }
+  }
+});
 
 // ═══════════════════════════════════════════════
 // AUTH & REGISTRATION
@@ -2040,11 +2106,11 @@ function renderLogin(){
   const complianceOfficer=DB.users.find(u=>u.role==='compliance_officer');
   const pending=DB.pending.length;
   const acctRow=(u,cls)=>`<div class="acct-item" onclick="UI.pendingLoginId='${u.id}';UI.loginView='password';render()"><div class="avatar ${cls}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><div><div class="acct-name">${u.name} ${roleBadge(u.role)}${isAdmin(u)&&pending?` <span class="badge b-blue">${pending} pending</span>`:''}</div>${!isAdmin(u)?`<div class="acct-email">${u.email}</div>`:''}</div></div>`;
-  if(UI.loginView==='password'){const u=getUser(UI.pendingLoginId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Sign in as ${u?.name||'user'}</div>${!isAdmin(u)?`<div class="frow"><label class="flabel">Email</label><div style="padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;color:var(--text2);background:var(--bg3)">${u?.email||''}</div></div>`:``}<div class="frow"><label class="flabel">Password</label><input type="password" id="login-pw" placeholder="Enter password" onkeydown="if(event.key==='Enter')loginWith(UI.pendingLoginId,get('login-pw')?.value)"></div><div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn btn-primary" onclick="loginWith(UI.pendingLoginId,get('login-pw')?.value)">Sign in</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div><button class="link-btn" onclick="UI.loginView='forgot-email';render()">Forgot password?</button></div></div>`;}
+  if(UI.loginView==='password'){const u=getUser(UI.pendingLoginId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Sign in as ${u?.name||'user'}</div>${!isAdmin(u)?`<div class="frow"><label class="flabel">Email</label><div style="padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;color:var(--text2);background:var(--bg3)">${u?.email||''}</div></div>`:``}<div class="frow"><label class="flabel">Password</label><div class="pw-wrap"><input type="password" id="login-pw" placeholder="Enter password" onkeydown="if(event.key==='Enter')loginWith(UI.pendingLoginId,get('login-pw')?.value)"><button type="button" class="pw-eye" onclick="togglePw('login-pw')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn btn-primary" onclick="loginWith(UI.pendingLoginId,get('login-pw')?.value)">Sign in</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div><button class="link-btn" onclick="UI.loginView='forgot-email';render()">Forgot password?</button></div></div>`;}
   if(UI.loginView==='forgot-email'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 1 of 3</div><div class="frow"><label class="flabel">Your email address</label><input type="email" id="forgot-email" placeholder="you@school.edu" onkeydown="if(event.key==='Enter')forgotStep1(get('forgot-email')?.value)"></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep1(get('forgot-email')?.value)">Continue</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${u?.name}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
-  if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><input type="password" id="forgot-pw1" placeholder="New password (min 4 characters)"></div><div class="frow"><label class="flabel">Confirm new password</label><input type="password" id="forgot-pw2" placeholder="Repeat new password"></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
-  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><input type="password" id="reg-pw" placeholder="Choose a password"></div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><input type="password" id="reg-co-pw" placeholder="Choose a password"></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
+  if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="forgot-pw1" placeholder="New password (min 4 characters)"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="forgot-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw2')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
+  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span> — JTED Stock Exchange</div><div class="login-sub">Sign in to your account</div><div class="acct-list">
     ${chairman?acctRow(chairman,'av-ch'):''}
     ${president?acctRow(president,'av-pr'):''}
@@ -2064,10 +2130,18 @@ function doRegister(){const active=document.querySelector('.reg-tab.active');con
 function renderTopbar(){
   const u=cu();
   const unread=myUnreadCount();
+  const isLight=document.body.classList.contains('light-mode');
   const bellBtn=u.role==='student'||u.role==='company'?`<button class="logout-btn" style="position:relative;padding:3px 10px" onclick="UI.navTab='notifications';render()">
     🔔${unread?`<span style="position:absolute;top:-4px;right:-4px;background:var(--red);color:white;font-size:10px;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:600">${unread}</span>`:''}
   </button>`:'';
-  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><span>${u.name}</span>${roleBadge(u.role)}${bellBtn}<button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
+  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><span>${u.name}</span>${roleBadge(u.role)}${bellBtn}<button class="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">${isLight?'🌙':'☀️'}</button><button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
+}
+function toggleTheme(){
+  document.body.classList.toggle('light-mode');
+  try{localStorage.setItem('jex-theme',document.body.classList.contains('light-mode')?'light':'dark');}catch(e){}
+  // Re-render topbar only
+  const tb=document.querySelector('.topbar');if(tb)tb.outerHTML=renderTopbar();
+  render();
 }
 function renderBanner(){
   const s=DB.session,cls=s.status==='open'?'s-open':s.status==='paused'?'s-paused':'s-closed';
@@ -2471,7 +2545,7 @@ function renderMarket(){
       <tbody>${listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
     const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
-    return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
+    return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
     </div>
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
       +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
@@ -2599,6 +2673,7 @@ function renderPortfolio(){
     <button class="tab ${UI.portfolioTab==='dividends'?'active':''}" onclick="UI.portfolioTab='dividends';render()">Dividends</button>
     <button class="tab ${UI.portfolioTab==='history'?'active':''}" onclick="UI.portfolioTab='history';render()">Trade history</button>
     <button class="tab ${UI.portfolioTab==='nwchart'?'active':''}" onclick="UI.portfolioTab='nwchart';render()">Net worth chart</button>
+    <button class="tab" onclick="exportStudentPDF()" style="margin-left:auto;color:var(--blue)">📄 Export PDF</button>
   </div>`;
 
   if(UI.portfolioTab==='holdings'){
@@ -2659,7 +2734,7 @@ function renderSettings(){
     ${SHEETS_URL?'<div style="font-size:12px;color:var(--text2);margin-top:8px">✓ Sync active — pushing to Sheets automatically</div>':''}
   </div>`:'';
   return sheetsSection+`<div class="card"><div class="section-title">Account</div><div class="grid2"><div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${u.name}</div></div><div class="mcard"><div class="mlabel">Email</div><div class="mval" style="font-size:14px;margin-top:4px">${u.email}</div></div></div></div>
-  <div class="card"><div class="section-title">Change password</div><div class="frow"><label class="flabel">Current password</label><input type="password" id="pw-cur" placeholder="Current password"></div><div class="frow"><label class="flabel">New password</label><input type="password" id="pw-new" placeholder="New password (min 4 characters)"></div><div class="frow"><label class="flabel">Confirm new password</label><input type="password" id="pw-conf" placeholder="Repeat new password"></div><button class="btn btn-primary" onclick="changePw('${u.id}',get('pw-cur')?.value,get('pw-new')?.value,get('pw-conf')?.value)">Update password</button></div>
+  <div class="card"><div class="section-title">Change password</div><div class="frow"><label class="flabel">Current password</label><div class="pw-wrap"><input type="password" id="pw-cur" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('pw-cur')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="pw-new" placeholder="New password (min 4 characters)"><button type="button" class="pw-eye" onclick="togglePw('pw-new')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="pw-conf" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('pw-conf')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="changePw('${u.id}',get('pw-cur')?.value,get('pw-new')?.value,get('pw-conf')?.value)">Update password</button></div>
   ${u.role==='company'?`<div class="card"><div class="section-title">Company branding</div>
     <div class="ibox ibox-blue" style="margin-bottom:10px">Upload a logo image for your company. Shown on your ticker chip and company page. Max 200KB recommended.</div>
     ${(()=>{const co=DB.companies.find(c=>c.owner_id===u.id);return co&&co.logo?`<div style="margin-bottom:10px"><img src="${co.logo}" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:1px solid var(--border)"></div>`:'';})()}
@@ -2667,7 +2742,7 @@ function renderSettings(){
     <div id="logo-preview" style="margin-bottom:10px"></div>
     <button class="btn btn-primary" onclick="saveLogo()">Save logo</button>
   </div>`:''}
-  <div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><input type="password" id="settings-secq-pw" placeholder="Current password"></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`;
+  <div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><div class="pw-wrap"><input type="password" id="settings-secq-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('settings-secq-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -3290,7 +3365,7 @@ function renderAdminPasswords(students,companies){
 function renderAdminResetForm(){
   const uid2=get('admin-reset-uid')?.value;const form=get('admin-reset-form');if(!form)return;
   if(!uid2){form.innerHTML='';return;}const u=getUser(uid2);if(!u){form.innerHTML='';return;}
-  form.innerHTML=`<div style="font-size:13px;margin-bottom:10px;padding:10px;background:var(--bg3);border-radius:var(--radius)">Resetting: <strong>${u.name}</strong><br><span style="font-size:12px;color:var(--text2)">Security question: ${u.sec_q||'—'}</span></div><div class="frow"><label class="flabel">New password</label><input type="password" id="admin-reset-pw" placeholder="New password (min 4 characters)"></div><button class="btn btn-primary" onclick="adminResetPw('${u.id}',get('admin-reset-pw')?.value)">Reset password</button>`;
+  form.innerHTML=`<div style="font-size:13px;margin-bottom:10px;padding:10px;background:var(--bg3);border-radius:var(--radius)">Resetting: <strong>${u.name}</strong><br><span style="font-size:12px;color:var(--text2)">Security question: ${u.sec_q||'—'}</span></div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="admin-reset-pw" placeholder="New password (min 4 characters)"><button type="button" class="pw-eye" onclick="togglePw('admin-reset-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="adminResetPw('${u.id}',get('admin-reset-pw')?.value)">Reset password</button>`;
 }
 function renderAdminIPO(pIPO,rIPO){
   return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${a.name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${a.description||'no desc'}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewIPO('${a.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewIPO('${a.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${a.name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}`;
@@ -3653,7 +3728,7 @@ function renderAdminNews(){
 function renderAdminListed(){
   return`<div class="card"><div class="section-title">Listed companies</div>
     <table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th>Change</th><th>Shares</th><th>Owner</th><th></th></tr></thead>
-    <tbody>${DB.companies.map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${c.name}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${owner?owner.name:'—'}</td><td><button class="btn btn-sm btn-danger" onclick="delistCompany('${c.ticker}')">Delist</button></td></tr>`;}).join('')||`<tr><td colspan="7"><div class="empty">No listed companies</div></td></tr>`}
+    <tbody>${DB.companies.map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${c.name}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${owner?owner.name:'—'}</td><td><button class="btn btn-sm btn-danger" onclick="delistCompany('${c.ticker}')">Delist</button></td></tr>`;}).join('')||`<tr><td colspan="7"><div class="empty">No listed companies</div></td></tr>`}
     </tbody></table></div>
   <div class="card"><div class="section-title">Price adjustment</div>
     <div class="ibox ibox-amber">Apply a percentage boost or drop to any stock. Notifies all holders. Use positive % to boost, negative % to drop (e.g. -10 = drop 10%).</div>
@@ -3757,6 +3832,58 @@ function renderStudentOrders(){
 // ═══════════════════════════════════════════════
 // RENDER: TRADING HISTORY (per stock)
 // ═══════════════════════════════════════════════
+function exportStudentPDF(){
+  const u=cu();if(!u)return;
+  const myTrades=DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id).reverse();
+  const myHoldings=Object.entries(holdings(u)).map(([ticker,qty])=>{const co=getCo(ticker);return{ticker,qty,price:co?co.price:0,value:co?qty*co.price:0};}).filter(h=>h.qty>0);
+  const myDivs=DB.dividends.filter(d=>(d.payouts||[]).some(p=>p.userId===u.id));
+  const _nw=nw(u),_pv=pv(u),_spnl=sPnl(u),_divs=divRec(u);
+  const win=window.open('','_blank');
+  win.document.write(`<!DOCTYPE html><html><head><title>JEX Portfolio — ${u.name}</title>
+  <style>body{font-family:system-ui,sans-serif;padding:32px;color:#1a2233;max-width:800px;margin:0 auto}
+  h1{color:#f0a500;font-size:24px;margin-bottom:4px}
+  h2{font-size:16px;margin:24px 0 8px;border-bottom:2px solid #f0a500;padding-bottom:4px}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+  .card{background:#f4f6fa;border-radius:8px;padding:12px}
+  .label{font-size:11px;color:#4a5a72;margin-bottom:4px}
+  .val{font-size:20px;font-weight:600}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px}
+  th{text-align:left;font-size:11px;color:#4a5a72;padding:6px 8px;border-bottom:2px solid #d1d9e6}
+  td{padding:6px 8px;border-bottom:1px solid #eef1f7}
+  .green{color:#0f6e56}.red{color:#cc2240}
+  .mono{font-family:monospace}
+  footer{margin-top:32px;font-size:11px;color:#8896a8;text-align:center}
+  @media print{button{display:none}}</style></head><body>
+  <h1>JEX — Portfolio Report</h1>
+  <p style="color:#4a5a72;margin-bottom:24px">${u.name} &nbsp;|&nbsp; ${u.email} &nbsp;|&nbsp; Generated ${new Date().toLocaleString()}</p>
+  <h2>Summary</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Cash</div><div class="val mono">${fmt(u.cash)}</div></div>
+    <div class="card"><div class="label">Portfolio value</div><div class="val mono">${fmt(_pv)}</div></div>
+    <div class="card"><div class="label">Short P&L</div><div class="val mono ${_spnl>=0?'green':'red'}">${fmt(_spnl)}</div></div>
+    <div class="card"><div class="label">Net worth</div><div class="val mono">${fmt(_nw)}</div></div>
+  </div>
+  <div class="grid" style="grid-template-columns:repeat(3,1fr)">
+    <div class="card"><div class="label">Dividends received</div><div class="val mono green">${fmt(_divs)}</div></div>
+    <div class="card"><div class="label">Total trades</div><div class="val">${myTrades.length}</div></div>
+    <div class="card"><div class="label">vs Starting cash</div><div class="val mono ${_nw-10000>=0?'green':'red'}">${_nw-10000>=0?'+':''}${fmt(_nw-10000)}</div></div>
+  </div>
+  <h2>Holdings</h2>
+  ${myHoldings.length?`<table><thead><tr><th>Ticker</th><th>Shares</th><th>Current price</th><th>Value</th></tr></thead><tbody>
+  ${myHoldings.map(h=>`<tr><td class="mono">${h.ticker}</td><td>${h.qty}</td><td class="mono">${fmt(h.price)}</td><td class="mono">${fmt(h.value)}</td></tr>`).join('')}
+  </tbody></table>`:'<p style="color:#8896a8">No current holdings</p>'}
+  <h2>Recent trades (last 50)</h2>
+  ${myTrades.length?`<table><thead><tr><th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th></tr></thead><tbody>
+  ${myTrades.slice(0,50).map(t=>`<tr><td>${t.ts}</td><td class="mono">${t.ticker}</td><td>${t.buyer_id===u.id?'bought':'sold'}</td><td>${t.qty}</td><td class="mono">${fmt(t.price)}</td><td class="mono">${fmt(t.qty*t.price)}</td></tr>`).join('')}
+  </tbody></table>`:'<p style="color:#8896a8">No trades yet</p>'}
+  <h2>Dividends received</h2>
+  ${myDivs.length?`<table><thead><tr><th>Time</th><th>Company</th><th>Per share</th><th>Payout</th></tr></thead><tbody>
+  ${myDivs.map(d=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);return`<tr><td>${d.ts}</td><td>${d.company_name}</td><td class="mono">${fmt(d.per_share)}</td><td class="mono green">${p?fmt(p.payout):'—'}</td></tr>`;}).join('')}
+  </tbody></table>`:'<p style="color:#8896a8">No dividends received</p>'}
+  <footer>JEX — JTED Stock Exchange &nbsp;|&nbsp; This report was generated automatically</footer>
+  <script>window.print();<\/script></body></html>`);
+  win.document.close();
+}
 function renderNWChart(u){
   const history=DB.nwHistory.filter(h=>h.user_id===u.id).slice(-60);
   if(history.length<2)return`<div class="card"><div class="empty">Not enough data yet. Net worth is recorded after each trade.<br><br>Make a few trades to start building your chart.</div></div>`;
@@ -3775,61 +3902,83 @@ function renderNWChart(u){
     <div class="mcard"><div class="mlabel">Peak</div><div class="mval" style="font-size:16px;font-family:var(--mono)">${fmt(Math.max(...history.map(h=>h.nw)))}</div></div>
   </div></div>`;
 }
+const TRADES_PER_PAGE=20;
 function renderTradingHistory(){
   const u=cu();
-  const myTrades=DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id);
-  if(!myTrades.length)return`<div class="card"><div class="empty">No trades yet</div></div>`;
-  // Group by ticker
-  const byTicker={};
-  myTrades.forEach(t=>{
-    if(!byTicker[t.ticker])byTicker[t.ticker]={ticker:t.ticker,bought:0,boughtVal:0,sold:0,soldVal:0,trades:[]};
-    const b=byTicker[t.ticker];
-    if(t.buyer_id===u.id){b.bought+=t.qty;b.boughtVal+=t.qty*t.price;}
-    else{b.sold+=t.qty;b.soldVal+=t.qty*t.price;}
-    b.trades.push(t);
-  });
-  return`<div class="tab-row" style="margin-bottom:14px"><span style="font-size:13px;color:var(--text2)">Per-stock breakdown — ${Object.keys(byTicker).length} stock${Object.keys(byTicker).length!==1?'s':''} traded</span></div>
-  ${Object.values(byTicker).map(g=>{
-    const co=getCo(g.ticker);
-    const realised=Math.round((g.soldVal-g.boughtVal*(g.sold/Math.max(g.bought,1)))*100)/100;
-    return`<div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-        <div><span style="font-weight:500;font-size:15px">${co?.name||g.ticker}</span> <span class="badge b-gray" style="font-family:var(--mono)">${g.ticker}</span></div>
-        <div style="text-align:right;font-size:12px;color:var(--text2)">Current price: <span style="font-family:var(--mono);color:var(--text)">${co?fmt(co.price):'delisted'}</span></div>
-      </div>
-      <div class="grid4" style="margin-bottom:10px">
-        <div class="mcard"><div class="mlabel">Total bought</div><div class="mval" style="font-size:16px">${g.bought} shares</div></div>
-        <div class="mcard"><div class="mlabel">Spent</div><div class="mval" style="font-size:16px;font-family:var(--mono)">${fmt(g.boughtVal)}</div></div>
-        <div class="mcard"><div class="mlabel">Total sold</div><div class="mval" style="font-size:16px">${g.sold} shares</div></div>
-        <div class="mcard"><div class="mlabel">Realised P&L</div><div class="mval ${realised>=0?'green':'red'}" style="font-size:16px;font-family:var(--mono)">${realised>=0?'+':''}${fmt(realised)}</div></div>
-      </div>
-      <table><thead><tr><th>Time</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Type</th></tr></thead>
-      <tbody>${[...g.trades].reverse().map(t=>`<tr>
-        <td style="color:var(--text2)">${t.ts}</td>
-        <td><span class="badge ${t.buyer_id===u.id?'b-teal':'b-red'}">${t.buyer_id===u.id?'bought':'sold'}</span></td>
-        <td>${t.qty}</td>
-        <td style="font-family:var(--mono)">${fmt(t.price)}</td>
-        <td style="font-family:var(--mono)">${fmt(t.qty*t.price)}</td>
-        <td><span class="badge b-gray">${t.type||'market'}</span></td>
-      </tr>`).join('')}</tbody></table>
-    </div>`;
-  }).join('')}`;
+  const allMyTrades=DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id).reverse();
+  if(!allMyTrades.length)return`<div class="card"><div class="empty">No trades yet</div></div>`;
+  const totalPages=Math.ceil(allMyTrades.length/TRADES_PER_PAGE)||1;
+  if(UI.tradePage>=totalPages)UI.tradePage=totalPages-1;
+  const pageTrades=allMyTrades.slice(UI.tradePage*TRADES_PER_PAGE,(UI.tradePage+1)*TRADES_PER_PAGE);
+  const pagCtrl=totalPages>1?`<div style="display:flex;align-items:center;gap:8px;padding:10px 0 0;font-size:13px">
+    <button class="btn btn-sm" onclick="UI.tradePage=Math.max(0,UI.tradePage-1);render()" ${UI.tradePage===0?'disabled':''}>← Prev</button>
+    <span style="color:var(--text2);flex:1;text-align:center">Page ${UI.tradePage+1} of ${totalPages} · ${allMyTrades.length} total trades</span>
+    <button class="btn btn-sm" onclick="UI.tradePage=Math.min(${totalPages-1},UI.tradePage+1);render()" ${UI.tradePage>=totalPages-1?'disabled':''}>Next →</button>
+  </div>`:'';
+  // Summary stats from ALL trades
+  let totalBought=0,totalSpent=0,totalSold=0,totalReceived=0;
+  allMyTrades.forEach(t=>{if(t.buyer_id===u.id){totalBought+=t.qty;totalSpent+=t.qty*t.price;}else{totalSold+=t.qty;totalReceived+=t.qty*t.price;}});
+  return`<div class="card" style="margin-bottom:14px">
+    <div class="grid4">
+      <div class="mcard"><div class="mlabel">Total trades</div><div class="mval" style="font-size:18px">${allMyTrades.length}</div></div>
+      <div class="mcard"><div class="mlabel">Shares bought</div><div class="mval" style="font-size:18px">${totalBought.toLocaleString()}</div></div>
+      <div class="mcard"><div class="mlabel">Shares sold</div><div class="mval" style="font-size:18px">${totalSold.toLocaleString()}</div></div>
+      <div class="mcard"><div class="mlabel">Net flow</div><div class="mval ${totalReceived-totalSpent>=0?'green':'red'}" style="font-size:16px;font-family:var(--mono)">${totalReceived-totalSpent>=0?'+':''}${fmt(totalReceived-totalSpent)}</div></div>
+    </div>
+  </div>
+  <div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+    Trade history <span style="font-size:12px;font-weight:400;color:var(--text2)">showing ${UI.tradePage*TRADES_PER_PAGE+1}–${Math.min((UI.tradePage+1)*TRADES_PER_PAGE,allMyTrades.length)} of ${allMyTrades.length}</span>
+  </div>
+  <table><thead><tr><th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Type</th></tr></thead>
+  <tbody>${pageTrades.map(t=>`<tr>
+    <td style="color:var(--text2);white-space:nowrap">${t.ts}</td>
+    <td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${t.ticker}')" title="Click to copy">${t.ticker}</span></td>
+    <td><span class="badge ${t.buyer_id===u.id?'b-teal':'b-red'}">${t.buyer_id===u.id?'bought':'sold'}</span></td>
+    <td>${t.qty}</td>
+    <td style="font-family:var(--mono)">${fmt(t.price)}</td>
+    <td style="font-family:var(--mono)">${fmt(t.qty*t.price)}</td>
+    <td><span class="badge b-gray">${t.type==='book_match'?'matched':t.type||'market'}</span></td>
+  </tr>`).join('')}</tbody></table>
+  ${pagCtrl}</div>`;
 }
 
 // ═══════════════════════════════════════════════
 // RENDER: ACTIVITY LOG (Chairman only)
 // ═══════════════════════════════════════════════
 function renderActivityLog(){
-  const typeIcon={trade:'↔',ipo:'🏢',dividend:'💰',news:'📰',announcement:'📢',limit_fill:'⚡',balance_adj:'💵',session:'🕐',registration:'✓',limit_order:'📋'};
+  const f=UI.activityFilter||{};
+  const typeIcon={trade:'↔',ipo:'🏢',dividend:'💰',news:'📰',announcement:'📢',limit_fill:'⚡',balance_adj:'💵',session:'🕐',registration:'✓',limit_order:'📋',flag:'🚩',cofound:'👥',founder_alloc:'🎁'};
   const typeBadge={trade:'b-gray',ipo:'b-green',dividend:'b-teal',news:'b-amber',announcement:'b-blue',limit_fill:'b-purple',balance_adj:'b-coral',session:'b-gray',registration:'b-blue',limit_order:'b-gray'};
-  return`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Activity log <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.activity.length} events</span></div>
-    ${DB.activity.length?`<table><thead><tr><th>Time</th><th>Type</th><th>Description</th><th>Amount</th></tr></thead>
-    <tbody>${DB.activity.map(a=>`<tr>
+  const types=[...new Set(DB.activity.map(a=>a.type))].sort();
+  const filtered=DB.activity.filter(a=>{
+    if(f.type&&a.type!==f.type)return false;
+    if(f.ticker&&!(a.description||'').toLowerCase().includes(f.ticker.toLowerCase())&&(a.ticker||'').toLowerCase()!==f.ticker.toLowerCase())return false;
+    if(f.user&&!(a.user_name||'').toLowerCase().includes(f.user.toLowerCase())&&!(a.description||'').toLowerCase().includes(f.user.toLowerCase()))return false;
+    return true;
+  });
+  return`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Activity log <span style="font-size:12px;font-weight:400;color:var(--text2)">${filtered.length} of ${DB.activity.length} events</span></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;margin-bottom:12px;align-items:end">
+      <div><label class="flabel">Filter by type</label>
+        <select onchange="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.type=this.value;render()">
+          <option value="">All types</option>
+          ${types.map(t=>`<option value="${t}" ${f.type===t?'selected':''}>${t}</option>`).join('')}
+        </select>
+      </div>
+      <div><label class="flabel">Filter by ticker</label>
+        <input type="text" placeholder="e.g. BWV" value="${f.ticker||''}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.ticker=this.value;render()">
+      </div>
+      <div><label class="flabel">Filter by user</label>
+        <input type="text" placeholder="Name..." value="${f.user||''}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.user=this.value;render()">
+      </div>
+      <div><button class="btn btn-sm" onclick="UI.activityFilter={};render()">Clear</button></div>
+    </div>
+    ${filtered.length?`<table><thead><tr><th>Time</th><th>Type</th><th>Description</th><th>Amount</th></tr></thead>
+    <tbody>${filtered.slice(0,100).map(a=>`<tr>
       <td style="color:var(--text2);white-space:nowrap">${a.ts||''}</td>
       <td><span class="badge ${typeBadge[a.type]||'b-gray'}">${typeIcon[a.type]||''} ${a.type}</span></td>
       <td style="font-size:12px">${a.description}</td>
       <td style="font-family:var(--mono);font-size:12px">${a.amount!=null?(a.amount>=0?'+':'')+fmt(a.amount):''}</td>
-    </tr>`).join('')}</tbody></table>`:'<div class="empty">No activity yet</div>'}
+    </tr>`).join('')}</tbody></table>`:'<div class="empty">No matching activity</div>'}
   </div>`;
 }
 
@@ -3990,6 +4139,8 @@ function setTab(t){UI.navTab=t;UI.panelTicker=null;destroyCharts();render();}
 async function boot(){
   if(!isConfigured()){document.getElementById('app').innerHTML=renderConfig();return;}
   // Show loading splash immediately
+  // Restore theme before rendering
+  try{if(localStorage.getItem('jex-theme')==='light')document.body.classList.add('light-mode');}catch(e){}
   document.getElementById('app').innerHTML=`<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px">
     <div style="font-family:var(--mono);font-size:28px;font-weight:700"><span style="color:var(--amber)">JEX</span></div>
     <div style="font-size:13px;color:var(--text2)">Connecting to exchange...</div>
