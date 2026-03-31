@@ -132,110 +132,165 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 /* ═══════════════════════════════════════════════
    MOBILE RESPONSIVE — max-width: 640px
 ═══════════════════════════════════════════════ */
-@media(max-width:640px){
-  /* Core layout */
-  .content{padding:12px;max-width:100%}
-  .topbar{padding:8px 12px}
-  .logo .full{display:none} /* hide "JTED Stock Exchange" text on mobile */
-  .user-pill span:not(.badge){display:none} /* hide name, show only avatar + badge */
-  .logout-btn{padding:3px 6px;font-size:11px}
+/* ════════════════════════════════════════════
+   RESPONSIVE / MOBILE — complete overhaul
+   ════════════════════════════════════════════ */
 
-  /* Nav tabs — horizontal scroll */
-  .nav{padding:4px 10px;gap:2px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
-  .nav::-webkit-scrollbar{display:none}
-  .nav-btn{font-size:12px;padding:5px 10px;white-space:nowrap;flex-shrink:0}
-
-  /* Admin tabs — horizontal scroll */
-  .tab-row{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;padding-bottom:4px}
-  .tab-row::-webkit-scrollbar{display:none}
-  .tab{white-space:nowrap;flex-shrink:0;font-size:12px;padding:5px 10px}
-
-  /* Session banner */
-  .session-banner{padding:5px 12px;font-size:11px}
-  .timer{font-size:13px}
-
-  /* Cards */
-  .card{padding:12px;border-radius:var(--radius)}
-
-  /* Grids — collapse to 2 or 1 col on mobile */
+/* ── Tablet (641–900px) ─────────────────────── */
+@media(max-width:900px){
   .grid4{grid-template-columns:1fr 1fr}
-  .grid3{grid-template-columns:1fr 1fr}
-  .grid2{grid-template-columns:1fr}
+  .sparkline-cell,.sbar-wrap{display:none}
+}
 
-  /* Metric cards */
-  .mval{font-size:18px}
+/* ── Mobile (≤640px) ────────────────────────── */
+@media(max-width:640px){
+  /* ── Base layout ── */
+  body{font-size:14px}
+  .content{padding:10px;max-width:100%;box-sizing:border-box}
 
-  /* Tables — horizontal scroll */
+  /* ── Topbar ── */
+  .topbar{padding:8px 12px;gap:8px}
+  .logo .full{display:none}
+  .logo .jex{font-size:18px}
+  .user-pill{gap:6px;padding:4px 8px}
+  .user-pill span:not(.badge){display:none}
+  .user-pill .avatar{width:28px;height:28px;font-size:11px}
+  .logout-btn{padding:3px 8px;font-size:11px}
+
+  /* ── Nav ── */
+  .nav{padding:4px 8px;gap:2px;flex-wrap:nowrap;overflow-x:auto;
+    scrollbar-width:none;-ms-overflow-style:none;-webkit-overflow-scrolling:touch}
+  .nav::-webkit-scrollbar{display:none}
+  .nav-btn{font-size:11px;padding:5px 9px;white-space:nowrap;flex-shrink:0}
+
+  /* ── Admin tab row ── */
+  .tab-row{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;
+    -webkit-overflow-scrolling:touch;padding-bottom:2px;gap:3px}
+  .tab-row::-webkit-scrollbar{display:none}
+  .tab{white-space:nowrap;flex-shrink:0;font-size:11px;padding:5px 9px}
+
+  /* ── Session banner ── */
+  .session-banner{padding:5px 12px;font-size:11px}
+  .session-banner > div:last-child{display:none}
+  .timer{font-size:12px}
+
+  /* ── Cards ── */
+  .card{padding:12px;border-radius:10px;margin-bottom:10px}
+  .section-title{font-size:13px;margin-bottom:10px}
+
+  /* ── Grids ── */
+  .grid4{grid-template-columns:1fr 1fr;gap:8px}
+  .grid3{grid-template-columns:1fr 1fr;gap:8px}
+  .grid2{grid-template-columns:1fr;gap:8px}
+  .mcard{padding:10px}
+  .mval{font-size:17px}
+  .mlabel{font-size:11px}
+
+  /* ── Tables ── */
+  table{font-size:12px;width:100%}
   .card table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:thin}
-  table{font-size:12px}
-  th,td{padding:6px 8px}
+  th,td{padding:6px 7px;white-space:nowrap}
 
-  /* Market table — hide sparkline and shares bar on mobile */
-  .sparkline-cell{display:none}
-  .sbar-wrap{display:none}
-  th:nth-child(5),td:nth-child(5){display:none} /* sparkline col */
-  th:nth-child(6),td:nth-child(6){display:none} /* shares bar col */
+  /* ── Market table — strip non-essential cols ── */
+  .sparkline-cell,.sbar-wrap{display:none}
+  th:nth-child(5),td:nth-child(5),
+  th:nth-child(6),td:nth-child(6){display:none}
 
-  /* Ticker bar */
-  .ticker-item{min-width:72px;padding:6px 8px}
-  .tprice{font-size:13px}
+  /* ── Ticker bar ── */
+  .ticker-bar{gap:6px;padding:6px 10px}
+  .ticker-item{min-width:64px;padding:5px 7px;border-radius:8px}
+  .tsym{font-size:11px}
+  .tprice{font-size:12px}
+  .tchg{font-size:10px}
 
-  /* Forms */
-  .row{flex-direction:column}
+  /* ── Forms ── */
+  .frow{margin-bottom:10px}
+  .flabel{font-size:12px;margin-bottom:4px}
+  input,select,textarea{font-size:14px;padding:8px 10px;border-radius:8px}
+  .row{flex-direction:column;gap:6px}
   .row > .frow{width:100%}
-  .row > div[style*="padding-bottom"]{padding-bottom:0 !important;margin-top:4px}
-  .btn-row{flex-wrap:wrap}
+  .row > div[style*="padding-bottom"]{padding-bottom:0!important;margin-top:6px}
+  .btn-row{flex-wrap:wrap;gap:6px}
 
-  /* App rows */
-  .app-row{flex-direction:column;gap:8px}
-  .app-row .btn-row{margin-top:4px}
+  /* ── Buttons ── */
+  .btn{font-size:13px;padding:8px 14px;border-radius:8px}
+  .btn-sm{font-size:11px;padding:4px 9px}
 
-  /* Trade toggle buttons */
-  .ot-toggle{width:100%;border-radius:var(--radius)}
-  .ot-btn{flex:1;font-size:12px;padding:8px 4px;text-align:center}
+  /* ── App rows ── */
+  .app-row{flex-direction:column;align-items:flex-start;gap:8px;padding:10px 0}
+  .app-row .app-name{font-size:13px}
+  .app-row .app-meta{font-size:11px}
+  .app-row .btn-row,.app-row > .btn{align-self:flex-start}
 
-  /* Company page header */
-  .content > div[style*="display:flex"][style*="align-items:center"][style*="gap:12px"]{flex-wrap:wrap}
+  /* ── Trade mode toggle ── */
+  .ot-toggle{border-radius:10px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+  .ot-toggle::-webkit-scrollbar{display:none}
+  .ot-btn{flex:1;min-width:60px;font-size:12px;padding:8px 6px;text-align:center}
 
-  /* Login card */
-  .login-card{padding:20px}
+  /* ── Order book — stack bids/asks vertically ── */
+  div[style*="grid-template-columns:1fr 1fr"]{grid-template-columns:1fr!important;gap:10px}
 
-  /* Leaderboard */
+  /* ── Admin allocation grid ── */
+  div[style*="grid-template-columns:1fr 1fr 1fr 1fr"]{grid-template-columns:1fr 1fr!important}
+
+  /* ── Company page header ── */
+  .content > div[style*="display:flex"][style*="gap:12px"]{flex-wrap:wrap;gap:8px}
+
+  /* ── Leaderboard ── */
   .lb-row{padding:8px 10px;gap:8px}
-  .lb-rank{font-size:15px;min-width:24px}
-  .lb-val{font-size:13px}
+  .lb-rank{font-size:14px;min-width:22px}
+  .lb-val{font-size:12px}
+  .lb-name{font-size:13px}
 
-  /* Announcements banner */
-  .session-banner > div:last-child{display:none} /* hide right side on tiny screens */
+  /* ── Login ── */
+  .login-page{padding:16px}
+  .login-card{padding:20px;border-radius:14px}
+  .login-logo{margin-bottom:12px}
+  .acct-item{padding:10px 12px;gap:10px}
+  .acct-name{font-size:13px}
+  .acct-email{font-size:11px}
+  .avatar{width:34px;height:34px;font-size:12px}
 
-  /* Admin dashboard grids */
-  .grid4 .mcard .mval{font-size:16px}
+  /* ── Notifications ── */
+  div[style*="display:flex;align-items:flex-start;gap:10px"]{gap:8px}
 
-  /* Order book — stack columns */
-  div[style*="grid-template-columns:1fr 1fr"]{grid-template-columns:1fr !important}
+  /* ── Chart interval buttons ── */
+  div[id^="ibar-"]{gap:2px;margin-bottom:4px}
+  div[id^="ibar-"] button{padding:2px 6px;font-size:10px}
 
-  /* Inputs full width in rows */
-  .grid2 input,.grid2 select,.grid3 input,.grid3 select{font-size:13px}
-
-  /* Notification buttons */
-  div[style*="display:flex;gap:6px;margin-top:8px"]{gap:4px}
-  div[style*="display:flex;gap:6px;margin-top:8px"] .btn{flex:1}
-
-  /* Section title with actions */
-  .section-title{font-size:13px}
-
-  /* Price chart interval bars */
-  div[id^="ibar-"]{gap:1px}
-  div[id^="ibar-"] button{padding:2px 5px;font-size:10px}
-
-  /* Badges — smaller */
+  /* ── Badges ── */
   .badge{font-size:10px;padding:1px 5px}
 
-  /* Toast */
-  .toast{bottom:12px;right:12px;left:12px;max-width:none}
+  /* ── Toast ── */
+  .toast{bottom:12px;right:10px;left:10px;max-width:none;text-align:center;border-radius:10px}
 
-  /* Halted ticker indicator */
-  .halted-ticker{opacity:0.7}
+  /* ── Share class structure table ── */
+  div[style*="grid-template-columns:2fr 1fr 1fr 1fr 1fr"]{
+    grid-template-columns:1fr 1fr!important;gap:6px}
+
+  /* ── News items ── */
+  .news-item{padding:10px 0}
+  .news-headline{font-size:13px}
+  .news-body{font-size:12px}
+  .news-meta{font-size:11px;flex-wrap:wrap;gap:4px}
+
+  /* ── Halted tickers ── */
+  .halted-ticker{opacity:0.75}
+
+  /* ── Config page ── */
+  .config-card{padding:20px;margin:16px}
+
+  /* ── PDF/print button ── */
+  .btn[onclick*="PDF"]{font-size:11px;padding:4px 8px}
+}
+
+/* ── Very small phones (≤380px) ── */
+@media(max-width:380px){
+  .grid4,.grid3{grid-template-columns:1fr}
+  .ot-btn{font-size:11px;padding:7px 4px}
+  .tab{font-size:10px;padding:4px 7px}
+  .nav-btn{font-size:10px;padding:4px 7px}
+  input,select,textarea{font-size:13px}
 }
 
 /* ── Nav abbreviations on mobile ── */
@@ -291,7 +346,7 @@ let charts={},sessionTimer=null;
 async function loadAll(){
   // ── Phase 1: critical data needed to render login ──────
   const [users,session,companies,announcements,halts]=await Promise.all([
-    sb.get('jex_users','order=created_at.asc&select=id,name,email,role,status,cash,holdings,shorts,watchlist,description,app_status,sec_q,created_at'),
+    sb.get('jex_users','order=created_at.asc&select=id,name,email,password,role,status,cash,holdings,shorts,watchlist,description,app_status,sec_q,sec_a,created_at'),
     sb.get('jex_session','id=eq.1'),
     sb.get('jex_companies','order=created_at.asc'),
     sb.get('jex_announcements','order=created_at.desc'),
