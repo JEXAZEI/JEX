@@ -390,7 +390,7 @@ async function loadAll(){
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
     activity,shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,
-    priceAdjustments,flags]=await Promise.all([
+    priceAdjustments,flags,minutes,divApprovals]=await Promise.all([
     sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_news','order=created_at.desc&limit=50'),
     sb.get('jex_ipo_applications','order=created_at.asc'),
@@ -419,7 +419,7 @@ async function loadAll(){
     trades,dividends,buybacks,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,
-    priceAdjustments,flags,
+    priceAdjustments,flags,minutes,divApprovals,
     founders:DB.founders||[],founderAllocs:DB.founderAllocs||[]});
   render(); // re-render with full data
 }
@@ -492,14 +492,16 @@ function adjStockForm(){
     document.getElementById('adj-reason')?.value
   );
 }
-async function saveBudgetThreshold(){
-  const val=parseFloat(document.getElementById('bw-threshold')?.value);
+async function saveBudgetThreshold(){await saveBudgetThresholdFrom('bw-threshold');}
+async function saveBudgetThresholdFrom(id='bw-threshold'){
+  const val=parseFloat(document.getElementById(id)?.value);
   if(isNaN(val)||val<0)return toast('Enter a valid amount');
   await saveSession({budget_warning_threshold:val});
   toast('Warning threshold set to '+fmt(val));render();
 }
-async function saveDivThreshold(){
-  const val=parseFloat(document.getElementById('div-threshold')?.value);
+async function saveDivThreshold(){await saveDivThresholdFrom('div-threshold');}
+async function saveDivThresholdFrom(id='div-threshold'){
+  const val=parseFloat(document.getElementById(id)?.value);
   if(isNaN(val)||val<0)return toast('Enter a valid amount');
   await saveSession({dividend_approval_threshold:val});
   toast('Dividend approval threshold set to '+fmt(val));render();
@@ -2594,7 +2596,8 @@ function renderMarket(){
     return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
     </div>
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
-      +(DB.minutes.length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${m.title}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}${DB.minutes.length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.length-3} older entries</div>`:''}</div>`:'')
+      +(DB.minutes.filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${m.title}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}</div>`:'')
+    +(DB.minutes.filter(m=>m.type==='minutes').length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.filter(m=>m.type==='minutes').slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${m.title}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}${DB.minutes.filter(m=>m.type==='minutes').length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.filter(m=>m.type==='minutes').length-3} older entries</div>`:''}</div>`:'')
       +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
       +'</div>':''}
     ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.news.length} post${DB.news.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${n.headline}</div>${n.body?`<div class="news-body">${n.body}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${n.company_name}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${DB.news.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${DB.news.length} posts</div>`:''}</div>`:''}
@@ -3322,7 +3325,8 @@ function renderAdmin(){
 
   // President can only see: session, balances, passwords
   const presidentTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
-  const sectreTabs=[['announcements','Announcements'],['minutes','Minutes'],['shareholders','Shareholder registry'],['votes_all','Vote oversight'],['balances','Balances'],['news','News'],['activity','Activity log']];
+  const secretaryTabs=[['announcements','Announcements'],['minutes','Minutes'],['notices','Official notices'],['shareholders','Shareholder registry'],['votes_all','Vote oversight'],['news','News']];
+  const sectreTabs=u.role==='secretary'?secretaryTabs:[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
   const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags']];
   const openFlags=(DB.flags||[]).filter(f=>f.status==='open').length;
   const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['earnings','Earnings targets'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags']];
@@ -3342,6 +3346,7 @@ function renderAdmin(){
   :UI.adminTab==='dashboard'?renderAdminDashboard()
   :UI.adminTab==='flags'?renderAdminFlags()
   :UI.adminTab==='minutes'?renderAdminMinutes()
+  :UI.adminTab==='notices'?renderAdminOfficialNotices()
   :UI.adminTab==='shareholders'?renderAdminShareholderRegistry()
   :UI.adminTab==='votes_all'?renderAdminVoteOversight()
   :UI.adminTab==='cashflow'?renderTreasurerCashFlow()
@@ -3394,6 +3399,23 @@ function renderAdminSession(students){
       </div>
       <div class="frow" style="flex:2"><label class="flabel">Reason</label><input type="text" id="halt-reason" placeholder="e.g. Under investigation for false earnings"></div>
       <div style="padding-bottom:12px"><button class="btn btn-danger" onclick="haltStock(get('halt-ticker')?.value,get('halt-reason')?.value)">Halt</button></div>
+    </div>
+    <div class="divider"></div>
+    <div class="section-title" style="font-size:13px;margin-bottom:10px">Treasurer thresholds</div>
+    <div class="ibox ibox-blue" style="margin-bottom:10px">These defaults can be changed by Chairman or President. Treasurer can also adjust them from Budget warnings.</div>
+    <div class="grid2" style="margin-bottom:12px">
+      <div><label class="flabel">Low cash warning ($)</label>
+        <div class="row" style="align-items:flex-end">
+          <input type="number" id="bw-threshold-session" value="${DB.session.budget_warning_threshold||500}" min="0" step="100" style="flex:1">
+          <button class="btn btn-sm btn-primary" onclick="saveBudgetThresholdFrom('bw-threshold-session')">Save</button>
+        </div>
+      </div>
+      <div><label class="flabel">Dividend approval required above ($)</label>
+        <div class="row" style="align-items:flex-end">
+          <input type="number" id="div-threshold-session" value="${DB.session.dividend_approval_threshold||1000}" min="0" step="100" style="flex:1">
+          <button class="btn btn-sm btn-primary" onclick="saveDivThresholdFrom('div-threshold-session')">Save</button>
+        </div>
+      </div>
     </div>
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:6px;color:var(--red)">⚠ Danger zone</div>
@@ -4003,6 +4025,28 @@ function renderTradingHistory(){
 // ═══════════════════════════════════════════════
 // SECRETARY FEATURES
 // ═══════════════════════════════════════════════
+function renderAdminOfficialNotices(){
+  const notices=DB.minutes.filter(m=>m.type==='official_notice');
+  const u=cu();
+  return`<div class="card"><div class="section-title">Post an official notice</div>
+    <div class="ibox ibox-blue">Official notices appear on the market page with a formal styling, distinct from regular announcements. Use for procedural communications like session schedules or deadlines.</div>
+    <div class="frow"><label class="flabel">Notice title</label><input type="text" id="notice-title" placeholder="e.g. Notice of upcoming earnings deadline"></div>
+    <div class="frow"><label class="flabel">Notice body</label><textarea id="notice-body" rows="5" placeholder="To all market participants:&#10;&#10;Please be advised that..."></textarea></div>
+    <button class="btn btn-primary" onclick="postOfficialNotice(get('notice-title')?.value,get('notice-body')?.value)">Post official notice</button>
+  </div>
+  ${notices.length?`<div class="card"><div class="section-title">Posted notices (${notices.length})</div>
+    ${notices.map(m=>`<div style="padding:12px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div><span class="badge b-blue" style="margin-right:6px">Official notice</span><strong>${m.title}</strong></div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span>
+          <button class="btn btn-sm btn-danger" onclick="deleteMinutes('${m.id}')">Delete</button>
+        </div>
+      </div>
+      <div style="font-size:13px;color:var(--text2);white-space:pre-line">${m.body}</div>
+    </div>`).join('')}
+  </div>`:''}`;
+}
 async function postMinutes(title,body){
   const u=cu();
   if(!title||title.trim().length<3)return toast('Enter a title');
