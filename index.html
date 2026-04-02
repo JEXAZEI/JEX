@@ -347,7 +347,7 @@ let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[]
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],earningsTargets:[],
   founderShares:[],companyInvites:[],priceAdjustments:[],
-  founders:[],founderAllocs:[],priceAdjustments:[],companyMembers:[],founderAllocations:[],flags:[],minutes:[],divApprovals:[],
+  priceAdjustments:[],companyMembers:[],founderAllocations:[],flags:[],minutes:[],divApprovals:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,earnings_surprise_pct:10,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30}};
 let SHEETS_URL=null;
 let _lastActivity=Date.now();
@@ -406,7 +406,7 @@ async function loadAll(){
     sb.get('jex_vote_ballots','order=created_at.asc'),
     sb.get('jex_notifications','order=created_at.desc&limit=50'),
     sb.get('jex_price_alerts','order=created_at.asc'),
-    sb.get('jex_nw_history','order=created_at.desc&limit=500'),
+    sb.get('jex_nw_history','order=created_at.desc&limit=200'),
     sb.get('jex_earnings_targets','order=created_at.desc'),
     sb.get('jex_company_members','order=created_at.asc'),
     sb.get('jex_founder_allocations','order=created_at.desc'),
@@ -420,8 +420,7 @@ async function loadAll(){
     trades,dividends,buybacks,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,
-    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,
-    founders:DB.founders||[],founderAllocs:DB.founderAllocs||[]});
+    priceAdjustments,flags,minutes,divApprovals,stopLossOrders});
   render(); // re-render with full data
 }
 
@@ -863,10 +862,7 @@ function getCompanyOwners(companyUserId){
   const accepted=DB.companyMembers.filter(m=>m.company_user_id===companyUserId&&m.status==='accepted').map(m=>m.student_id);
   return [companyUserId,...accepted];
 }
-function canManageCompany(companyUserId,userId){
-  if(companyUserId===userId)return true;
-  return DB.companyMembers.some(m=>m.company_user_id===companyUserId&&m.student_id===userId&&m.status==='accepted');
-}
+// canManageCompany — see below
 function getMyCompany(userId){
   // Find company where user is lead owner or accepted co-founder
   const asLead=DB.companies.find(c=>c.owner_id===userId);
@@ -1022,27 +1018,21 @@ async function adjustStockPrice(ticker,pct,reason){
 // ═══════════════════════════════════════════════
 // FOUNDERS & CO-FOUNDERS
 // ═══════════════════════════════════════════════
-function getCompanyFounders(ticker){return DB.founders.filter(f=>f.company_ticker===ticker&&f.status==='active');}
-function isFounder(ticker,userId){return !!DB.founders.find(f=>f.company_ticker===ticker&&f.student_id===userId&&f.status==='active');}
+function getCompanyFounders(ticker){
+  const co=getCo(ticker);if(!co)return[];
+  return DB.companyMembers.filter(m=>m.company_user_id===co.owner_id&&m.status==='accepted').map(m=>({student_id:m.student_id,student_name:getUser(m.student_id)?.name||'?',status:'active'}));
+}
+function isFounder(ticker,userId){
+  const co=getCo(ticker);if(!co)return false;
+  return DB.companyMembers.some(m=>m.company_user_id===co.owner_id&&m.student_id===userId&&m.status==='accepted');
+}
 function canManageCompany(co){
   const u=cu();if(!u)return false;
   if(co.owner_id===u.id)return true; // original owner (company account)
   return isFounder(co.ticker,u.id);  // or a founder student
 }
 
-async function addFounderAtRegistration(companyId,ticker,companyName,studentNames){
-  // Called when company is approved — seeds founder records for named co-founders
-  for(const name of studentNames){
-    if(!name||!name.trim())continue;
-    const student=DB.users.find(u=>u.role==='student'&&u.name.toLowerCase()===name.trim().toLowerCase());
-    if(!student){toast('Co-founder not found: '+name.trim()+' — skipped');continue;}
-    if(DB.founders.find(f=>f.company_ticker===ticker&&f.student_id===student.id))continue;
-    if(getCompanyFounders(ticker).length>=3){toast('Maximum 3 founders reached');break;}
-    const rec={id:uid(),company_ticker:ticker,company_name:companyName,student_id:student.id,student_name:student.name,role:'co-founder',status:'active',invited_by:'registration',ts:ts()};
-    await sb.post('jex_founders',rec);DB.founders.push(rec);
-    await pushNotification(student.id,'founder','🏢 You have been added as a co-founder of '+companyName+'!',ticker);
-  }
-}
+// addFounderAtRegistration removed — founders use jex_company_members
 
 async function inviteFounder(ticker,studentName){
   if(!studentName||!studentName.trim())return toast('Enter a student name');
@@ -1051,23 +1041,15 @@ async function inviteFounder(ticker,studentName){
   if(founders.length>=3)return toast('Maximum 3 founders — remove one first');
   const student=DB.users.find(u=>u.role==='student'&&u.status==='approved'&&u.name.toLowerCase()===studentName.trim().toLowerCase());
   if(!student)return toast('Student not found: '+studentName.trim());
-  if(DB.founders.find(f=>f.company_ticker===ticker&&f.student_id===student.id))return toast(student.name+' is already a founder');
+  if((DB.companyMembers||[]).find(f=>f.company_ticker===ticker&&f.student_id===student.id))return toast(student.name+' is already a founder');
   const rec={id:uid(),company_ticker:ticker,company_name:co.name,student_id:student.id,student_name:student.name,role:'co-founder',status:'active',invited_by:cu()?.name,ts:ts()};
-  await sb.post('jex_founders',rec);DB.founders.push(rec);
+  // jex_founders table removed — using jex_company_members
   await logActivity('founder',student.name+' added as co-founder of '+co.name,{ticker,userId:student.id,userName:student.name});
   await pushNotification(student.id,'founder','🏢 You have been added as a co-founder of '+co.name+'!',ticker);
   toast(student.name+' added as co-founder');render();
 }
 
-async function removeFounder(ticker,studentId){
-  if(!confirm('Remove this co-founder from the company?'))return;
-  const f=DB.founders.find(x=>x.company_ticker===ticker&&x.student_id===studentId);
-  if(!f)return;
-  await sb.patch('jex_founders','id=eq.'+f.id,{status:'removed'});
-  f.status='removed';
-  await pushNotification(studentId,'founder','You have been removed as a co-founder of '+f.company_name+'.',ticker);
-  toast('Co-founder removed');render();
-}
+// removeFounder v1 removed
 
 async function requestFounderAlloc(ticker,shares,reason){
   const u=cu();if(!u)return;
@@ -1076,15 +1058,15 @@ async function requestFounderAlloc(ticker,shares,reason){
   if(isNaN(shares)||shares<=0)return toast('Enter a valid share count');
   if(!reason||reason.trim().length<5)return toast('Please add a reason');
   if(shares>co.shares_avail)return toast('Only '+co.shares_avail+' shares available');
-  if(DB.founderAllocs.find(a=>a.company_ticker===ticker&&a.student_id===u.id&&a.status==='pending'))return toast('You already have a pending allocation request');
+  if(DB.founderAllocations.find(a=>a.company_ticker===ticker&&a.student_id===u.id&&a.status==='pending'))return toast('You already have a pending allocation request');
   const rec={id:uid(),company_ticker:ticker,company_name:co.name,student_id:u.id,student_name:u.name,shares,reason:reason.trim(),status:'pending',ts:ts()};
-  await sb.post('jex_founder_allocs',rec);DB.founderAllocs.push(rec);
+  await sb.post('jex_founder_allocations',rec);DB.founderAllocations.push(rec);
   toast('Share allocation request submitted — awaiting Chairman approval');render();
 }
 
 async function reviewFounderAlloc(id,approve){
-  const a=DB.founderAllocs.find(x=>x.id===id);if(!a)return;
-  await sb.patch('jex_founder_allocs','id=eq.'+id,{status:approve?'approved':'rejected'});
+  const a=DB.founderAllocations.find(x=>x.id===id);if(!a)return;
+  await sb.patch('jex_founder_allocations','id=eq.'+id,{status:approve?'approved':'rejected'});
   a.status=approve?'approved':'rejected';
   if(approve){
     const co=getCo(a.company_ticker);const student=getUser(a.student_id);
@@ -1107,23 +1089,7 @@ async function reviewFounderAlloc(id,approve){
 // ═══════════════════════════════════════════════
 // PRICE ADJUSTMENTS (Chairman tool)
 // ═══════════════════════════════════════════════
-async function applyPriceAdjustment(ticker,pct,reason){
-  if(!ticker)return toast('Select a ticker');
-  pct=parseFloat(pct);
-  if(isNaN(pct)||pct===0)return toast('Enter a non-zero percentage');
-  if(Math.abs(pct)>100)return toast('Max adjustment is ±100%');
-  const co=getCo(ticker);if(!co)return;
-  const oldPrice=co.price;
-  const newPrice=Math.max(0.01,Math.round(oldPrice*(1+pct/100)*100)/100);
-  const newHistory=[...co.price_history,{p:newPrice,t:(pct>0?'+':'')+pct+'% adj'}];
-  await updateCo(ticker,{price:newPrice,price_history:newHistory});
-  const rec={id:uid(),ticker,company_name:co.name,pct,old_price:oldPrice,new_price:newPrice,reason:(reason||'').trim(),applied_by:cu()?.name,ts:ts()};
-  await sb.post('jex_price_adjustments',rec);DB.priceAdjustments.unshift(rec);
-  await logActivity('price_adj',(pct>0?'+':'')+pct+'% price adjustment on '+ticker+' by '+cu()?.name+(reason?' — '+reason:''),{ticker,amount:newPrice-oldPrice});
-  await pushNotificationToHolders(ticker,'price_adj',(pct>0?'📈':'📉')+' '+co.name+' price '+(pct>0?'boosted':'reduced')+' by '+Math.abs(pct)+'%'+(reason?' — '+reason.trim():''));
-  await pushNotificationToAll('price_adj',(pct>0?'📈':'📉')+' '+co.name+' ('+ticker+'): '+(pct>0?'+':'')+pct+'%'+(reason?' — '+reason.trim():''));
-  toast(ticker+' price '+(pct>0?'boosted':'reduced')+' by '+Math.abs(pct)+'% → '+fmt(newPrice));render();
-}
+// applyPriceAdjustment removed (use adjustStockPrice)
 
 // ═══════════════════════════════════════════════
 // CO-FOUNDER SYSTEM
@@ -1185,7 +1151,7 @@ async function requestFounderShares(ticker,sharesReq){
   if(DB.founderShares.find(f=>f.ticker===ticker&&f.user_id===u.id&&f.status==='pending'))
     return toast('You already have a pending founder share request');
   const rec={id:uid(),ticker,company_name:co.name,user_id:u.id,user_name:u.name,shares_requested:sharesReq,status:'pending',ts:ts()};
-  await sb.post('jex_founder_shares',rec);
+  await sb.post('jex_founder_allocations',rec);
   DB.founderShares.push(rec);
   toast('Founder share request submitted for '+sharesReq+' shares');render();
 }
@@ -1215,25 +1181,7 @@ async function reviewFounderShares(id,approve){
 // ═══════════════════════════════════════════════
 // PRICE ADJUSTMENT (Chairman)
 // ═══════════════════════════════════════════════
-async function applyPriceAdjustment(ticker,pct,reason){
-  if(!ticker)return toast('Select a ticker');
-  pct=parseFloat(pct);
-  if(isNaN(pct)||pct===0)return toast('Enter a non-zero percentage');
-  if(Math.abs(pct)>100)return toast('Maximum adjustment is ±100%');
-  const co=getCo(ticker);if(!co)return;
-  const u=cu();
-  const oldPrice=co.price;
-  const newPrice=Math.max(0.01,Math.round(oldPrice*(1+pct/100)*100)/100);
-  const marker=pct>0?'Boost +'+pct+'%':'Drop '+pct+'%';
-  await updateCo(ticker,{price:newPrice,price_history:[...co.price_history,{p:newPrice,t:marker}]});
-  const rec={id:uid(),ticker,company_name:co.name,pct,old_price:oldPrice,new_price:newPrice,reason:(reason||'').trim(),applied_by:u.name,ts:ts()};
-  await sb.post('jex_price_adjustments',rec);
-  DB.priceAdjustments.unshift(rec);
-  await logActivity('price_adj',(pct>0?'Price boost':'Price drop')+' on '+ticker+': '+(pct>0?'+':'')+pct+'% → '+fmt(newPrice)+(reason?' ('+reason+')':''),{ticker,userId:u.id,userName:u.name,amount:newPrice-oldPrice});
-  await pushNotificationToHolders(ticker,'price_adj',(pct>0?'📈 Price boost':'📉 Price drop')+' on '+co.name+': '+(pct>0?'+':'')+pct+'% → '+fmt(newPrice)+(reason?' — '+reason:''));
-  toast(ticker+' price '+(pct>0?'boosted':'dropped')+' '+Math.abs(pct)+'% to '+fmt(newPrice));
-  render();
-}
+// applyPriceAdjustment removed (use adjustStockPrice)
 
 // ═══════════════════════════════════════════════
 // COMPLIANCE FLAGS
@@ -1502,6 +1450,8 @@ async function resetExchange(){
     ]);
     // Delete votes (cascades to ballots)
     await sb.del('jex_votes','id=neq.x');
+    await sb.del('jex_stop_loss','id=neq.x');
+    await sb.del('jex_minutes','id=neq.x');
     // Delete companies
     await sb.del('jex_companies','id=neq.x');
     // Delete students and company users only
@@ -1559,7 +1509,7 @@ function getOrderBook(ticker){
 
 // ── Place a limit order ───────────────────────────────────
 async function placeLimitOrder(ticker,side,qty,limitPrice){
-  if(!requireOpen())return;
+  if(!requireOpen(ticker))return;
   const u=cu(),co=getCo(ticker);if(!u||!co)return;
   qty=parseInt(qty);limitPrice=parseFloat(limitPrice);
   if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
@@ -1834,7 +1784,7 @@ async function coverShort(ticker,qty){
 }
 async function toggleWatch(ticker){const u=cu();if(!u)return;const wl=[...watchlist(u)];const i=wl.indexOf(ticker);if(i>=0){wl.splice(i,1);toast(ticker+' removed from watchlist');}else{wl.push(ticker);toast(ticker+' added to watchlist');}await updateUser(u.id,{watchlist:wl});render();}
 async function doBuyback(ticker,qty){
-  if(!requireOpen())return;const owner=cu(),co=getCo(ticker);if(!owner||!co)return;
+  if(!requireOpen(ticker))return;const owner=cu(),co=getCo(ticker);if(!owner||!co)return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter valid quantity');
   const sold=co.shares-co.shares_avail;if(qty>sold)return toast('Only '+sold+' shares in circulation');
   const price=impactPrice(co,qty,'buy'),cost=Math.round(price*qty*100)/100;
@@ -2466,7 +2416,7 @@ function renderCompanyPage(parentTicker){
       +'<div class="mcard"><div class="mlabel">Capital raised</div><div class="mval" style="font-family:var(--mono);color:var(--green)">'+fmt(capitalRaised)+'</div></div>'
       +'<div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">'+(owner?fmt(owner.cash):'—')+'</div></div>'
       +'<div class="mcard"><div class="mlabel">Available shares</div><div class="mval">'+allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares_avail:0);},0).toLocaleString()+'</div></div>'
-      +'</div>';  // end grid4
+      +'</div>'
 
     // All share classes
     html+='<div class="card"><div class="section-title">Share classes</div>';
@@ -2766,8 +2716,8 @@ function renderMarket(){
     return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
     </div>
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
-      +(DB.minutes.filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${m.title}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}</div>`:'')
-    +(DB.minutes.filter(m=>m.type==='minutes').length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.filter(m=>m.type==='minutes').slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${m.title}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}${DB.minutes.filter(m=>m.type==='minutes').length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.filter(m=>m.type==='minutes').length-3} older entries</div>`:''}</div>`:'')
+      +((DB.minutes||[]).filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${m.title}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}</div>`:'')
+    +((DB.minutes||[]).filter(m=>m.type==='minutes').length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.filter(m=>m.type==='minutes').slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${m.title}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}${DB.minutes.filter(m=>m.type==='minutes').length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.filter(m=>m.type==='minutes').length-3} older entries</div>`:''}</div>`:'')
       +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
       +'</div>':''}
     ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.news.length} post${DB.news.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${n.headline}</div>${n.body?`<div class="news-body">${n.body}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${n.company_name}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${DB.news.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${DB.news.length} posts</div>`:''}</div>`:''}
