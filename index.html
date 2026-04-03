@@ -707,13 +707,14 @@ async function autoRefresh(){
     DB.limitOrders=newLimitOrders;
     // Update session timer if needed
     if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
-    // Re-render topbar + banner silently (just update bell count and session banner)
+    // Re-render if notifications changed or always update market data silently
     const newUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
-    if(newUnread!==prevUnread||DB.session.status!==document.querySelector('.session-banner')?.className?.includes('s-'+DB.session.status)){
-      // Patch topbar bell count without full re-render
-      const tb=document.querySelector('.user-pill');
-      if(tb)tb.innerHTML=tb.innerHTML; // trigger re-paint
-      render(); // full render only if something actually changed
+    // Always re-render to show fresh prices, but don't interrupt forms
+    if(!userIsFillingForm()){
+      render();
+    } else if(newUnread!==prevUnread) {
+      // At minimum update the bell badge
+      const tb=document.querySelector('.user-pill');if(tb)tb.outerHTML=renderTopbar();
     }
   }catch(e){/* silent fail */}
 }
@@ -761,7 +762,7 @@ async function registerStudent(name,email,pw,secQ,secA){
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';render();
 }
-async function registerCompany(name,email,pw,desc,secQ,secA,cofounders=[]){
+async function registerCompany(name,email,pw,desc,secQ,secA){
   if(!name||name.trim().length<2)return toast('Enter a valid company name');
   if(!validEmail(email))return toast('Enter a valid email');
   if(!pw||pw.length<4)return toast('Password must be at least 4 characters');
@@ -784,20 +785,12 @@ async function approveReg(id,startCash){
   await sb.post('jex_users',u);await sb.del('jex_pending','id=eq.'+id);
   DB.users.push(u);DB.pending=DB.pending.filter(x=>x.id!==id);
   await logActivity('registration',r.name+' approved ('+r.role+') with '+fmt(startCash),{userId:r.id,userName:r.name,amount:startCash});
-  // Create co-founder invitations if company specified cofounders
-  if(r.role==='company'&&r.cofounders&&r.cofounders.length){
-    for(const cfName of r.cofounders){
-      const student=DB.users.find(s=>s.role==='student'&&norm(s.name)===norm(cfName));
-      if(student){
-        await pushNotification(student.id,'invite','🤝 '+r.name+' listed you as a co-founder. You will be able to manage this company once their IPO is approved.');
-      }
-    }
-  }
+
   toast(r.name+' approved with '+fmt(startCash));render();
 }
 async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');render();}
 function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u||u.password!==pw)return toast('Wrong password');UI.userId=uid2;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}render();}
-function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
+function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.tradePage=0;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
 async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;if(u.password!==cur)return toast('Current password incorrect');if(!nw2||nw2.length<4)return toast('Min 4 characters');if(nw2!==conf)return toast('Passwords do not match');await sb.patch('jex_users','id=eq.'+uid2,{password:nw2});u.password=nw2;toast('Password changed');render();}
 async function adminResetPw(uid2,pw){if(!pw||pw.length<4)return toast('Min 4 characters');const u=getUser(uid2);if(!u)return;await sb.patch('jex_users','id=eq.'+uid2,{password:pw});u.password=pw;toast(u.name+"'s password reset");render();}
 async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)return;if(u.password!==curPw)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');await sb.patch('jex_users','id=eq.'+uid2,{sec_q:newQ,sec_a:norm(newA)});u.sec_q=newQ;u.sec_a=norm(newA);toast('Security question updated');render();}
@@ -1158,7 +1151,7 @@ async function requestFounderShares(ticker,sharesReq){
 
 async function reviewFounderShares(id,approve){
   const req=DB.founderShares.find(f=>f.id===id);if(!req)return;
-  await sb.patch('jex_founder_shares','id=eq.'+id,{status:approve?'approved':'rejected'});
+  await sb.patch('jex_founder_allocations','id=eq.'+id,{status:approve?'approved':'rejected'});
   req.status=approve?'approved':'rejected';
   if(approve){
     const co=getCo(req.ticker);if(!co)return;
@@ -1739,7 +1732,7 @@ async function placeBuy(ticker,qty){
   await recordTrade(ticker,qty,np,u.id,'exchange');
   const slippage=Math.round((np-co.price)*100)/100;
   const slipMsg=Math.abs(slippage)>0.01?' (slippage: '+(slippage>0?'+':'')+fmt(slippage)+')':'';
-  toast('Bought '+qty+' × '+ticker+' @ '+fmt(np)+slipMsg);openPanel(ticker);
+  toast('Bought '+qty+' × '+ticker+' @ '+fmt(np)+slipMsg);if(UI.companyPage)render();else openPanel(ticker);
 }
 async function placeSell(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
@@ -1753,7 +1746,7 @@ async function placeSell(ticker,qty){
   await recordTrade(ticker,qty,np,'exchange',u.id);
   const slippageSell=Math.round((co.price-np)*100)/100;
   const slipMsgSell=Math.abs(slippageSell)>0.01?' (slippage: '+(slippageSell>0?'+':'')+fmt(slippageSell)+')':'';
-  toast('Sold '+qty+' × '+ticker+' @ '+fmt(np)+slipMsgSell);openPanel(ticker);
+  toast('Sold '+qty+' × '+ticker+' @ '+fmt(np)+slipMsgSell);if(UI.companyPage)render();else openPanel(ticker);
 }
 async function placeShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
@@ -1767,7 +1760,7 @@ async function placeShort(ticker,qty){
   const np=impactPrice(co,qty,'sell');
   await updateCo(ticker,{price:np,price_history:[...co.price_history,{p:np,t:isoNow()}]});
   await recordTrade(ticker,qty,price,'short',u.id,'short');
-  toast('Shorted '+qty+' × '+ticker+' @ '+fmt(price));openPanel(ticker);
+  toast('Shorted '+qty+' × '+ticker+' @ '+fmt(price));if(UI.companyPage)render();else openPanel(ticker);
 }
 async function coverShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
@@ -1780,7 +1773,7 @@ async function coverShort(ticker,qty){
   await updateUser(u.id,{cash:Math.round((u.cash+cb+pnl)*100)/100,shorts:sh});
   await updateCo(ticker,{price:cp,price_history:[...co.price_history,{p:cp,t:isoNow()}]});
   await recordTrade(ticker,qty,cp,u.id,'cover','cover');
-  toast('Covered '+qty+' × '+ticker+' | P&L: '+(pnl>=0?'+':'')+fmt(pnl));openPanel(ticker);
+  toast('Covered '+qty+' × '+ticker+' | P&L: '+(pnl>=0?'+':'')+fmt(pnl));if(UI.companyPage)render();else openPanel(ticker);
 }
 async function toggleWatch(ticker){const u=cu();if(!u)return;const wl=[...watchlist(u)];const i=wl.indexOf(ticker);if(i>=0){wl.splice(i,1);toast(ticker+' removed from watchlist');}else{wl.push(ticker);toast(ticker+' added to watchlist');}await updateUser(u.id,{watchlist:wl});render();}
 async function doBuyback(ticker,qty){
@@ -2057,6 +2050,8 @@ function canAccessTicker(ticker,userId){
   if(!meta)return true; // base class, always accessible
   if(!meta.restricted)return true;
   if(!userId)return false;
+  const u=getUser(userId);
+  if(u&&isAdmin(u))return true; // admins see all
   return (meta.whitelist||[]).includes(userId);
 }
 // Helper: voting power a user has for a company
@@ -2256,7 +2251,7 @@ function renderLogin(){
   </div><div style="display:flex;justify-content:flex-start;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)"><button class="btn btn-sm btn-primary" onclick="UI.loginView='register';render()">Register new account</button></div></div></div>`;
 }
 function switchRegTab(type){document.querySelectorAll('.reg-tab').forEach(t=>t.classList.remove('active'));const tab=get('reg-tab-'+type);if(tab)tab.classList.add('active');get('reg-student-fields').style.display=type==='student'?'':'none';get('reg-company-fields').style.display=type==='company'?'':'none';}
-function doRegister(){const active=document.querySelector('.reg-tab.active');const type=active?.id==='reg-tab-company'?'company':'student';if(type==='student')registerStudent(get('reg-name')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value);else{const cf1=(get('reg-co-cf1')?.value||'').trim(),cf2=(get('reg-co-cf2')?.value||'').trim();const cofounders=[cf1,cf2].filter(Boolean);registerCompany(get('reg-co-name')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value,cofounders);}}
+function doRegister(){const active=document.querySelector('.reg-tab.active');const type=active?.id==='reg-tab-company'?'company':'student';if(type==='student')registerStudent(get('reg-name')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value);else{registerCompany(get('reg-co-name')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value);}}
 
 // ═══════════════════════════════════════════════
 // RENDER: CHROME
@@ -2303,7 +2298,7 @@ function renderNav(){
   if(isChairman(u))tabs=[['admin','Admin'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
   else if(isAdmin(u))tabs=[['admin','Admin'],['market','Market'],['settings','Settings']];
   else if(u.role==='company')tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
-  else tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['leaderboard','Leaderboard'],['orders','Orders'],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
+  else tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['leaderboard','Leaderboard'],['orders','Orders'+(()=>{if(!UI.userId)return'';const u=DB.users.find(x=>x.id===UI.userId);if(!u)return'';const open=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='open').length;const ah=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='after_hours').length;const sl=(DB.stopLossOrders||[]).filter(s=>s.user_id===u.id&&s.status==='active').length;const tot=open+ah+sl;return tot?' <span class="badge b-amber" style="font-size:10px">'+tot+'</span>':''})()],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   return `<div class="nav">${tabs.map(([k,v])=>`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
 }
 
@@ -2739,7 +2734,7 @@ function buildSparklines(){
 }
 
 function openCompanyPage(ticker){
-  UI.companyPage=ticker;UI.companyPageTab='overview';UI.panelMode='buy';
+  UI.companyPage=ticker;UI.companyPageTab='overview';UI.panelMode='buy';UI.tradePage=0;
   destroyCharts();render();
   window.scrollTo({top:0,behavior:'smooth'});
 }
@@ -3378,7 +3373,13 @@ function renderDivTab(co,myDivs){
     <div id="div-form"><div style="font-size:12px;color:var(--text2);padding:8px 0">Loading shareholders...</div></div>
   </div>${myDivs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Per share</th><th>Total</th><th>Recipients</th><th>Note</th></tr></thead><tbody>${myDivs.map(d=>`<tr><td style="color:var(--text2)">${d.ts}</td><td style="font-family:var(--mono)">${fmt(d.per_share)}</td><td style="color:var(--green);font-family:var(--mono)">${fmt(d.total)}</td><td>${(d.payouts||[]).length}</td><td style="font-size:12px;color:var(--text2)">${d.note}</td></tr>`).join('')}</tbody></table></div>`:''}`;
 }
-function updateDivPrev(ticker){const co=getCo(ticker);if(!co)return;const ps=parseFloat(get('div-ps')?.value)||0,p=get('div-prev');if(!p)return;if(ps<=0){p.innerHTML='';return;}const sh=shareholders(ticker),total=divTotal(ticker,ps),owner=cu(),ok=owner.cash>=total;p.innerHTML=`<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px"><div><div style="color:var(--text2);margin-bottom:2px">Shareholders</div><div style="font-weight:500">${sh.length}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Total</div><div style="color:var(--green);font-family:var(--mono)">${fmt(total)}</div></div><div><div style="color:var(--text2);margin-bottom:2px">After</div><div style="font-family:var(--mono);color:${ok?'var(--text)':'var(--red)'}">${fmt(owner.cash-total)}</div></div></div>${!ok?`<div style="color:var(--red);font-weight:500">Insufficient funds</div>`:''}</div>`;}
+function updateDivPrev(ticker){const co=getCo(ticker);if(!co)return;const ps=parseFloat(get('div-ps')?.value)||0,p=get('div-prev');if(!p)return;if(ps<=0){p.innerHTML='';return;}
+  // Use fresh students from DB for preview (may be stale but better than nothing)
+  const allT=getCompanyTickers(ticker);
+  const freshSh=DB.users.filter(u=>u.role==='student'&&allT.some(t=>u.holdings&&(u.holdings[t]||0)>0));
+  const sh=freshSh;
+  const total=sh.reduce((s,u)=>s+allT.reduce((ts,t)=>ts+Math.round(((u.holdings&&u.holdings[t])||0)*ps*100)/100,0),0);
+  const owner=cu(),ok=owner.cash>=total;p.innerHTML=`<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px"><div><div style="color:var(--text2);margin-bottom:2px">Shareholders</div><div style="font-weight:500">${sh.length}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Total</div><div style="color:var(--green);font-family:var(--mono)">${fmt(total)}</div></div><div><div style="color:var(--text2);margin-bottom:2px">After</div><div style="font-family:var(--mono);color:${ok?'var(--text)':'var(--red)'}">${fmt(owner.cash-total)}</div></div></div>${!ok?`<div style="color:var(--red);font-weight:500">Insufficient funds</div>`:''}</div>`;}
 function renderBBTab(co,myBBs){
   const sold=co.shares-co.shares_avail,owner=cu();
   return`<div class="card"><div class="section-title">Share buyback</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${sold.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div></div>${sold>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Shares to buy back</label><input type="number" id="bb-qty" placeholder="50" min="1" max="${sold}" oninput="updateBBPrev('${co.ticker}')"></div><div style="padding-bottom:12px"><button class="btn btn-primary" onclick="doBuyback('${co.ticker}',get('bb-qty')?.value)">Buy back</button></div></div><div id="bb-prev"></div>`:'<div class="empty">No shares in circulation.</div>'}</div>${myBBs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${myBBs.map(b=>`<tr><td style="color:var(--text2)">${b.ts}</td><td>${b.qty}</td><td style="font-family:var(--mono)">${fmt(b.price)}</td><td style="font-weight:500;font-family:var(--mono)">${fmt(b.total)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
@@ -3992,8 +3993,8 @@ function renderNotifications(){
         <div style="font-size:13px${n.read?'':';font-weight:500'}">${n.message}</div>
         <div style="font-size:11px;color:var(--text3);margin-top:2px">${n.ts||''}</div>
         ${pendingInvite?`<div style="display:flex;gap:6px;margin-top:8px">
-          <button class="btn btn-sm btn-success" onclick="respondToInvite('${pendingInvite.id}',true)">✓ Accept</button>
-          <button class="btn btn-sm btn-danger" onclick="respondToInvite('${pendingInvite.id}',false)">✕ Decline</button>
+          <button class="btn btn-sm btn-success" onclick="respondToInvite(&quot;${pendingInvite.id}&quot;,true)">✓ Accept</button>
+          <button class="btn btn-sm btn-danger" onclick="respondToInvite(&quot;${pendingInvite.id}&quot;,false)">✕ Decline</button>
         </div>`:''}
       </div>
       ${n.ticker&&n.ticker!==null?`<span class="badge b-gray" style="font-family:var(--mono);font-size:10px">${n.ticker}</span>`:''}
@@ -4014,7 +4015,21 @@ function renderStudentOrders(){
     <div class="ibox ibox-amber">These orders activate automatically when the next session opens.</div>
     <table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>Limit price</th><th>Placed</th><th></th></tr></thead>
     <tbody>${afterHours.map(o=>`<tr><td><span class="badge b-gray" style="font-family:var(--mono)">${o.ticker}</span></td><td><span class="badge ${o.side==='buy'?'b-teal':'b-red'}">${o.side}</span></td><td>${o.qty}</td><td style="font-family:var(--mono);font-weight:500">${fmt(o.limit_price)}</td><td style="color:var(--text2)">${o.ts}</td><td><button class="btn btn-sm btn-danger" onclick="cancelLimitOrder('${o.id}')">Cancel</button></td></tr>`).join('')}</tbody></table></div>`:'';
-  return ahSection+`<div class="card"><div class="section-title">Open limit orders</div>
+  // Active stop-loss orders
+  const myStopLoss=DB.stopLossOrders.filter(s=>s.user_id===u.id&&s.status==='active');
+  const slSection=myStopLoss.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Stop-loss orders <span class="badge b-red">${myStopLoss.length} active</span></div>
+    <div class="ibox ibox-purple">These orders automatically sell your shares if the price drops to the trigger price.</div>
+    <table><thead><tr><th>Ticker</th><th>Trigger price</th><th>Shares</th><th>Current price</th><th>Gap</th><th></th></tr></thead>
+    <tbody>${myStopLoss.map(s=>{const co=getCo(s.ticker);const gap=co?Math.round((co.price-s.trigger_price)/co.price*100*10)/10:0;return`<tr>
+      <td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${s.ticker}')">${s.ticker}</span></td>
+      <td style="font-family:var(--mono);color:var(--red)">${fmt(s.trigger_price)}</td>
+      <td>${s.shares}</td>
+      <td style="font-family:var(--mono)">${co?fmt(co.price):'—'}</td>
+      <td style="font-family:var(--mono);color:${gap<5?'var(--red)':gap<15?'var(--amber)':'var(--green)'}">${co?gap+'%':'—'}</td>
+      <td><button class="btn btn-sm btn-danger" onclick="cancelStopLoss(&quot;${s.id}&quot;)">Cancel</button></td>
+    </tr>`}).join('')}</tbody></table>
+  </div>`:'';
+  return slSection+ahSection+`<div class="card"><div class="section-title">Open limit orders</div>
     ${open.length?`<table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>Limit price</th><th>Current price</th><th>Placed</th><th></th></tr></thead>
     <tbody>${open.map(o=>{const co=getCo(o.ticker);return`<tr>
       <td><span class="badge b-gray" style="font-family:var(--mono)">${o.ticker}</span></td>
