@@ -1082,17 +1082,20 @@ async function registerCompany(name,email,pw,desc,secQ,secA){
   if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
-  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),classroom_id:null,ts:ts()};
+  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';render();
 }
 async function approveReg(id,startCash){
   const r=DB.pending.find(x=>x.id===id);if(!r)return;
+  // Check if Chairman manually set a classroom for this pending user
+  const classroomEl=document.getElementById('pending-classroom-'+id)||document.getElementById('classroom-'+id);
+  const classroomId=(classroomEl?.value||'').trim().toLowerCase()||null;
   startCash=parseFloat(startCash)||DB.session.starting_cash||10000;
   const u={id:r.id,name:r.name,email:r.email,password:r.password,role:r.role,status:'approved',
     cash:startCash,sec_q:r.sec_q,sec_a:r.sec_a,
     description:r.description||null,app_status:r.role==='company'?'none':null,
-    holdings:{},shorts:{},watchlist:[],created_at:new Date().toISOString()};
+    holdings:{},shorts:{},watchlist:[],classroom_id:classroomId||null,created_at:new Date().toISOString()};
   await sb.post('jex_users',u);await sb.del('jex_pending','id=eq.'+id);
   DB.users.push(u);DB.pending=DB.pending.filter(x=>x.id!==id);
   await logActivity('registration',r.name+' approved ('+r.role+') with '+fmt(startCash),{userId:r.id,userName:r.name,amount:startCash});
@@ -3999,7 +4002,7 @@ function renderAdminSession(students){
 }
 function renderAdminRegs(pS,pC,students,companies){
   return`<div class="card">
-    ${pS.length?`<div class="section-title">Pending students</div>${pS.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${r.name} <span class="badge b-blue">student</span></div><div class="app-meta">${r.email} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
+    ${pS.length?`<div class="section-title">Pending students</div>${pS.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${r.name} <span class="badge b-blue">student</span></div><div class="app-meta">${r.email} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><input type="text" id="classroom-${r.id}" placeholder="classroom" style="width:80px;font-size:11px"><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:100px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
     ${pC.length?`<div class="section-title">Pending companies</div>${pC.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${r.name} <span class="badge b-amber">company</span></div><div class="app-meta">${r.email} — ${r.description||''} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
     ${!DB.pending.length?`<div class="empty" style="padding:16px">No pending registrations</div><hr class="divider">`:''}
     <div class="section-title" style="margin-top:4px">Approved accounts</div>
