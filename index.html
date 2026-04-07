@@ -345,11 +345,108 @@ const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='
 // ═══════════════════════════════════════════════
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
-  notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],earningsTargets:[],
+  notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
   founderShares:[],companyInvites:[],priceAdjustments:[],
   priceAdjustments:[],companyMembers:[],founderAllocations:[],flags:[],minutes:[],divApprovals:[],
-  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,earnings_surprise_pct:10,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30}};
+  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10}};
 let SHEETS_URL=null;
+let _realtimeChannels=[];
+
+function subscribeRealtime(){
+  if(!SUPABASE_URL||SUPABASE_URL==='YOUR_SUPABASE_URL')return;
+  // Unsubscribe from any existing channels
+  _realtimeChannels.forEach(ch=>{try{ch.unsubscribe();}catch(e){}});
+  _realtimeChannels=[];
+  const wsUrl=SUPABASE_URL.replace('https://','wss://').replace('http://','ws://');
+  // Use Supabase Realtime REST API via SSE (works without SDK)
+  // Subscribe to key tables via postgres_changes
+  const tables=['jex_companies','jex_trades','jex_announcements','jex_notifications',
+    'jex_halts','jex_session','jex_limit_orders','jex_news','jex_votes'];
+  // Build a single channel for all tables
+  const channelName='jex-realtime-'+Math.random().toString(36).slice(2);
+  const eventsUrl=SUPABASE_URL+'/realtime/v1/websocket?vsn=1.0.0&apikey='+SUPABASE_ANON_KEY;
+  
+  try{
+    const ws=new WebSocket(eventsUrl);
+    _realtimeChannels.push({unsubscribe:()=>ws.close()});
+    let heartbeatInterval;
+    
+    ws.onopen=()=>{
+      // Join channel
+      ws.send(JSON.stringify({topic:'realtime:*',event:'phx_join',payload:{config:{broadcast:{self:false},presence:{key:''},postgres_changes:tables.map(t=>({event:'*',schema:'public',table:t}))}},ref:'1'}));
+      // Heartbeat every 30s
+      heartbeatInterval=setInterval(()=>{
+        if(ws.readyState===1)ws.send(JSON.stringify({topic:'phoenix',event:'heartbeat',payload:{},ref:'hb'}));
+      },30000);
+      console.log('JEX Realtime connected');
+    };
+    
+    ws.onmessage=e=>{
+      try{
+        const msg=JSON.parse(e.data);
+        if(msg.event==='postgres_changes'||msg.event==='INSERT'||msg.event==='UPDATE'||msg.event==='DELETE'){
+          const {table,new:newRow,old:oldRow,eventType}=msg.payload?.data||msg.payload||{};
+          handleRealtimeUpdate(table,eventType||msg.event,newRow,oldRow);
+        }
+      }catch(err){}
+    };
+    
+    ws.onerror=()=>{ clearInterval(heartbeatInterval); };
+    ws.onclose=()=>{ 
+      clearInterval(heartbeatInterval);
+      // Reconnect after 5s if still logged in
+      if(UI.userId)setTimeout(subscribeRealtime,5000);
+    };
+  }catch(e){
+    console.warn('Realtime unavailable, falling back to polling:',e.message);
+  }
+}
+
+function handleRealtimeUpdate(table,event,newRow,oldRow){
+  if(!UI.userId)return;
+  const wasRendering=false;
+  switch(table){
+    case 'jex_companies':
+      if(newRow){const idx=DB.companies.findIndex(c=>c.id===newRow.id);if(idx>=0)Object.assign(DB.companies[idx],newRow);else if(event==='INSERT')DB.companies.push(newRow);}
+      break;
+    case 'jex_trades':
+      if(newRow&&!DB.trades.find(t=>t.id===newRow.id))DB.trades.unshift(newRow);
+      break;
+    case 'jex_announcements':
+      if(newRow&&event==='INSERT'){if(!DB.announcements.find(a=>a.id===newRow.id))DB.announcements.unshift(newRow);}
+      else if(event==='DELETE'&&oldRow)DB.announcements=DB.announcements.filter(a=>a.id!==oldRow.id);
+      break;
+    case 'jex_notifications':
+      if(newRow&&newRow.user_id===UI.userId&&!DB.notifications.find(n=>n.id===newRow.id)){
+        DB.notifications.unshift(newRow);
+        // Show a brief toast for new notifications
+        if(!newRow.read)toast(newRow.message.slice(0,80));
+      }
+      break;
+    case 'jex_halts':
+      if(event==='INSERT'&&newRow&&!DB.halts.find(h=>h.ticker===newRow.ticker))DB.halts.push(newRow);
+      else if(event==='DELETE'&&oldRow)DB.halts=DB.halts.filter(h=>h.ticker!==oldRow.ticker);
+      break;
+    case 'jex_session':
+      if(newRow)Object.assign(DB.session,newRow);
+      break;
+    case 'jex_limit_orders':
+      if(newRow){const idx=DB.limitOrders.findIndex(o=>o.id===newRow.id);if(idx>=0)Object.assign(DB.limitOrders[idx],newRow);else if(event==='INSERT')DB.limitOrders.push(newRow);}
+      break;
+    case 'jex_news':
+      if(newRow&&event==='INSERT'&&!DB.news.find(n=>n.id===newRow.id))DB.news.unshift(newRow);
+      else if(event==='DELETE'&&oldRow)DB.news=DB.news.filter(n=>n.id!==oldRow.id);
+      break;
+    case 'jex_votes':
+      if(newRow){const idx=DB.votes.findIndex(v=>v.id===newRow.id);if(idx>=0)Object.assign(DB.votes[idx],newRow);else if(event==='INSERT')DB.votes.unshift(newRow);}
+      break;
+  }
+  // Debounced re-render
+  if(!userIsFillingForm()){
+    clearTimeout(window._rtRenderTimer);
+    window._rtRenderTimer=setTimeout(()=>render(),150);
+  }
+}
 let _lastActivity=Date.now();
 const INACTIVITY_TIMEOUT=30*60*1000; // 30 minutes
 function resetActivityTimer(){_lastActivity=Date.now();}
@@ -364,7 +461,7 @@ setInterval(checkInactivity,60000); // check every minute
 document.addEventListener('mousemove',resetActivityTimer,{passive:true});
 document.addEventListener('keydown',resetActivityTimer,{passive:true});
 document.addEventListener('touchstart',resetActivityTimer,{passive:true});
-let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''}};
+let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
@@ -389,7 +486,7 @@ async function loadAll(){
   // ── Phase 2: everything else in parallel ───────────────
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
     activity,shareClasses,classApps,votes,ballots,notifications,
-    priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,
+    priceAlerts,nwHistory,companyMembers,founderAllocations,
     priceAdjustments,flags,minutes,divApprovals,stopLossOrders]=await Promise.all([
     sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_news','order=created_at.desc&limit=50'),
@@ -407,7 +504,6 @@ async function loadAll(){
     sb.get('jex_notifications','order=created_at.desc&limit=50'),
     sb.get('jex_price_alerts','order=created_at.asc'),
     sb.get('jex_nw_history','order=created_at.desc&limit=200'),
-    sb.get('jex_earnings_targets','order=created_at.desc'),
     sb.get('jex_company_members','order=created_at.asc'),
     sb.get('jex_founder_allocations','order=created_at.desc'),
     sb.get('jex_price_adjustments','order=created_at.desc&limit=50'),
@@ -419,7 +515,7 @@ async function loadAll(){
   Object.assign(DB,{pending,news,ipoApps,dilApps,
     trades,dividends,buybacks,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,
-    priceAlerts,nwHistory,earningsTargets,companyMembers,founderAllocations,
+    priceAlerts,nwHistory,companyMembers,founderAllocations,
     priceAdjustments,flags,minutes,divApprovals,stopLossOrders});
   render(); // re-render with full data
 }
@@ -436,6 +532,52 @@ const validEmail=e=>e&&e.includes('@')&&e.includes('.');
 const cu=()=>DB.users.find(u=>u.id===UI.userId)||null;
 const getUser=id=>DB.users.find(u=>u.id===id);
 const getCo=t=>DB.companies.find(c=>c.ticker===t);
+// ── CSV Export ────────────────────────────────────────────
+function exportCSV(filename,rows,headers){
+  const escape=v=>{
+    if(v==null)return'';
+    const s=String(v).replace(/\n/g,' ');
+    return s.includes(',')||s.includes('"')?'"'+s.replace(/"/g,'""')+'"':s;
+  };
+  const lines=[headers.map(escape).join(','),...rows.map(r=>headers.map(h=>escape(r[h]||r[headers.indexOf(h)])).join(','))];
+  const blob=new Blob([lines.join('\n')],{type:'text/csv'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;a.click();
+}
+function exportTableCSV(table){
+  const now=new Date().toISOString().slice(0,10);
+  switch(table){
+    case 'trades':
+      exportCSV('jex-trades-'+now+'.csv',DB.trades,['ts','ticker','qty','price','buyer_id','seller_id','type']);
+      break;
+    case 'dividends':
+      exportCSV('jex-dividends-'+now+'.csv',DB.dividends.map(d=>({ts:d.ts,company:d.company_name,ticker:d.ticker,per_share:d.per_share,total:d.total,recipients:(d.payouts||[]).length,note:d.note})),['ts','company','ticker','per_share','total','recipients','note']);
+      break;
+    case 'activity':
+      exportCSV('jex-activity-'+now+'.csv',DB.activity,['ts','type','description','amount']);
+      break;
+    case 'balances':{
+      const rows=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({name:u.name,email:u.email,cash:u.cash,portfolio:pv(u),net_worth:nw(u),dividends:divRec(u)}));
+      exportCSV('jex-balances-'+now+'.csv',rows,['name','email','cash','portfolio','net_worth','dividends']);
+      break;}
+    case 'votes':
+      exportCSV('jex-votes-'+now+'.csv',DB.votes.map(v=>({ts:v.ts,ticker:v.parent_ticker,question:v.question,option1:v.option1,option2:v.option2,status:v.status,ballots:DB.ballots.filter(b=>b.vote_id===v.id).length})),['ts','ticker','question','option1','option2','status','ballots']);
+      break;
+    case 'orders':
+      exportCSV('jex-orders-'+now+'.csv',DB.limitOrders,['ts','ticker','side','qty','limit_price','status','order_type','filled_price','filled_at']);
+      break;
+    case 'holdings':{
+      const rows2=[];
+      DB.users.filter(u=>u.role==='student'&&u.status==='approved').forEach(u=>{
+        Object.entries(u.holdings||{}).forEach(([ticker,qty])=>{
+          const co=getCo(ticker);rows2.push({student:u.name,ticker,qty,price:co?co.price:0,value:co?qty*co.price:0});
+        });
+      });
+      exportCSV('jex-holdings-'+now+'.csv',rows2,['student','ticker','qty','price','value']);
+      break;}
+    default:toast('Unknown table: '+table);
+  }
+  toast('Exported '+table+'.csv');
+}
 function copyTicker(ticker){
   navigator.clipboard?.writeText(ticker).then(()=>toast('Copied: '+ticker)).catch(()=>toast(ticker+' (copy manually)'));
 }
@@ -450,7 +592,66 @@ async function creditCompanyCash(ticker,amount){
 }
 const uid=()=>'id_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
 const ts=()=>new Date().toLocaleTimeString();
-const isoNow=()=>new Date().toISOString(); // full timestamp for price history
+const isoNow=()=>new Date().toISOString();
+
+// ── OHLCV (Open/High/Low/Close/Volume) computation ───────
+function computeOHLCV(priceHistory,trades,ticker,periodMs=5*60*1000){
+  if(!priceHistory||priceHistory.length<2)return[];
+  const pts=priceHistory.filter(p=>p.t&&p.t.includes('T'));
+  if(pts.length<2)return[];
+  const tickerTrades=(trades||[]).filter(t=>t.ticker===ticker&&t.ts&&t.ts.includes('T')||t.ts&&t.ts.length>10);
+  const start=new Date(pts[0].t).getTime();
+  const end=new Date(pts[pts.length-1].t).getTime();
+  const candles=[];
+  for(let t=start;t<end;t+=periodMs){
+    const ptsInPeriod=pts.filter(p=>{const pt=new Date(p.t).getTime();return pt>=t&&pt<t+periodMs;});
+    if(!ptsInPeriod.length)continue;
+    const prices=ptsInPeriod.map(p=>p.p);
+    const vol=tickerTrades.filter(tr=>{const tt=new Date(tr.ts).getTime();return tt>=t&&tt<t+periodMs;}).reduce((s,tr)=>s+tr.qty,0);
+    candles.push({
+      t:new Date(t).toISOString(),
+      o:ptsInPeriod[0].p,
+      h:Math.max(...prices),
+      l:Math.min(...prices),
+      c:ptsInPeriod[ptsInPeriod.length-1].p,
+      v:vol
+    });
+  }
+  return candles;
+}
+
+// ── Build candlestick chart (requires Chart.js financial plugin) ──
+function buildCandleChart(canvasId,co,period='5m'){
+  const canvas=document.getElementById(canvasId);if(!canvas||!window.Chart)return;
+  if(charts[canvasId])try{charts[canvasId].destroy();delete charts[canvasId];}catch(e){}
+  const periodMs={'1m':60000,'5m':300000,'15m':900000,'1h':3600000}[period]||300000;
+  const candles=computeOHLCV(co.price_history,DB.trades,co.ticker,periodMs);
+  if(candles.length<2){buildChart(canvasId,co);return;} // fallback to line
+  // Use line chart with OHLC encoded as dataset
+  const isUp=candles[candles.length-1].c>=candles[0].o;
+  const lc=isUp?'#00c896':'#ff4d6a';
+  charts[canvasId]=new Chart(canvas,{
+    type:'bar',
+    data:{
+      labels:candles.map(c=>new Date(c.t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})),
+      datasets:[
+        {label:'High-Low',data:candles.map(c=>c.h-c.l),backgroundColor:'rgba(136,150,168,0.3)',borderColor:'rgba(136,150,168,0.5)',type:'bar',stack:'hl'},
+        {label:'Open-Close',data:candles.map(c=>Math.abs(c.c-c.o)),backgroundColor:candles.map(c=>c.c>=c.o?'rgba(0,200,150,0.8)':'rgba(255,77,106,0.8)'),type:'bar',stack:'oc'},
+        {label:'Close',data:candles.map(c=>c.c),type:'line',borderColor:lc,borderWidth:1.5,pointRadius:0,yAxisID:'y',fill:false,tension:0}
+      ]
+    },
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{
+        label:ctx=>{const c=candles[ctx.dataIndex];return c?`O:${fmt(c.o)} H:${fmt(c.h)} L:${fmt(c.l)} C:${fmt(c.c)} V:${c.v}`:'';},
+        title:ctx=>ctx[0]?.label||''
+      }}},
+      scales:{
+        x:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:6,autoSkip:true}},
+        y:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#4a5568',font:{size:10},callback:v=>fmt(v)},beginAtZero:false,stacked:false}
+      }
+    }
+  });
+} // full timestamp for price history
 const priceChg=c=>{if(!c.price_history||c.price_history.length<2)return 0;const f=c.price_history[0].p,l=c.price_history[c.price_history.length-1].p;return f?((l-f)/f*100):0;};
 const holdings=u=>u.holdings||{};const shorts=u=>u.shorts||{};const watchlist=u=>u.watchlist||[];
 const pv=u=>Object.entries(holdings(u)).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0);
@@ -462,6 +663,21 @@ const isChairman=u=>u?.role==='chairman'||u?.role==='president';
 const isPresident=u=>u?.role==='president';
 const isSecTre=u=>(u?.role==='secretary'||u?.role==='treasurer');
 const isOpen=()=>DB.session.status==='open';
+// ── Client-side rate limiting ────────────────────────────
+const _orderTimestamps={};
+function checkRateLimit(userId){
+  const limit=DB.session.order_rate_limit||10; // orders per minute
+  const now=Date.now();
+  if(!_orderTimestamps[userId])_orderTimestamps[userId]=[];
+  // Remove timestamps older than 1 minute
+  _orderTimestamps[userId]=_orderTimestamps[userId].filter(t=>now-t<60000);
+  if(_orderTimestamps[userId].length>=limit){
+    toast('Rate limit: max '+limit+' orders per minute. Wait a moment.');
+    return false;
+  }
+  _orderTimestamps[userId].push(now);
+  return true;
+}
 const requireOpen=(ticker=null)=>{
   if(!isOpen()){toast('Trading is '+DB.session.status+'. Wait for the session to open.');return false;}
   if(ticker&&isHalted(ticker)){toast(ticker+' trading is currently halted.');return false;}
@@ -557,6 +773,89 @@ async function saveCBPct(){
   await saveSession({circuit_breaker_pct:pct});
   toast('Circuit breaker set to '+pct+'%');render();
 }
+// ═══════════════════════════════════════════════
+// SNAPSHOT / RESTORE
+// ═══════════════════════════════════════════════
+async function saveSnapshot(label){
+  if(!label||label.trim().length<2)return toast('Enter a snapshot name');
+  const snap={
+    id:uid(),
+    label:label.trim(),
+    ts:ts(),
+    created_by:cu()?.name||'Admin',
+    data:{
+      users:DB.users.map(u=>({...u})),
+      companies:DB.companies.map(c=>({...c})),
+      trades:DB.trades.slice(-200),
+      limitOrders:DB.limitOrders,
+      stopLossOrders:DB.stopLossOrders,
+      session:{...DB.session},
+    }
+  };
+  // Store in jex_activity with type='snapshot' and description as JSON
+  const rec={id:snap.id,type:'snapshot',description:JSON.stringify({label:snap.label,created_by:snap.created_by,data:snap.data}),amount:null,ts:snap.ts};
+  await sb.post('jex_activity',rec);
+  DB.activity.unshift(rec);
+  toast('✓ Snapshot saved: '+label.trim());render();
+}
+async function listSnapshots(){
+  return DB.activity.filter(a=>a.type==='snapshot').map(a=>{
+    try{const d=JSON.parse(a.description);return{id:a.id,label:d.label,ts:a.ts,created_by:d.created_by};}
+    catch{return null;}
+  }).filter(Boolean);
+}
+async function restoreSnapshot(activityId){
+  if(!confirm('Restore this snapshot? All current holdings, prices, and cash will be overwritten.'))return;
+  const rec=DB.activity.find(a=>a.id===activityId);if(!rec)return toast('Snapshot not found');
+  let snap;
+  try{snap=JSON.parse(rec.description);}catch{return toast('Snapshot data is corrupted');}
+  const data=snap.data;
+  toast('Restoring snapshot...');
+  // Restore users (cash and holdings)
+  for(const u of(data.users||[])){
+    const local=getUser(u.id);
+    if(local){
+      await updateUser(u.id,{cash:u.cash,holdings:u.holdings||{},shorts:u.shorts||{}});
+    }
+  }
+  // Restore company prices and shares_avail
+  for(const c of(data.companies||[])){
+    const local=getCo(c.ticker);
+    if(local){
+      await updateCo(c.ticker,{price:c.price,shares_avail:c.shares_avail,price_history:c.price_history||[]});
+    }
+  }
+  // Clear active orders and stop-loss
+  await sb.del('jex_limit_orders',"status=in.(open,after_hours)");
+  DB.limitOrders=DB.limitOrders.filter(o=>o.status!=='open'&&o.status!=='after_hours');
+  await sb.del('jex_stop_loss',"status=eq.active");
+  DB.stopLossOrders=[];
+  await logActivity('snapshot','Snapshot restored: '+snap.label,{userId:cu()?.id,userName:cu()?.name});
+  await loadAll();
+  toast('✓ Snapshot restored: '+snap.label);
+}
+function renderSnapshotTab(){
+  const snaps=DB.activity.filter(a=>a.type==='snapshot').map(a=>{
+    try{const d=JSON.parse(a.description);return{id:a.id,label:d.label,ts:a.ts,created_by:d.created_by};}
+    catch{return null;}
+  }).filter(Boolean);
+  return`<div class="card"><div class="section-title">Save snapshot</div>
+    <div class="ibox ibox-blue">Saves current prices, holdings, and cash for all users. Restore any snapshot to roll back the exchange state — useful for practice rounds.</div>
+    <div class="row" style="align-items:flex-end">
+      <div class="frow" style="flex:1"><label class="flabel">Snapshot name</label><input type="text" id="snap-label" placeholder="e.g. Practice round 1 — end of day"></div>
+      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="saveSnapshot(get('snap-label')?.value)">💾 Save snapshot</button></div>
+    </div>
+  </div>
+  ${snaps.length?`<div class="card"><div class="section-title">Saved snapshots (${snaps.length})</div>
+    <table><thead><tr><th>Name</th><th>Created by</th><th>Time</th><th></th></tr></thead>
+    <tbody>${snaps.map(s=>`<tr>
+      <td style="font-weight:500">${s.label}</td>
+      <td style="color:var(--text2)">${s.created_by}</td>
+      <td style="color:var(--text2)">${s.ts}</td>
+      <td><button class="btn btn-sm btn-warning" onclick="restoreSnapshot('${s.id}')">⏪ Restore</button></td>
+    </tr>`).join('')}</tbody></table>
+  </div>`:''}`;
+}
 async function generateSessionRecap(u){
   const students=DB.users.filter(s=>s.role==='student'&&s.status==='approved');
   const listed=DB.companies.filter(c=>c.status==='listed');
@@ -586,12 +885,24 @@ async function generateSessionRecap(u){
   DB.minutes=DB.minutes||[];
   DB.minutes.unshift(rec);
 }
-async function saveSurprisePct(){
-  const pct=parseInt(document.getElementById('surprise-pct')?.value);
-  if(isNaN(pct)||pct<1||pct>50)return toast('Enter a value between 1 and 50');
-  await saveSession({earnings_surprise_pct:pct});
-  toast('Earnings surprise set to '+pct+'%');render();
+async function reassignClassroom(){
+  const uid2=get('reassign-uid')?.value;
+  const cid=(get('reassign-cid')?.value||'').trim().toLowerCase().replace(/ +/g,'-');
+  if(!uid2)return toast('Select a user');
+  await sb.patch('jex_users','id=eq.'+uid2,{classroom_id:cid||null});
+  const u=getUser(uid2);if(u)u.classroom_id=cid||null;
+  toast('Reassigned to classroom: '+(cid||'default'));render();
 }
+// Filter data by classroom if set
+function classroomUsers(){
+  if(!UI.classroomFilter)return DB.users;
+  return DB.users.filter(u=>u.classroom_id===UI.classroomFilter||isAdmin(u));
+}
+function classroomCompanies(){
+  if(!UI.classroomFilter)return DB.companies;
+  return DB.companies.filter(c=>{const owner=getUser(c.owner_id);return !owner||owner.classroom_id===UI.classroomFilter;});
+}
+
 async function saveSheetsUrl(url){
   url=(url||'').trim();
   SHEETS_URL=url||null;
@@ -750,7 +1061,7 @@ document.addEventListener('keydown',function(e){
 const SECURITY_QUESTIONS=['What is the name of your first pet?','What city were you born in?','What is your mother\'s maiden name?','What was the name of your first school?','What is your favourite book?','What was the make of your first car?','What is your oldest sibling\'s middle name?','What street did you grow up on?'];
 function secQSelect(prefix){return `<select id="${prefix}-secq"><option value="">— Select a question —</option>${SECURITY_QUESTIONS.map(q=>`<option value="${q}">${q}</option>`).join('')}</select>`;}
 
-async function registerStudent(name,email,pw,secQ,secA){
+async function registerStudent(name,email,pw,secQ,secA,classroomId=''){
   if(!name||name.trim().length<2)return toast('Enter a valid name');
   if(!validEmail(email))return toast('Enter a valid email');
   if(!pw||pw.length<4)return toast('Password must be at least 4 characters');
@@ -771,7 +1082,7 @@ async function registerCompany(name,email,pw,desc,secQ,secA){
   if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
-  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),ts:ts()};
+  const rec={id:uid(),name:n,email:norm(email),password:pw,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),classroom_id:null,ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';render();
 }
@@ -789,7 +1100,7 @@ async function approveReg(id,startCash){
   toast(r.name+' approved with '+fmt(startCash));render();
 }
 async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');render();}
-function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u||u.password!==pw)return toast('Wrong password');UI.userId=uid2;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}render();}
+function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u||u.password!==pw)return toast('Wrong password');UI.userId=uid2;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}subscribeRealtime();render();}
 function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.tradePage=0;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
 async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;if(u.password!==cur)return toast('Current password incorrect');if(!nw2||nw2.length<4)return toast('Min 4 characters');if(nw2!==conf)return toast('Passwords do not match');await sb.patch('jex_users','id=eq.'+uid2,{password:nw2});u.password=nw2;toast('Password changed');render();}
 async function adminResetPw(uid2,pw){if(!pw||pw.length<4)return toast('Min 4 characters');const u=getUser(uid2);if(!u)return;await sb.patch('jex_users','id=eq.'+uid2,{password:pw});u.password=pw;toast(u.name+"'s password reset");render();}
@@ -820,11 +1131,15 @@ async function deleteNews(id){
 // ── Activity log ────────────────────────────────────────
 async function logActivity(type,description,extras={}){
   try{
-    const rec={id:uid(),type,description,ticker:extras.ticker||null,user_id:extras.userId||null,user_name:extras.userName||null,amount:extras.amount||null,ts:ts()};
+    // Hash-chain for audit trail
+    const prev=DB.activity.find(a=>a.type!=='snapshot');
+    const prevHash=prev?prev.entry_hash||prev.id:'genesis';
+    const rec={id:uid(),type,description,ticker:extras.ticker||null,user_id:extras.userId||null,user_name:extras.userName||null,amount:extras.amount||null,ts:ts(),prev_hash:prevHash};
+    const content=prevHash+type+description+(extras.amount||'')+(rec.ts||'');
+    rec.entry_hash=btoa(encodeURIComponent(content.slice(0,50))).slice(-8);
     await sb.post('jex_activity',rec);
     DB.activity.unshift(rec);
     if(DB.activity.length>200)DB.activity=DB.activity.slice(0,200);
-    // Push latest 10 activity items to Sheets
     pushToSheets('activity',{items:DB.activity.slice(0,10)});
   }catch(e){console.warn('Activity log failed:',e);}
 }
@@ -1211,6 +1526,157 @@ function flagForm(targetId,targetName,targetType){
 }
 
 // ═══════════════════════════════════════════════
+// ANALYTICS
+// ═══════════════════════════════════════════════
+
+// Sharpe ratio: (avg session return - risk free) / stddev of returns
+// Uses NW history snapshots for the student
+function calcSharpe(userId){
+  const snaps=DB.nwHistory.filter(n=>n.user_id===userId).sort((a,b)=>a.ts>b.ts?1:-1);
+  if(snaps.length<3)return null;
+  const returns=[];
+  for(let i=1;i<snaps.length;i++){
+    const prev=snaps[i-1].nw,curr=snaps[i].nw;
+    if(prev>0)returns.push((curr-prev)/prev);
+  }
+  if(returns.length<2)return null;
+  const avg=returns.reduce((s,r)=>s+r,0)/returns.length;
+  const variance=returns.reduce((s,r)=>s+Math.pow(r-avg,2),0)/returns.length;
+  const stddev=Math.sqrt(variance);
+  if(stddev===0)return null;
+  // Annualised-ish: risk-free=0 for classroom context
+  return Math.round((avg/stddev)*100)/100;
+}
+
+// Portfolio beta vs exchange index (market-cap weighted)
+function calcBeta(userId){
+  const u=getUser(userId);if(!u)return null;
+  const listed=DB.companies.filter(c=>c.status==='listed');
+  if(!listed.length)return null;
+  // Build market returns from company price histories
+  const mktPrices=listed.map(c=>c.price_history||[]);
+  if(!mktPrices.length)return null;
+  // Simplified: beta = correlation of portfolio value to total market cap change
+  const mySnaps=DB.nwHistory.filter(n=>n.user_id===userId).sort((a,b)=>a.ts>b.ts?1:-1).slice(-20);
+  if(mySnaps.length<4)return null;
+  const myRet=[];for(let i=1;i<mySnaps.length;i++){const p=mySnaps[i-1].nw,c=mySnaps[i].nw;myRet.push(p>0?(c-p)/p:0);}
+  // Market return proxy: avg of all company price changes
+  const mktRet=listed.map(co=>{
+    const h=co.price_history||[];if(h.length<2)return 0;
+    return(h[h.length-1].p-h[0].p)/h[0].p;
+  });
+  const avgMktRet=mktRet.reduce((s,r)=>s+r,0)/Math.max(mktRet.length,1);
+  const avgMyRet=myRet.reduce((s,r)=>s+r,0)/Math.max(myRet.length,1);
+  if(Math.abs(avgMktRet)<0.0001)return 1;
+  return Math.round((avgMyRet/avgMktRet)*100)/100;
+}
+
+// Value at Risk (95% confidence, 1-session horizon)
+// Based on historical portfolio price moves
+function calcVaR(userId){
+  const u=getUser(userId);if(!u)return null;
+  const mySnaps=DB.nwHistory.filter(n=>n.user_id===userId).sort((a,b)=>a.ts>b.ts?1:-1).slice(-30);
+  if(mySnaps.length<5)return null;
+  const losses=[];
+  for(let i=1;i<mySnaps.length;i++){
+    const change=mySnaps[i].nw-mySnaps[i-1].nw;
+    if(change<0)losses.push(Math.abs(change));
+  }
+  if(!losses.length)return 0;
+  losses.sort((a,b)=>b-a);
+  const idx=Math.floor(losses.length*0.05);
+  return Math.round(losses[idx]||losses[0]);
+}
+
+// P&L Attribution: break down gains by source
+function calcPnLAttribution(userId){
+  const u=getUser(userId);if(!u)return null;
+  const myTrades=DB.trades.filter(t=>t.buyer_id===userId||t.seller_id===userId);
+  let tradePnL=0,divPnL=0,shortPnL=0,unrealised=0;
+  // Dividends
+  DB.dividends.forEach(d=>{
+    const p=(d.payouts||[]).find(x=>x.userId===userId);
+    if(p)divPnL+=p.payout;
+  });
+  // Trade P&L (realised sells minus cost basis)
+  const bought={},boughtVal={};
+  myTrades.forEach(t=>{
+    if(t.buyer_id===userId){bought[t.ticker]=(bought[t.ticker]||0)+t.qty;boughtVal[t.ticker]=(boughtVal[t.ticker]||0)+t.qty*t.price;}
+    else{const avgCost=boughtVal[t.ticker]&&bought[t.ticker]?boughtVal[t.ticker]/bought[t.ticker]:t.price;tradePnL+=t.qty*(t.price-avgCost);}
+  });
+  // Unrealised
+  Object.entries(holdings(u)).forEach(([ticker,qty])=>{
+    const co=getCo(ticker);if(!co||!qty)return;
+    const avgCost=boughtVal[ticker]&&bought[ticker]?boughtVal[ticker]/bought[ticker]:co.price;
+    unrealised+=qty*(co.price-avgCost);
+  });
+  // Short P&L
+  const sh=shorts(u)||{};
+  Object.entries(sh).forEach(([ticker,pos])=>{
+    const co=getCo(ticker);if(!co||!pos)return;
+    shortPnL+=(pos.avgPrice-co.price)*pos.qty;
+  });
+  return{
+    trade:Math.round(tradePnL*100)/100,
+    dividend:Math.round(divPnL*100)/100,
+    short:Math.round(shortPnL*100)/100,
+    unrealised:Math.round(unrealised*100)/100,
+    total:Math.round((tradePnL+divPnL+shortPnL+unrealised)*100)/100
+  };
+}
+
+// Company health score (0-100)
+function calcHealthScore(co){
+  if(!co||co.status!=='listed')return null;
+  let score=50;
+  // Price stability (less volatile = better, up to +20)
+  const h=co.price_history||[];
+  if(h.length>=2){
+    const prices=h.slice(-10).map(p=>p.p);
+    const avg=prices.reduce((s,p)=>s+p,0)/prices.length;
+    const vola=prices.reduce((s,p)=>s+Math.abs(p-avg)/avg,0)/prices.length;
+    score+=Math.max(-20,Math.min(20,Math.round((0.1-vola)*200)));
+  }
+  // Cash position (more cash = healthier, up to +15)
+  const owner=getUser(co.owner_id);
+  if(owner){
+    const cashRatio=owner.cash/(co.price*co.shares||1);
+    score+=Math.min(15,Math.round(cashRatio*30));
+  }
+  // Short interest penalty (high short = risky, up to -15)
+  const totalShorted=DB.users.filter(u=>u.role==='student').reduce((s,u)=>{
+    const sh=u.shorts||{};return s+(sh[co.ticker]?.qty||0);
+  },0);
+  const shortPct=co.shares>0?totalShorted/co.shares:0;
+  score-=Math.min(15,Math.round(shortPct*100));
+  // Dividend consistency (+10 if paid dividends)
+  const divs=DB.dividends.filter(d=>d.ticker===co.ticker);
+  if(divs.length>=2)score+=10;
+  else if(divs.length===1)score+=5;
+
+  return Math.max(0,Math.min(100,Math.round(score)));
+}
+
+// Short squeeze detection
+function checkShortSqueezes(){
+  if(!isOpen())return;
+  DB.companies.filter(c=>c.status==='listed').forEach(co=>{
+    const totalShorted=DB.users.filter(u=>u.role==='student').reduce((s,u)=>{
+      return s+(u.shorts&&u.shorts[co.ticker]?u.shorts[co.ticker].qty:0);
+    },0);
+    const shortPct=co.shares>0?totalShorted/co.shares:0;
+    if(shortPct<0.15)return; // not enough short interest
+    const priceChgPct=priceChg(co)/100;
+    if(priceChgPct>0.1){ // price up 10%+ with high short interest
+      const key='squeeze_'+co.ticker+'_'+new Date().toDateString();
+      if(localStorage.getItem(key))return; // already notified today
+      localStorage.setItem(key,'1');
+      pushNotificationToAll('halt','🔥 Short squeeze alert: '+co.name+' ('+co.ticker+') is up '+Math.round(priceChgPct*100)+'% with '+Math.round(shortPct*100)+'% short interest. Short sellers may be forced to cover.');
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════
 // STOP-LOSS ORDERS
 // ═══════════════════════════════════════════════
 async function placeStopLoss(ticker,triggerPrice){
@@ -1342,44 +1808,9 @@ async function recordSessionOpenPrices(){
 // ═══════════════════════════════════════════════
 // EARNINGS SURPRISE
 // ═══════════════════════════════════════════════
-async function submitEarningsTarget(ticker,targetRev,targetProfit){
-  if(!targetRev||!targetProfit)return toast('Enter both targets');
-  const co=getCo(ticker);if(!co)return;
-  const u=cu();
-  targetRev=parseFloat(targetRev);targetProfit=parseFloat(targetProfit);
-  if(isNaN(targetRev)||isNaN(targetProfit))return toast('Enter valid numbers');
-  if(DB.earningsTargets.find(t=>t.ticker===ticker&&t.status==='pending'))return toast('A target is already pending approval');
-  const rec={id:uid(),ticker,company_name:co.name,target_revenue:targetRev,target_profit:targetProfit,owner_id:u.id,status:'pending',ts:ts()};
-  await sb.post('jex_earnings_targets',rec);
-  DB.earningsTargets.push(rec);
-  toast('Earnings target submitted for approval');render();
-}
-async function reviewEarningsTarget(id,approve){
-  const t=DB.earningsTargets.find(x=>x.id===id);if(!t)return;
-  await sb.patch('jex_earnings_targets','id=eq.'+id,{status:approve?'approved':'rejected'});
-  t.status=approve?'approved':'rejected';
-  toast('Earnings target '+(approve?'approved':'rejected'));render();
-}
-async function applyEarningsSurprise(ticker,actualRev,actualProfit){
-  const target=DB.earningsTargets.find(t=>t.ticker===ticker&&t.status==='approved');
-  if(!target)return; // No approved target = no surprise
-  const co=getCo(ticker);if(!co)return;
-  const surprisePct=DB.session.earnings_surprise_pct||10;
-  const revBeat=actualRev>=target.target_revenue;
-  const profitBeat=actualProfit>=target.target_profit;
-  const bothBeat=revBeat&&profitBeat;
-  const bothMiss=!revBeat&&!profitBeat;
-  if(!bothBeat&&!bothMiss)return; // Mixed result = no auto move
-  const direction=bothBeat?1:-1;
-  const pctChange=direction*(surprisePct/100);
-  const newPrice=Math.max(0.01,Math.round(co.price*(1+pctChange)*100)/100);
-  const newHistory=[...co.price_history,{p:newPrice,t:'Earnings '+(bothBeat?'beat':'miss')}];
-  await updateCo(ticker,{price:newPrice,price_history:newHistory});
-  await pushNotificationToHolders(ticker,'earnings_surprise',(bothBeat?'📈 ':'📉 ')+co.name+' earnings '+(bothBeat?'BEAT':'MISSED')+' targets! Price '+(bothBeat?'jumped':'dropped')+' '+surprisePct+'% to '+fmt(newPrice));
-  await pushNotificationToAll('earnings_surprise',(bothBeat?'📈':'📉')+' '+co.name+' ('+ticker+') earnings '+(bothBeat?'beat':'missed')+' targets — price '+(bothBeat?'+':'-')+surprisePct+'%');
-  await logActivity('earnings_surprise',co.name+' earnings '+(bothBeat?'beat':'missed')+' targets — price '+(bothBeat?'+':'-')+surprisePct+'% to '+fmt(newPrice),{ticker,amount:newPrice-co.price});
-  toast(co.name+' earnings '+(bothBeat?'beat 📈':'miss 📉')+' — price '+(bothBeat?'+':'-')+surprisePct+'%!');
-}
+
+
+
 
 // ═══════════════════════════════════════════════
 // NOTIFICATIONS
@@ -1541,8 +1972,15 @@ async function placeLimitOrder(ticker,side,qty,limitPrice){
   }
   // Queue remainder in order book
   if(remaining>0){
-    const orderType=document.getElementById('limit-order-type')?.value||'gtc';
-  const order={id:uid(),user_id:u.id,ticker,side,qty:remaining,limit_price:limitPrice,status:'open',order_type:orderType,ts:ts()};
+    const orderTypeEl=document.getElementById('limit-order-type');
+  const orderType=orderTypeEl?.value||'gtc';
+  const icebergQtyEl=document.getElementById('limit-iceberg-qty');
+  const icebergQty=orderType==='iceberg'&&icebergQtyEl?parseInt(icebergQtyEl.value)||Math.ceil(remaining/4):null;
+  // Fill-or-Kill: must fill completely now or cancel
+  if(orderType==='fok'){
+    if(remaining>0){toast('Fill-or-Kill: Order could not be fully filled immediately — cancelled.');return;}
+  }
+  const order={id:uid(),user_id:u.id,ticker,side,qty:remaining,limit_price:limitPrice,status:'open',order_type:orderType,iceberg_visible:icebergQty,ts:ts()};
     await sb.post('jex_limit_orders',order);
     DB.limitOrders.push(order);
     await logActivity('limit_order',u.name+' placed limit '+side+' '+remaining+'×'+ticker+' @ '+fmt(limitPrice),{ticker,userId:u.id,userName:u.name,amount:limitPrice});
@@ -1688,7 +2126,7 @@ async function checkLimitOrders(){
     }
   }
 }
-setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();},15000);
+setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();checkShortSqueezes();},15000);
 
 // ═══════════════════════════════════════════════
 // TRADING
@@ -1718,6 +2156,7 @@ async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
 
 async function placeBuy(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(!checkRateLimit(u.id))return;
   if(u.role==='company'&&co.owner_id===u.id)return toast("You can't buy your own company's stock — use Buyback instead.");
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
@@ -1736,6 +2175,7 @@ async function placeBuy(ticker,qty){
 }
 async function placeSell(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(!checkRateLimit(u.id))return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const held=(holdings(u)[ticker])||0;if(held<qty)return toast('You only hold '+held+' shares');
   const np=impactPrice(co,qty,'sell');
@@ -1887,15 +2327,7 @@ async function reviewDilution(id,approve){
   else toast('Dilution rejected');
   render();
 }
-async function postFinancials(ticker,rev,profit,summary){
-  const co=getCo(ticker);if(!co)return;
-  if(!rev||!profit||!summary||summary.trim().length<10)return toast('Fill in all fields');
-  const fins=[{revenue:parseFloat(rev),profit:parseFloat(profit),summary:summary.trim(),ts:ts(),period:'Report '+(co.financials.length+1)},...co.financials];
-  await updateCo(ticker,{financials:fins});
-  await pushNotificationToHolders(ticker,'earnings','📊 '+co.name+' posted earnings: Rev '+fmt(parseFloat(rev))+', Profit '+fmt(parseFloat(profit)));
-  await applyEarningsSurprise(ticker,parseFloat(rev),parseFloat(profit));
-  toast('Financials posted');render();
-}
+
 async function removeUser(uid2){
   const u=getUser(uid2);if(!u)return;
   if(!confirm('Remove '+u.name+'? This cannot be undone.'))return;
@@ -1959,18 +2391,25 @@ async function delistCompany(ticker,silent=false){
 // ═══════════════════════════════════════════════
 // Chart interval state
 const chartIntervals={};
+function setChartType(chartId,type,ticker){
+  UI['chartType_'+chartId]=type;
+  const co=getCo(ticker);
+  if(co)setChartInterval(chartId,chartIntervals[chartId]||'max',co);
+}
 function setChartInterval(canvasId,interval,co){
-  chartIntervals[canvasId]=interval;
+  if(interval)chartIntervals[canvasId]=interval;
   // Destroy just this chart
   if(charts[canvasId])try{charts[canvasId].destroy();delete charts[canvasId];}catch(e){}
   // Update interval bar buttons in-place without full re-render
   const barId='ibar-'+canvasId;
   const bar=document.getElementById(barId);
-  if(bar){
-    bar.innerHTML=buildIntervalButtons(canvasId,co);
-  }
-  // Rebuild this specific chart
-  setTimeout(()=>buildChart(canvasId,co),20);
+  if(bar)bar.innerHTML=buildIntervalButtons(canvasId,co);
+  // Build line or candle chart depending on type
+  const chartType=UI['chartType_'+canvasId]||'line';
+  setTimeout(()=>{
+    if(chartType==='candle')buildCandleChart(canvasId,co);
+    else buildChart(canvasId,co);
+  },20);
 }
 function buildIntervalButtons(canvasId,co){
   const intervals=[['1d','1D'],['5d','5D'],['1m','1M'],['max','Max']];
@@ -2239,7 +2678,8 @@ function renderLogin(){
   if(UI.loginView==='forgot-email'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 1 of 3</div><div class="frow"><label class="flabel">Your email address</label><input type="email" id="forgot-email" placeholder="you@school.edu" onkeydown="if(event.key==='Enter')forgotStep1(get('forgot-email')?.value)"></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep1(get('forgot-email')?.value)">Continue</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${u?.name}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="forgot-pw1" placeholder="New password (min 4 characters)"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="forgot-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw2')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
-  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
+  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Classroom ID (optional)</label><input type="text" id="reg-classroom" placeholder="e.g. period-1 (ask your teacher)"></div>
+<div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 4 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span> — JTED Stock Exchange</div><div class="login-sub">Sign in to your account</div><div class="acct-list">
     ${chairman?acctRow(chairman,'av-ch'):''}
     ${president?acctRow(president,'av-pr'):''}
@@ -2251,7 +2691,7 @@ function renderLogin(){
   </div><div style="display:flex;justify-content:flex-start;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)"><button class="btn btn-sm btn-primary" onclick="UI.loginView='register';render()">Register new account</button></div></div></div>`;
 }
 function switchRegTab(type){document.querySelectorAll('.reg-tab').forEach(t=>t.classList.remove('active'));const tab=get('reg-tab-'+type);if(tab)tab.classList.add('active');get('reg-student-fields').style.display=type==='student'?'':'none';get('reg-company-fields').style.display=type==='company'?'':'none';}
-function doRegister(){const active=document.querySelector('.reg-tab.active');const type=active?.id==='reg-tab-company'?'company':'student';if(type==='student')registerStudent(get('reg-name')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value);else{registerCompany(get('reg-co-name')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value);}}
+function doRegister(){const active=document.querySelector('.reg-tab.active');const type=active?.id==='reg-tab-company'?'company':'student';if(type==='student')registerStudent(get('reg-name')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value,(get('reg-classroom')?.value||'').trim().toLowerCase());else{registerCompany(get('reg-co-name')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value);}}
 
 // ═══════════════════════════════════════════════
 // RENDER: CHROME
@@ -2263,7 +2703,8 @@ function renderTopbar(){
   const bellBtn=u.role==='student'||u.role==='company'?`<button class="logout-btn" style="position:relative;padding:3px 10px" onclick="UI.navTab='notifications';render()">
     🔔${unread?`<span style="position:absolute;top:-4px;right:-4px;background:var(--red);color:white;font-size:10px;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:600">${unread}</span>`:''}
   </button>`:'';
-  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><span>${u.name}</span>${roleBadge(u.role)}${bellBtn}<button class="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">${isLight?'🌙':'☀️'}</button><button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
+  const rtConnected=_realtimeChannels.length>0;
+  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span><span style="font-size:10px;margin-left:8px;color:${rtConnected?'var(--green)':'var(--text3)'}" title="${rtConnected?'Real-time connected':'Polling mode'}">${rtConnected?'●':'○'}</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><span>${u.name}</span>${roleBadge(u.role)}${bellBtn}<button class="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">${isLight?'🌙':'☀️'}</button><button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
 }
 function toggleTheme(){
   document.body.classList.toggle('light-mode');
@@ -2378,7 +2819,7 @@ function renderCompanyPage(parentTicker){
   <div class="tab-row" style="margin-bottom:16px">
     <button class="tab ${tab==='overview'?'active':''}" onclick="UI.companyPageTab='overview';render()">Overview</button>
     <button class="tab ${tab==='trade'?'active':''}" onclick="UI.companyPageTab='trade';render()">${canTrade?'Trade':'Trade'}</button>
-    <button class="tab ${tab==='financials'?'active':''}" onclick="UI.companyPageTab='financials';render()">Financials</button>
+    
     <button class="tab ${tab==='news'?'active':''}" onclick="UI.companyPageTab='news';render()">News ${companyNews.length?'<span class="badge b-amber" style="margin-left:4px">'+companyNews.length+'</span>':''}</button>
     <button class="tab ${tab==='votes'?'active':''}" onclick="UI.companyPageTab='votes';render()">Votes ${companyVotes.filter(v=>v.status==='open').length?'<span class="badge b-green" style="margin-left:4px">'+companyVotes.filter(v=>v.status==='open').length+'</span>':''}</button>
     <button class="tab ${tab==='shareholders'?'active':''}" onclick="UI.companyPageTab='shareholders';render()">Shareholders</button>
@@ -2439,22 +2880,19 @@ function renderCompanyPage(parentTicker){
       const stock=getCo(ticker);if(!stock)return;
       const meta=getClassMeta(ticker);
       const chartId='cp-chart-'+ticker;
-      html+='<div><div style="font-size:12px;font-weight:500;font-family:var(--mono);color:var(--text2);margin-bottom:4px">'+ticker+(meta?' Class '+meta.class:'')+'</div>'
+      const chartType=UI['chartType_'+chartId]||'line';
+      html+='<div><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
+        +'<div style="font-size:12px;font-weight:500;font-family:var(--mono);color:var(--text2)">'+ticker+(meta?' Class '+meta.class:'')+'</div>'
+        +'<div style="display:flex;gap:2px">'
+        +'<button style="font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;border:1px solid '+(chartType==='line'?'var(--blue)':'var(--border2)')+';background:'+(chartType==='line'?'var(--blue)':'transparent')+';color:'+(chartType==='line'?'white':'var(--text2)')+'" onclick="setChartType(&quot;'+chartId+'&quot;,&quot;line&quot;,&quot;'+ticker+'&quot;)">Line</button>'
+        +'<button style="font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;border:1px solid '+(chartType==='candle'?'var(--blue)':'var(--border2)')+';background:'+(chartType==='candle'?'var(--blue)':'transparent')+';color:'+(chartType==='candle'?'white':'var(--text2)')+'" onclick="setChartType(&quot;'+chartId+'&quot;,&quot;candle&quot;,&quot;'+ticker+'&quot;)">Candle</button>'
+        +'</div></div>'
         +buildChartIntervalBar(chartId,stock)
         +'<div style="position:relative;height:140px"><canvas id="'+chartId+'"></canvas></div></div>';
     });
     html+='</div></div>';
 
-    // Latest financials summary
-    if(co.financials&&co.financials.length){
-      const f=co.financials[0];
-      html+='<div class="card"><div class="section-title">Latest earnings — '+f.period+'</div>'
-        +'<div class="grid3" style="margin-bottom:10px">'
-        +'<div class="mcard"><div class="mlabel">Revenue</div><div class="mval" style="font-family:var(--mono)">'+fmt(f.revenue)+'</div></div>'
-        +'<div class="mcard"><div class="mlabel">Profit</div><div class="mval '+(f.profit>=0?'green':'red')+'" style="font-family:var(--mono)">'+fmt(f.profit)+'</div></div>'
-        +'<div class="mcard"><div class="mlabel">Margin</div><div class="mval">'+(f.revenue>0?Math.round((f.profit/f.revenue)*100)+'%':'—')+'</div></div>'
-        +'</div><div style="font-size:13px;color:var(--text2)">'+f.summary+'</div></div>';
-    }
+
   }
 
   else if(tab==='trade'){
@@ -2473,11 +2911,13 @@ function renderCompanyPage(parentTicker){
         if(book.asks.length){
           // Show up to 5 best asks
           book.asks.slice(0,5).forEach(o=>{
+            const displayQty=o.iceberg_visible||o.qty;
+            const isIceberg=o.iceberg_visible&&o.qty>o.iceberg_visible;
             const pct=book.asks[0]?Math.round((o.limit_price/book.asks[0].limit_price)*100):100;
             html+='<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;margin-bottom:3px;border-radius:4px;position:relative;overflow:hidden">'
               +'<div style="position:absolute;right:0;top:0;bottom:0;background:rgba(255,77,106,0.08);width:'+pct+'%"></div>'
               +'<span style="font-family:var(--mono);font-size:13px;font-weight:500;color:var(--red);position:relative">'+fmt(o.limit_price)+'</span>'
-              +'<span style="font-size:12px;color:var(--text2);position:relative">'+o.qty+' shares</span>'
+              +'<span style="font-size:12px;color:var(--text2);position:relative">'+displayQty+(isIceberg?'<span title="Iceberg order"> 🧊</span>':'')+' shares</span>'
               +'</div>';
           });
           if(book.asks.length>5)html+='<div style="font-size:11px;color:var(--text3);padding:2px 8px">+' +(book.asks.length-5)+' more</div>';
@@ -2577,57 +3017,8 @@ function renderCompanyPage(parentTicker){
     }
   }
 
-  else if(tab==='financials'){
-    if(!co.financials||!co.financials.length){html+='<div class="card"><div class="empty">No earnings reports posted yet.</div></div>';}
-    else{
-      html+='<div class="card"><div class="section-title">Earnings reports</div>'
-        +'<table><thead><tr><th>Period</th><th>Revenue</th><th>Profit</th><th>Margin</th><th>Summary</th></tr></thead><tbody>'
-        +co.financials.map(f=>'<tr><td style="color:var(--text2)">'+f.period+'</td><td style="font-family:var(--mono)">'+fmt(f.revenue)+'</td><td style="font-family:var(--mono);color:'+(f.profit>=0?'var(--green)':'var(--red)')+'">'+fmt(f.profit)+'</td><td>'+(f.revenue>0?Math.round((f.profit/f.revenue)*100)+'%':'—')+'</td><td style="font-size:12px;color:var(--text2)">'+f.summary+'</td></tr>').join('')
-        +'</tbody></table></div>';
-    }
-  }
-
-  else if(tab==='news'){
-    if(!companyNews.length){html+='<div class="card"><div class="empty">No news posted yet.</div></div>';}
-    else{html+=companyNews.map(n=>'<div class="news-item"><div class="news-headline">'+n.headline+'</div>'+(n.body?'<div class="news-body">'+n.body+'</div>':'')+'<div class="news-meta"><span class="news-ticker">'+n.ticker+'</span><span>'+n.company_name+'</span><span>'+(n.ts||'')+'</span></div></div>').join('');}
-  }
-
-  else if(tab==='votes'){
-    if(!companyVotes.length){html+='<div class="card"><div class="empty">No votes posted yet.</div></div>';}
-    else{html+=companyVotes.map(v=>renderVoteCard(v,isOwner,isAdmin(u))).join('');}
-  }
-
   else if(tab==='shareholders'){
-    // Fetch fresh user data so new buyers/sellers are shown immediately
-    sb.get('jex_users','role=in.(student,company)&status=eq.approved').then(freshUsers=>{
-      freshUsers.forEach(fu=>{const local=getUser(fu.id);if(local)Object.assign(local,fu);else DB.users.push(fu);});
-      // Rebuild shareholder map with fresh data
-      const freshMap={};
-      allTickers.forEach(t=>{
-        DB.users.filter(u2=>(u2.role==='student'||u2.role==='company')&&(u2.holdings&&u2.holdings[t]||0)>0).forEach(u2=>{
-          if(!freshMap[u2.id])freshMap[u2.id]={name:u2.name,shares:{}};
-          freshMap[u2.id].shares[t]=(u2.holdings&&u2.holdings[t]||0);
-        });
-      });
-      const freshShareholders=Object.values(freshMap);
-      const el=document.getElementById('shareholder-table');
-      if(!el)return;
-      if(!freshShareholders.length){el.innerHTML='<div class="empty">No shareholders yet.</div>';return;}
-      el.innerHTML='<table><thead><tr><th>Holder</th>'
-        +allTickers.map(t=>'<th class="r">'+t+'</th>').join('')
-        +'<th class="r">Total</th><th class="r">Voting power</th></tr></thead><tbody>'
-        +freshShareholders.map(sh=>{
-          const total=Object.values(sh.shares).reduce((s,q)=>s+q,0);
-          const vp=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);
-          return '<tr><td style="font-weight:500">'+sh.name+'</td>'
-            +allTickers.map(t=>'<td class="r" style="font-family:var(--mono)">'+(sh.shares[t]||0)+'</td>').join('')
-            +'<td class="r" style="font-weight:500">'+total+'</td>'
-            +'<td class="r" style="color:var(--amber)">'+vp+'</td></tr>';
-        }).join('')
-        +'</tbody></table>';
-    }).catch(()=>{});
     html+='<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Shareholders <span style="font-size:11px;font-weight:400;color:var(--text2)">Loading fresh data...</span></div><div id="shareholder-table">';
-    // Show cached data immediately while fresh data loads
     if(!shareholders.length){html+='<div class="empty">No shareholders yet.</div>';}
     else{
       html+='<table><thead><tr><th>Holder</th>'
@@ -2643,10 +3034,28 @@ function renderCompanyPage(parentTicker){
         }).join('')
         +'</tbody></table>';
     }
+    // Also trigger async fresh fetch
+    sb.get('jex_users','role=in.(student,company)&status=eq.approved').then(freshUsers=>{
+      freshUsers.forEach(fu=>{const local=getUser(fu.id);if(local)Object.assign(local,fu);else DB.users.push(fu);});
+      const freshMap={};
+      allTickers.forEach(t=>{
+        DB.users.filter(u2=>(u2.role==='student'||u2.role==='company')&&(u2.holdings&&u2.holdings[t]||0)>0).forEach(u2=>{
+          if(!freshMap[u2.id])freshMap[u2.id]={name:u2.name,shares:{}};
+          freshMap[u2.id].shares[t]=(u2.holdings&&u2.holdings[t]||0);
+        });
+      });
+      const el=document.getElementById('shareholder-table');if(!el)return;
+      const freshSh=Object.values(freshMap);
+      if(!freshSh.length){el.innerHTML='<div class="empty">No shareholders yet.</div>';return;}
+      el.innerHTML='<table><thead><tr><th>Holder</th>'
+        +allTickers.map(t=>'<th class="r">'+t+'</th>').join('')
+        +'<th class="r">Total</th><th class="r">Voting power</th></tr></thead><tbody>'
+        +freshSh.map(sh=>{const total=Object.values(sh.shares).reduce((s,q)=>s+q,0);const vp=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);return '<tr><td style="font-weight:500">'+sh.name+'</td>'+allTickers.map(t=>'<td class="r" style="font-family:var(--mono)">'+(sh.shares[t]||0)+'</td>').join('')+'<td class="r" style="font-weight:500">'+total+'</td><td class="r" style="color:var(--amber)">'+vp+'</td></tr>';}).join('')+'</tbody></table>';
+    }).catch(()=>{});
     html+='</div></div>';
   }
 
-  else if(tab==='alerts'&&(u.role==='student'||u.role==='company')){
+  if(tab==='alerts'&&(u.role==='student'||u.role==='company')){
     const myAlerts=DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&!a.triggered);
     const triggeredAlerts=DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&a.triggered);
     html+='<div class="card"><div class="section-title">Set a price alert</div>'
@@ -2708,7 +3117,7 @@ function renderMarket(){
       <tbody>${listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
     const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
-    return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td><td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
+    return`<tr><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td><span style="font-family:var(--mono);font-size:12px;font-weight:600;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
     </div>
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
       +((DB.minutes||[]).filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${m.title}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}</div>`:'')
@@ -2847,7 +3256,21 @@ function renderPortfolio(){
       const val=c.price*q,chg=priceChg(c);
       return '<tr><td><span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></td><td>'+c.name+'</td><td>'+q+'</td><td style="font-family:var(--mono)">'+fmt(c.price)+'</td><td style="font-weight:500;font-family:var(--mono)">'+fmt(val)+'</td><td class="'+(chg>=0?'price-up':'price-down')+'">'+fmtChg(chg)+'</td><td><button class="btn btn-sm" onclick="setTab(&quot;market&quot;);setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Trade</button></td></tr>';
     }).join(''):'<tr><td colspan="7"><div class="empty">No holdings</div></td></tr>';
-    return tabs+`<div class="grid4"><div class="mcard"><div class="mlabel">Cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div><div class="mcard"><div class="mlabel">Portfolio</div><div class="mval" style="font-family:var(--mono)">${fmt(_pv)}</div></div><div class="mcard"><div class="mlabel">Net worth</div><div class="mval ${_nw>=10000?'green':'red'}" style="font-family:var(--mono)">${fmt(_nw)}</div></div><div class="mcard"><div class="mlabel">Dividends received</div><div class="mval green" style="font-family:var(--mono)">${fmt(_divs)}</div></div></div>
+    const _sharpe=calcSharpe(u.id),_beta=calcBeta(u.id),_var=calcVaR(u.id),_pnl=calcPnLAttribution(u.id);
+    const analyticsRow=(_sharpe!=null||_beta!=null||_var!=null)?
+      `<div class="grid4" style="margin-bottom:14px">
+        ${_sharpe!=null?`<div class="mcard"><div class="mlabel">Sharpe ratio</div><div class="mval ${_sharpe>1?'green':_sharpe<0?'red':''}" style="font-size:18px;font-family:var(--mono)">${_sharpe}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">return ÷ risk</div></div>`:''}
+        ${_beta!=null?`<div class="mcard"><div class="mlabel">Portfolio beta</div><div class="mval" style="font-size:18px;font-family:var(--mono)">${_beta}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">vs market</div></div>`:''}
+        ${_var!=null?`<div class="mcard"><div class="mlabel">Value at Risk 95%</div><div class="mval red" style="font-size:18px;font-family:var(--mono)">${fmt(_var)}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">max 1-session loss</div></div>`:''}
+        ${_pnl?`<div class="mcard"><div class="mlabel">Total P&L</div><div class="mval ${_pnl.total>=0?'green':'red'}" style="font-size:18px;font-family:var(--mono)">${_pnl.total>=0?'+':''}${fmt(_pnl.total)}</div></div>`:''}
+      </div>
+      ${_pnl&&(_pnl.trade||_pnl.dividend||_pnl.unrealised)?`<div class="card" style="margin-bottom:14px"><div class="section-title">P&L Attribution</div><div class="grid4">
+        <div class="mcard"><div class="mlabel">Realised trades</div><div class="mval ${_pnl.trade>=0?'green':'red'}" style="font-size:16px;font-family:var(--mono)">${_pnl.trade>=0?'+':''}${fmt(_pnl.trade)}</div></div>
+        <div class="mcard"><div class="mlabel">Unrealised gain</div><div class="mval ${_pnl.unrealised>=0?'green':'red'}" style="font-size:16px;font-family:var(--mono)">${_pnl.unrealised>=0?'+':''}${fmt(_pnl.unrealised)}</div></div>
+        <div class="mcard"><div class="mlabel">Dividends</div><div class="mval green" style="font-size:16px;font-family:var(--mono)">+${fmt(_pnl.dividend)}</div></div>
+        <div class="mcard"><div class="mlabel">Short P&L</div><div class="mval ${_pnl.short>=0?'green':'red'}" style="font-size:16px;font-family:var(--mono)">${_pnl.short>=0?'+':''}${fmt(_pnl.short)}</div></div>
+      </div></div>`:''}` : '';
+    return tabs+`<div class="grid4"><div class="mcard"><div class="mlabel">Cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div><div class="mcard"><div class="mlabel">Portfolio</div><div class="mval" style="font-family:var(--mono)">${fmt(_pv)}</div></div><div class="mcard"><div class="mlabel">Net worth</div><div class="mval ${_nw>=10000?'green':'red'}" style="font-family:var(--mono)">${fmt(_nw)}</div></div><div class="mcard"><div class="mlabel">Dividends received</div><div class="mval green" style="font-family:var(--mono)">${fmt(_divs)}</div></div></div>${analyticsRow}
     <div class="card"><div class="section-title">Holdings</div><table><thead><tr><th>Ticker</th><th>Company</th><th>Shares</th><th>Price</th><th>Value</th><th>P&L</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
@@ -3336,17 +3759,7 @@ function renderNewsPage(){
   return renderCompanyNewsTab(co,myNews);
 }
 
-function renderFinancials(co){
-  const myTarget=DB.earningsTargets.find(t=>t.ticker===co.ticker&&t.status!=='rejected');
-  const surprisePct=DB.session.earnings_surprise_pct||10;
-  return`<div class="card"><div class="section-title">Post earnings report</div>
-    ${myTarget&&myTarget.status==='approved'?`<div class="ibox ibox-amber">Approved earnings target — Rev: <strong>${fmt(myTarget.target_revenue)}</strong> · Profit: <strong>${fmt(myTarget.target_profit)}</strong>. If you beat both, stock jumps +${surprisePct}%. If you miss both, it drops -${surprisePct}%.</div>`:''}
-    ${myTarget&&myTarget.status==='pending'?`<div class="ibox ibox-blue">Earnings target pending approval.</div>`:''}
-    <div class="row"><div class="frow" style="flex:1"><label class="flabel">Revenue ($)</label><input type="number" id="fin-rev" placeholder="50000" min="0"></div><div class="frow" style="flex:1"><label class="flabel">Profit ($)</label><input type="number" id="fin-profit" placeholder="12000"></div></div><div class="frow"><label class="flabel">Summary (public)</label><textarea id="fin-sum" rows="2" placeholder="Strong Q1 driven by..."></textarea></div><button class="btn btn-primary" onclick="postFinancials('${co.ticker}',get('fin-rev')?.value,get('fin-profit')?.value,get('fin-sum')?.value)">Post report</button></div>
-    ${!myTarget||myTarget.status==='rejected'?`<div class="card"><div class="section-title">Propose an earnings target</div>
-    <div class="ibox ibox-purple">Submit a revenue and profit target to the Chairman. If approved, beating or missing both will auto-move your stock price ${surprisePct}% when you post earnings.</div>
-    <div class="row"><div class="frow" style="flex:1"><label class="flabel">Revenue target ($)</label><input type="number" id="et-rev" placeholder="50000" min="0"></div><div class="frow" style="flex:1"><label class="flabel">Profit target ($)</label><input type="number" id="et-profit" placeholder="12000"></div></div>
-    <button class="btn btn-warning" onclick="submitEarningsTarget('${co.ticker}',get('et-rev')?.value,get('et-profit')?.value)">Submit target</button></div>`:''}${co.financials&&co.financials.length?`<div class="card"><div class="section-title">Past reports</div><table><thead><tr><th>Period</th><th>Revenue</th><th>Profit</th><th>Margin</th><th>Summary</th></tr></thead><tbody>${co.financials.map(f=>`<tr><td style="color:var(--text2)">${f.period}</td><td style="font-family:var(--mono)">${fmt(f.revenue)}</td><td style="font-family:var(--mono);color:${f.profit>=0?'var(--green)':'var(--red)'}">${fmt(f.profit)}</td><td>${f.revenue>0?Math.round((f.profit/f.revenue)*100)+'%':'—'}</td><td style="font-size:12px;color:var(--text2)">${f.summary}</td></tr>`).join('')}</tbody></table></div>`:''}`;}
+
 function renderDivTab(co,myDivs){
   const owner=cu();
   const allT=getCompanyTickers(co.ticker);
@@ -3450,7 +3863,7 @@ function renderAdmin(){
   const sectreTabs=u.role==='secretary'?secretaryTabs:[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
   const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags']];
   const openFlags=(DB.flags||[]).filter(f=>f.status==='open').length;
-  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['earnings','Earnings targets'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags']];
+  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['snapshots','Snapshots']];
   const treasurerTabs=[['balances','Balances'],['cashflow','Cash flow'],['dividends_audit','Dividend audit'],['price_adj_log','Price adjustments'],['budget_warnings','Budget warnings'],['activity','Activity log']];
   const tabs=(chair||isPresident(u))?chairmanTabs:u.role==='compliance_officer'?complianceTabs:u.role==='treasurer'?treasurerTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
@@ -3466,6 +3879,7 @@ function renderAdmin(){
   :UI.adminTab==='users'?renderAdminUsers(students,companies)
   :UI.adminTab==='dashboard'?renderAdminDashboard()
   :UI.adminTab==='flags'?renderAdminFlags()
+  :UI.adminTab==='snapshots'?renderSnapshotTab()
   :UI.adminTab==='minutes'?renderAdminMinutes()
   :UI.adminTab==='notices'?renderAdminOfficialNotices()
   :UI.adminTab==='shareholders'?renderAdminShareholderRegistry()
@@ -3475,7 +3889,6 @@ function renderAdmin(){
   :UI.adminTab==='price_adj_log'?renderTreasurerPriceLog()
   :UI.adminTab==='budget_warnings'?renderTreasurerBudgetWarnings()
   :UI.adminTab==='founder_allocs'?renderAdminFounderAllocs()
-  :UI.adminTab==='earnings'?renderAdminEarnings()
   :UI.adminTab==='news'?renderAdminNews()
   :UI.adminTab==='announcements'?renderAdminAnnouncements()
   :UI.adminTab==='classes'?renderAdminClasses()
@@ -3527,8 +3940,15 @@ function renderAdminSession(students){
       <div class="frow" style="flex:1"><label class="flabel">Halt a stock</label>
         <select id="halt-ticker"><option value="">— Select ticker —</option>${DB.companies.map(c=>`<option value="${c.ticker}">${c.ticker} — ${c.name}</option>`).join('')}</select>
       </div>
-      <div class="frow" style="flex:2"><label class="flabel">Reason</label><input type="text" id="halt-reason" placeholder="e.g. Under investigation for false earnings"></div>
+      <div class="frow" style="flex:2"><label class="flabel">Reason</label><input type="text" id="halt-reason" placeholder="e.g. Suspected market manipulation"></div>
       <div style="padding-bottom:12px"><button class="btn btn-danger" onclick="haltStock(get('halt-ticker')?.value,get('halt-reason')?.value)">Halt</button></div>
+    </div>
+    <div class="divider"></div>
+    <div class="section-title" style="font-size:13px;margin-bottom:10px">Order rate limit</div>
+    <div class="ibox ibox-blue" style="margin-bottom:10px">Max orders per student per minute. Prevents spam-clicking. Default: 10.</div>
+    <div class="row" style="align-items:flex-end;margin-bottom:14px">
+      <div class="frow" style="flex:1"><label class="flabel">Orders per minute per student</label><input type="number" id="rate-limit" value="${DB.session.order_rate_limit||10}" min="1" max="60" step="1"></div>
+      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="saveSession({order_rate_limit:parseInt(get('rate-limit')?.value)||10}).then(()=>toast('Rate limit updated'))">Save</button></div>
     </div>
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">Treasurer thresholds</div>
@@ -3545,6 +3965,30 @@ function renderAdminSession(students){
           <input type="number" id="div-threshold-session" value="${DB.session.dividend_approval_threshold||1000}" min="0" step="100" style="flex:1">
           <button class="btn btn-sm btn-primary" onclick="saveDivThresholdFrom('div-threshold-session')">Save</button>
         </div>
+      </div>
+    </div>
+    <div class="divider"></div>
+    <div class="section-title" style="font-size:13px;margin-bottom:10px">🏫 Classroom management</div>
+    <div class="ibox ibox-blue" style="margin-bottom:10px">Multiple classrooms can share one JEX instance. Each student and company is assigned a classroom ID. Use this to run period 1 and period 2 separately on the same database.</div>
+    <div style="margin-bottom:10px">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:6px">Active classrooms: ${[...new Set(DB.users.filter(u=>u.classroom_id).map(u=>u.classroom_id))].join(', ')||'None (all users in default classroom)'}</div>
+      <div class="row" style="align-items:flex-end;gap:8px">
+        <div class="frow" style="flex:1"><label class="flabel">View / filter classroom</label>
+          <select onchange="UI.classroomFilter=this.value||null;render()">
+            <option value="">All classrooms</option>
+            ${[...new Set(DB.users.filter(u=>u.classroom_id).map(u=>u.classroom_id))].map(c=>`<option value="${c}" ${UI.classroomFilter===c?'selected':''}>${c}</option>`).join('')}
+          </select>
+        </div>
+        <div class="frow" style="flex:1"><label class="flabel">Reassign user to classroom</label>
+          <select id="reassign-uid">
+            <option value="">— Select user —</option>
+            ${DB.users.filter(u=>!isAdmin(u)).map(u=>`<option value="${u.id}">${u.name} (${u.classroom_id||'default'})</option>`).join('')}
+          </select>
+        </div>
+        <div class="frow" style="flex:1"><label class="flabel">New classroom ID</label>
+          <input type="text" id="reassign-cid" placeholder="e.g. period-2">
+        </div>
+        <div><button class="btn btn-primary btn-sm" onclick="reassignClassroom()">Assign</button></div>
       </div>
     </div>
     <div class="divider"></div>
@@ -3891,32 +4335,7 @@ function renderAdminFounderAllocs(){
         +'</tr>').join('')
       +'</tbody></table></div>':'');
 }
-function renderAdminEarnings(){
-  const pending=DB.earningsTargets.filter(t=>t.status==='pending');
-  const approved=DB.earningsTargets.filter(t=>t.status==='approved');
-  const rejected=DB.earningsTargets.filter(t=>t.status==='rejected');
-  const surprisePct=DB.session.earnings_surprise_pct||10;
-  return`<div class="card"><div class="section-title">Earnings surprise settings</div>
-    <div class="ibox ibox-blue">When a company posts earnings that <strong>beat both targets</strong>, their stock auto-jumps ${surprisePct}%. If they <strong>miss both</strong>, it drops ${surprisePct}%. Mixed results have no auto-effect.</div>
-    <div class="row" style="align-items:flex-end">
-      <div class="frow" style="flex:1"><label class="flabel">Price impact % on beat/miss</label><input type="number" id="surprise-pct" value="${surprisePct}" min="1" max="50" step="1"></div>
-      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="saveSurprisePct()">Save</button></div>
-    </div>
-  </div>
-  <div class="card"><div class="section-title">Pending earnings targets ${pending.length?`<span class="badge b-amber" style="margin-left:4px">${pending.length}</span>`:''}</div>
-    ${pending.length?pending.map(t=>`<div class="app-row"><div class="app-info">
-      <div class="app-name">${t.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></div>
-      <div class="app-meta">Revenue target: ${fmt(t.target_revenue)} · Profit target: ${fmt(t.target_profit)} · ${t.ts}</div>
-    </div><div class="btn-row">
-      <button class="btn btn-success btn-sm" onclick="reviewEarningsTarget('${t.id}',true)">Approve</button>
-      <button class="btn btn-danger btn-sm" onclick="reviewEarningsTarget('${t.id}',false)">Reject</button>
-    </div></div>`).join(''):'<div class="empty">No pending targets</div>'}
-  </div>
-  ${approved.length?`<div class="card"><div class="section-title">Approved targets</div>
-    <table><thead><tr><th>Company</th><th>Ticker</th><th>Rev target</th><th>Profit target</th><th>Submitted</th></tr></thead>
-    <tbody>${approved.map(t=>`<tr><td>${t.company_name}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.target_revenue)}</td><td style="font-family:var(--mono)">${fmt(t.target_profit)}</td><td style="color:var(--text2)">${t.ts}</td></tr>`).join('')}
-    </tbody></table></div>`:''}`;
-}
+
 
 function renderAdminNews(){
   const items=DB.news;
@@ -3974,7 +4393,7 @@ function renderNotifications(){
   const notifs=myNotifications();
   const u=cu();
   const unread=notifs.filter(n=>!n.read).length;
-  const typeIcon={dividend:'💰',news:'📰',earnings:'📊',vote:'🗳️',vote_closed:'🗳️',ipo:'🏢',session:'🟢',limit_fill:'⚡',after_hours:'⏰',halt:'⚠️',resume:'✅',invite:'🤝',founder_alloc:'🎁',price_adj:'📊',earnings_surprise:'📈'};
+  const typeIcon={dividend:'💰',news:'📰',vote:'🗳️',vote_closed:'🗳️',ipo:'🏢',session:'🟢',limit_fill:'⚡',after_hours:'⏰',halt:'⚠️',resume:'✅',invite:'🤝',founder_alloc:'🎁',price_adj:'📊'};
   return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
     Notifications ${unread?`<span class="badge b-red">${unread} unread</span>`:''}
     ${notifs.length?`<button class="btn btn-sm" onclick="markAllRead()">Mark all read</button>`:''}
@@ -4439,22 +4858,13 @@ function renderTreasurerBudgetWarnings(){
   const divThreshold=DB.session.dividend_approval_threshold||1000;
   const listed=DB.companies.filter(c=>c.status==='listed');
   const warnings=listed.map(co=>{const owner=getUser(co.owner_id);return{co,owner,cash:owner?owner.cash:0};}).filter(w=>w.cash<threshold).sort((a,b)=>a.cash-b.cash);
+  const u=cu();
+    const canEditThresholds=isChairman(u);
+  const thresholdForm=canEditThresholds
+    ?'<div class="grid2"><div class="frow"><label class="flabel">Low cash warning threshold ($)</label><div class="row" style="align-items:flex-end"><input type="number" id="bw-threshold" value="'+threshold+'" min="0" step="100" style="flex:1"><button class="btn btn-primary btn-sm" onclick="saveBudgetThreshold()">Save</button></div></div><div class="frow"><label class="flabel">Dividend approval required above ($)</label><div class="row" style="align-items:flex-end"><input type="number" id="div-threshold" value="'+divThreshold+'" min="0" step="100" style="flex:1"><button class="btn btn-primary btn-sm" onclick="saveDivThreshold()">Save</button></div></div></div>'
+    :'<div class="ibox ibox-blue">Low cash warning: <strong>'+fmt(threshold)+'</strong> · Dividend approval above: <strong>'+fmt(divThreshold)+'</strong><br><span style="font-size:11px;color:var(--text3)">Thresholds set by Chairman / President in Admin → Session</span></div>';
   return`<div class="card"><div class="section-title">Budget warning settings</div>
-    <div class="grid2">
-      <div class="frow"><label class="flabel">Low cash warning threshold ($)</label>
-        <div class="row" style="align-items:flex-end">
-          <input type="number" id="bw-threshold" value="${threshold}" min="0" step="100" style="flex:1">
-          <button class="btn btn-primary btn-sm" onclick="saveBudgetThreshold()">Save</button>
-        </div>
-      </div>
-      <div class="frow"><label class="flabel">Dividend approval required above ($)</label>
-        <div class="row" style="align-items:flex-end">
-          <input type="number" id="div-threshold" value="${divThreshold}" min="0" step="100" style="flex:1">
-          <button class="btn btn-primary btn-sm" onclick="saveDivThreshold()">Save</button>
-        </div>
-      </div>
-    </div>
-  </div>
+    ${thresholdForm} </div>
   <div class="card"><div class="section-title">Low cash warnings ${warnings.length?`<span class="badge b-red">${warnings.length}</span>`:''}</div>
     ${warnings.length?`<div class="ibox ibox-amber">These companies have less than ${fmt(threshold)} in cash. Consider alerting the Chairman.</div>
     ${warnings.map(w=>`<div class="app-row">
@@ -4492,7 +4902,7 @@ function renderActivityLog(){
     if(f.user&&!(a.user_name||'').toLowerCase().includes(f.user.toLowerCase())&&!(a.description||'').toLowerCase().includes(f.user.toLowerCase()))return false;
     return true;
   });
-  return`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Activity log <span style="font-size:12px;font-weight:400;color:var(--text2)">${filtered.length} of ${DB.activity.length} events</span></div>
+  return`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Activity log <div style="display:flex;align-items:center;gap:8px"><span style="font-size:12px;font-weight:400;color:var(--text2)">${filtered.length} of ${DB.activity.length} events</span><button class="btn btn-sm" onclick="exportTableCSV('activity')">📥 CSV</button></div></div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;margin-bottom:12px;align-items:end">
       <div><label class="flabel">Filter by type</label>
         <select onchange="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.type=this.value;render()">
@@ -4508,12 +4918,13 @@ function renderActivityLog(){
       </div>
       <div><button class="btn btn-sm" onclick="UI.activityFilter={};render()">Clear</button></div>
     </div>
-    ${filtered.length?`<table><thead><tr><th>Time</th><th>Type</th><th>Description</th><th>Amount</th></tr></thead>
+    ${filtered.length?`<table><thead><tr><th>Time</th><th>Type</th><th>Description</th><th>Amount</th><th title="Audit hash">🔒</th></tr></thead>
     <tbody>${filtered.slice(0,100).map(a=>`<tr>
       <td style="color:var(--text2);white-space:nowrap">${a.ts||''}</td>
       <td><span class="badge ${typeBadge[a.type]||'b-gray'}">${typeIcon[a.type]||''} ${a.type}</span></td>
       <td style="font-size:12px">${a.description}</td>
       <td style="font-family:var(--mono);font-size:12px">${a.amount!=null?(a.amount>=0?'+':'')+fmt(a.amount):''}</td>
+      <td title="${a.entry_hash||'no hash'}" style="font-size:9px;color:var(--text3);font-family:var(--mono)">${a.entry_hash?a.entry_hash.slice(-4):'—'}</td>
     </tr>`).join('')}</tbody></table>`:'<div class="empty">No matching activity</div>'}
   </div>`;
 }
@@ -4596,7 +5007,7 @@ function generatePDFReport(){
   </tbody></table>
   <h2>Dividends Paid (${DB.dividends.length})</h2>
   <table><thead><tr><th>Time</th><th>Company</th><th>Per share</th><th>Total</th><th>Recipients</th><th>Note</th></tr></thead><tbody>
-  ${DB.dividends.map(d=>`<tr><td>${d.ts}</td><td>${d.company_name} (${d.ticker})</td><td>$${d.per_share.toFixed(2)}</td><td class="up">$${d.total.toFixed(2)}</td><td>${(d.payouts||[]).length}</td><td>${d.note}</td></tr>`).join('')}
+  ${DB.dividends.m(d=>`<tr><td>${d.ts}</td><td>${d.company_name} (${d.ticker})</td><td>$${d.per_share.toFixed(2)}</td><td class="up">$${d.total.toFixed(2)}</td><td>${(d.payouts||[]).length}</td><td>${d.note}</td></tr>`).join('')}
   </tbody></table>
   <h2>Company News (${DB.news.length})</h2>
   <table><thead><tr><th>Time</th><th>Company</th><th>Headline</th><th>Body</th></tr></thead><tbody>
@@ -4698,6 +5109,7 @@ async function boot(){
       if(u){
         UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'apply':'market';
         if(isAdmin(u))UI.adminTab='dashboard';
+        subscribeRealtime();
       } else {
         UI.userId=null; // session invalid
       }
