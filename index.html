@@ -886,12 +886,21 @@ async function generateSessionRecap(u){
   DB.minutes.unshift(rec);
 }
 async function reassignClassroom(){
-  const uid2=get('reassign-uid')?.value;
-  const cid=(get('reassign-cid')?.value||'').trim().toLowerCase().replace(/ +/g,'-');
-  if(!uid2)return toast('Select a user');
-  await sb.patch('jex_users','id=eq.'+uid2,{classroom_id:cid||null});
-  const u=getUser(uid2);if(u)u.classroom_id=cid||null;
-  toast('Reassigned to classroom: '+(cid||'default'));render();
+  const rawId=get('reassign-uid')?.value;
+  const cid=(get('reassign-cid')?.value||'').trim().toLowerCase().replace(/ +/g,'-')||null;
+  if(!rawId)return toast('Select a user or company');
+  if(rawId.startsWith('co:')){
+    // It's a company
+    const coId=rawId.slice(3);
+    await sb.patch('jex_companies','id=eq.'+coId,{classroom_id:cid});
+    const co=DB.companies.find(c=>c.id===coId);if(co)co.classroom_id=cid;
+    toast('Company reassigned to classroom: '+(cid||'default'));
+  } else {
+    await sb.patch('jex_users','id=eq.'+rawId,{classroom_id:cid});
+    const u=getUser(rawId);if(u)u.classroom_id=cid;
+    toast('User reassigned to classroom: '+(cid||'default'));
+  }
+  render();
 }
 // Filter data by classroom if set
 function classroomUsers(){
@@ -900,7 +909,12 @@ function classroomUsers(){
 }
 function classroomCompanies(){
   if(!UI.classroomFilter)return DB.companies;
-  return DB.companies.filter(c=>{const owner=getUser(c.owner_id);return !owner||owner.classroom_id===UI.classroomFilter;});
+  // Match on company's own classroom_id, OR fall back to owner's classroom_id
+  return DB.companies.filter(c=>{
+    if(c.classroom_id)return c.classroom_id===UI.classroomFilter;
+    const owner=getUser(c.owner_id);
+    return !owner||owner.classroom_id===UI.classroomFilter;
+  });
 }
 
 async function saveSheetsUrl(url){
@@ -1854,46 +1868,89 @@ function myNotifications(){
 // ═══════════════════════════════════════════════
 function isHalted(ticker){return !!DB.halts.find(h=>h.ticker===ticker);}
 async function resetExchange(){
-  if(!confirm('⚠️ FULL RESET\n\nThis will permanently delete:\n• All students and company accounts\n• All listed stocks and price history\n• All trades, orders, dividends, news, votes\n• All notifications and activity logs\n\nChairman, President, Secretary, Treasurer and Compliance Officer accounts will be kept.\n\nThis CANNOT be undone. Are you sure?'))return;
-  if(!confirm('Last chance — are you absolutely sure you want to reset JEX?'))return;
+  const keepAdmins=await new Promise(resolve=>{
+    if(confirm('⚠️ FULL RESET\n\nEverything will be deleted:\n• All students and company accounts\n• All listed companies and price history\n• All trades, orders, dividends\n• All votes, news, announcements\n• All notifications, flags, minutes\n• All activity logs, price adjustments\n• All limit orders, stop-loss orders\n• All founder allocations, share classes\n• All snapshots and NW history\n\nChairman, President, Secretary, Treasurer and Compliance Officer accounts will be KEPT.\n\nThis CANNOT be undone.'))resolve(true);
+    else resolve(false);
+  });
+  if(!keepAdmins)return;
+  if(!confirm('Last chance — type OK in the next box to confirm total reset.'))return;
+  const code=prompt('Type RESET to confirm:');
+  if(code!=='RESET')return toast('Reset cancelled — you must type RESET');
+
   toast('Resetting... please wait');
   try{
-    // Clear all trading tables
+    // Step 1: Wipe all transactional tables in parallel
     await Promise.all([
       sb.del('jex_trades','id=gt.0'),
       sb.del('jex_dividends','id=neq.x'),
       sb.del('jex_buybacks','id=neq.x'),
       sb.del('jex_limit_orders','id=neq.x'),
+      sb.del('jex_stop_loss','id=neq.x'),
       sb.del('jex_notifications','id=neq.x'),
       sb.del('jex_halts','ticker=neq.x'),
       sb.del('jex_activity','id=neq.x'),
       sb.del('jex_news','id=neq.x'),
       sb.del('jex_announcements','id=neq.x'),
+      sb.del('jex_minutes','id=neq.x'),
+      sb.del('jex_flags','id=neq.x'),
+      sb.del('jex_pending','id=neq.x'),
+    ]);
+    // Step 2: Wipe IPO/dilution/share class related tables
+    await Promise.all([
       sb.del('jex_ipo_applications','id=neq.x'),
       sb.del('jex_dilution_applications','id=neq.x'),
       sb.del('jex_share_classes','id=neq.x'),
       sb.del('jex_class_applications','id=neq.x'),
-      sb.del('jex_pending','id=neq.x'),
+      sb.del('jex_founder_allocations','id=neq.x'),
+      sb.del('jex_company_members','id=neq.x'),
+      sb.del('jex_price_adjustments','id=neq.x'),
+      sb.del('jex_price_alerts','id=neq.x'),
+      sb.del('jex_nw_history','id=neq.x'),
+      sb.del('jex_dividend_approvals','id=neq.x'),
     ]);
-    // Delete votes (cascades to ballots)
+    // Step 3: Wipe votes (cascades to ballots automatically)
     await sb.del('jex_votes','id=neq.x');
-    await sb.del('jex_stop_loss','id=neq.x');
-    await sb.del('jex_minutes','id=neq.x');
-    // Delete companies
+    // Step 4: Wipe companies
     await sb.del('jex_companies','id=neq.x');
-    // Delete students and company users only
+    // Step 5: Delete ALL non-admin users (students and companies)
     await sb.del('jex_users','role=in.(student,company)');
-    // Reset session
-    await sb.patch('jex_session','id=eq.1',{status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,sheets_url:null});
-    // Reload everything
-    await loadAll();
+    // Step 6: Reset officer cash to 0 (admins keep their accounts but not cash)
+    const adminRoles=['chairman','president','secretary','treasurer','compliance_officer'];
+    for(const role of adminRoles){
+      await sb.patch('jex_users','role=eq.'+role,{cash:0,holdings:{},shorts:{},watchlist:[]});
+    }
+    // Step 7: Reset session to clean defaults
+    await sb.patch('jex_session','id=eq.1',{
+      status:'closed',label:'Session closed',
+      ends_at:null,scheduled_open:null,scheduled_close:null,
+      sheets_url:null,session_open_prices:{},
+      circuit_breaker_pct:20,price_band_pct:30,
+      earnings_surprise_pct:10,order_rate_limit:10,
+      budget_warning_threshold:500,dividend_approval_threshold:1000,
+      starting_cash:10000
+    });
+    // Step 8: Clear local DB state entirely
+    DB.users=DB.users.filter(u=>adminRoles.includes(u.role));
+    DB.users.forEach(u=>{u.cash=0;u.holdings={};u.shorts={};u.watchlist=[];});
+    DB.companies=[];DB.trades=[];DB.dividends=[];DB.buybacks=[];
+    DB.limitOrders=[];DB.stopLossOrders=[];DB.notifications=[];
+    DB.halts=[];DB.activity=[];DB.news=[];DB.announcements=[];
+    DB.minutes=[];DB.flags=[];DB.pending=[];DB.ipoApps=[];
+    DB.dilApps=[];DB.shareClasses=[];DB.classApps=[];
+    DB.founderAllocations=[];DB.companyMembers=[];
+    DB.priceAdjustments=[];DB.priceAlerts=[];
+    DB.nwHistory=[];DB.votes=[];DB.ballots=[];
+    DB.divApprovals=[];
     SHEETS_URL=null;
-    UI.navTab='admin';UI.adminTab='session';UI.companyPage=null;
-    toast('✓ JEX reset complete — clean slate');
+    // Step 9: Reload fresh from DB
+    await loadAll();
+    UI.navTab='admin';UI.adminTab='dashboard';UI.companyPage=null;UI.tradePage=0;
+    toast('✓ JEX fully reset — clean slate');
     render();
   }catch(err){
     toast('Reset failed: '+err.message);
     console.error('Reset error:',err);
+    await loadAll();render();
   }
 }
 async function haltStock(ticker,reason){
@@ -2299,7 +2356,8 @@ async function reviewIPO(id,approve){
   await sb.patch('jex_ipo_applications','id=eq.'+id,{status:approve?'approved':'rejected'});
   app.status=approve?'approved':'rejected';
   if(approve){
-    const co={id:uid(),name:app.name,ticker:app.ticker,price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',owner_id:app.user_id,description:app.description,price_history:[{p:app.price,t:'IPO'}],financials:[]};
+    const owner=getUser(app.user_id);
+    const co={id:uid(),name:app.name,ticker:app.ticker,price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',owner_id:app.user_id,description:app.description,price_history:[{p:app.price,t:'IPO'}],financials:[],classroom_id:owner?.classroom_id||null};
     await sb.post('jex_companies',co);DB.companies.push(co);
     await updateUser(app.user_id,{app_status:'approved'});
     await logActivity('ipo',app.name+' ('+app.ticker+') listed on JEX @ '+fmt(app.price),{ticker:app.ticker,userId:app.user_id,amount:app.price});
@@ -3974,18 +4032,26 @@ function renderAdminSession(students){
     <div class="section-title" style="font-size:13px;margin-bottom:10px">🏫 Classroom management</div>
     <div class="ibox ibox-blue" style="margin-bottom:10px">Multiple classrooms can share one JEX instance. Each student and company is assigned a classroom ID. Use this to run period 1 and period 2 separately on the same database.</div>
     <div style="margin-bottom:10px">
-      <div style="font-size:12px;color:var(--text2);margin-bottom:6px">Active classrooms: ${[...new Set(DB.users.filter(u=>u.classroom_id).map(u=>u.classroom_id))].join(', ')||'None (all users in default classroom)'}</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:6px">Active classrooms: ${[...new Set([
+  ...DB.users.filter(u=>u.classroom_id).map(u=>u.classroom_id),
+  ...DB.companies.filter(c=>c.classroom_id).map(c=>c.classroom_id)
+])].join(', ')||'None (all in default classroom)'}</div>
       <div class="row" style="align-items:flex-end;gap:8px">
         <div class="frow" style="flex:1"><label class="flabel">View / filter classroom</label>
           <select onchange="UI.classroomFilter=this.value||null;render()">
             <option value="">All classrooms</option>
-            ${[...new Set(DB.users.filter(u=>u.classroom_id).map(u=>u.classroom_id))].map(c=>`<option value="${c}" ${UI.classroomFilter===c?'selected':''}>${c}</option>`).join('')}
+            ${[...new Set([
+              ...DB.users.filter(u=>u.classroom_id).map(u=>u.classroom_id),
+              ...DB.companies.filter(c=>c.classroom_id).map(c=>c.classroom_id)
+            ])].map(c=>`<option value="${c}" ${UI.classroomFilter===c?'selected':''}>${c}</option>`).join('')}
           </select>
         </div>
         <div class="frow" style="flex:1"><label class="flabel">Reassign user to classroom</label>
           <select id="reassign-uid">
             <option value="">— Select user —</option>
-            ${DB.users.filter(u=>!isAdmin(u)).map(u=>`<option value="${u.id}">${u.name} (${u.classroom_id||'default'})</option>`).join('')}
+            ${[...DB.users.filter(u=>!isAdmin(u)).map(u=>({id:u.id,name:u.name,type:'user',cid:u.classroom_id})),
+              ...DB.companies.filter(c=>c.status==='listed').map(c=>({id:'co:'+c.id,name:c.name+' [company]',type:'company',cid:c.classroom_id}))
+            ].map(x=>`<option value="${x.id}">${x.name} (${x.cid||'default'})</option>`).join('')}
           </select>
         </div>
         <div class="frow" style="flex:1"><label class="flabel">New classroom ID</label>
@@ -3997,7 +4063,7 @@ function renderAdminSession(students){
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:6px;color:var(--red)">⚠ Danger zone</div>
     <div class="ibox ibox-red" style="margin-bottom:10px">Resets JEX to a clean slate. Deletes all students, companies, trades, and data. Chairman, President, Secretary, Treasurer and Compliance Officer accounts are kept.</div>
-    <button class="btn btn-danger" onclick="resetExchange()">Reset JEX</button>
+    <button class="btn btn-danger" onclick="resetExchange()">🗑 Reset JEX (full wipe)</button>
   </div>`;
 }
 function renderAdminRegs(pS,pC,students,companies){
@@ -4361,7 +4427,7 @@ function renderAdminNews(){
 function renderAdminListed(){
   return`<div class="card"><div class="section-title">Listed companies</div>
     <table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th>Change</th><th>Shares</th><th>Owner</th><th></th></tr></thead>
-    <tbody>${DB.companies.map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${c.name}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${owner?owner.name:'—'}</td><td><button class="btn btn-sm btn-danger" onclick="delistCompany('${c.ticker}')">Delist</button></td></tr>`;}).join('')||`<tr><td colspan="7"><div class="empty">No listed companies</div></td></tr>`}
+    <tbody>${DB.companies.map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${c.name}${c.classroom_id?` <span class="badge b-gray" style="font-size:10px">${c.classroom_id}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${owner?owner.name:'—'}</td><td><button class="btn btn-sm btn-danger" onclick="delistCompany('${c.ticker}')">Delist</button></td></tr>`;}).join('')||`<tr><td colspan="7"><div class="empty">No listed companies</div></td></tr>`}
     </tbody></table></div>
   <div class="card"><div class="section-title">Price adjustment</div>
     <div class="ibox ibox-amber">Apply a percentage boost or drop to any stock. Notifies all holders. Use positive % to boost, negative % to drop (e.g. -10 = drop 10%).</div>
