@@ -420,7 +420,9 @@ function handleRealtimeUpdate(table,event,newRow,oldRow){
       if(newRow&&newRow.user_id===UI.userId&&!DB.notifications.find(n=>n.id===newRow.id)){
         DB.notifications.unshift(newRow);
         // Show a brief toast for new notifications
-        if(!newRow.read)toast(newRow.message.slice(0,80));
+        // Only toast for important notifications (dividends, halts, squeeze alerts)
+      const importantTypes=['dividend','halt','stop_loss','earnings_surprise','flag'];
+      if(!newRow.read&&importantTypes.includes(newRow.type))toast(newRow.message.slice(0,80));
       }
       break;
     case 'jex_halts':
@@ -597,8 +599,15 @@ const isoNow=()=>new Date().toISOString();
 // ── OHLCV (Open/High/Low/Close/Volume) computation ───────
 function computeOHLCV(priceHistory,trades,ticker,periodMs=5*60*1000){
   if(!priceHistory||priceHistory.length<2)return[];
-  const pts=priceHistory.filter(p=>p.t&&p.t.includes('T'));
-  if(pts.length<2)return[];
+  // Accept both ISO timestamps and plain price points
+  const pts=priceHistory.filter(p=>p.t&&(p.t.includes('T')||p.t.includes('-')));
+  if(pts.length<2){
+    // Fallback: treat all points as evenly spaced
+    const prices=priceHistory.map(p=>p.p);
+    if(prices.length<2)return[];
+    const synth=[{t:new Date(Date.now()-prices.length*periodMs).toISOString(),o:prices[0],h:Math.max(...prices),l:Math.min(...prices),c:prices[prices.length-1],v:0}];
+    return synth;
+  }
   const tickerTrades=(trades||[]).filter(t=>t.ticker===ticker&&t.ts&&t.ts.includes('T')||t.ts&&t.ts.length>10);
   const start=new Date(pts[0].t).getTime();
   const end=new Date(pts[pts.length-1].t).getTime();
@@ -620,37 +629,81 @@ function computeOHLCV(priceHistory,trades,ticker,periodMs=5*60*1000){
   return candles;
 }
 
-// ── Build candlestick chart (requires Chart.js financial plugin) ──
-function buildCandleChart(canvasId,co,period='5m'){
+// ── Build candlestick chart using floating bars (no plugin needed) ──
+function buildCandleChart(canvasId,co){
+  destroyChart(canvasId);
   const canvas=document.getElementById(canvasId);if(!canvas||!window.Chart)return;
-  if(charts[canvasId])try{charts[canvasId].destroy();delete charts[canvasId];}catch(e){}
-  const periodMs={'1m':60000,'5m':300000,'15m':900000,'1h':3600000}[period]||300000;
+  // Use the current interval setting
+  const interval=chartIntervals[canvasId]||'max';
+  const periodMs={'1d':5*60000,'5d':30*60000,'1m':4*3600000,'max':3600000}[interval]||3600000;
   const candles=computeOHLCV(co.price_history,DB.trades,co.ticker,periodMs);
-  if(candles.length<2){buildChart(canvasId,co);return;} // fallback to line
-  // Use line chart with OHLC encoded as dataset
-  const isUp=candles[candles.length-1].c>=candles[0].o;
-  const lc=isUp?'#00c896':'#ff4d6a';
-  charts[canvasId]=new Chart(canvas,{
-    type:'bar',
-    data:{
-      labels:candles.map(c=>new Date(c.t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})),
-      datasets:[
-        {label:'High-Low',data:candles.map(c=>c.h-c.l),backgroundColor:'rgba(136,150,168,0.3)',borderColor:'rgba(136,150,168,0.5)',type:'bar',stack:'hl'},
-        {label:'Open-Close',data:candles.map(c=>Math.abs(c.c-c.o)),backgroundColor:candles.map(c=>c.c>=c.o?'rgba(0,200,150,0.8)':'rgba(255,77,106,0.8)'),type:'bar',stack:'oc'},
-        {label:'Close',data:candles.map(c=>c.c),type:'line',borderColor:lc,borderWidth:1.5,pointRadius:0,yAxisID:'y',fill:false,tension:0}
-      ]
-    },
-    options:{responsive:true,maintainAspectRatio:false,
-      plugins:{legend:{display:false},tooltip:{callbacks:{
-        label:ctx=>{const c=candles[ctx.dataIndex];return c?`O:${fmt(c.o)} H:${fmt(c.h)} L:${fmt(c.l)} C:${fmt(c.c)} V:${c.v}`:'';},
-        title:ctx=>ctx[0]?.label||''
-      }}},
-      scales:{
-        x:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:6,autoSkip:true}},
-        y:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#4a5568',font:{size:10},callback:v=>fmt(v)},beginAtZero:false,stacked:false}
-      }
-    }
+  if(!candles||candles.length<2){buildChart(canvasId,co);return;} // fallback to line
+
+  // Floating bar approach: each bar is [low, high] with open/close as separate overlay
+  const labels=candles.map(c=>{
+    try{return new Date(c.t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}
+    catch(e){return c.t||'';}
   });
+  const wickData=candles.map(c=>([c.l,c.h]));
+  const bodyData=candles.map(c=>([Math.min(c.o,c.c),Math.max(c.o,c.c)]));
+  const bodyColors=candles.map(c=>c.c>=c.o?'rgba(0,200,150,0.85)':'rgba(255,77,106,0.85)');
+  const wickColors=candles.map(c=>c.c>=c.o?'rgba(0,200,150,0.4)':'rgba(255,77,106,0.4)');
+
+  try{
+    charts[canvasId]=new Chart(canvas,{
+      type:'bar',
+      data:{
+        labels,
+        datasets:[
+          {
+            label:'Wick',
+            data:wickData,
+            backgroundColor:wickColors,
+            barPercentage:0.3,
+            categoryPercentage:0.8,
+            order:2
+          },
+          {
+            label:'Body',
+            data:bodyData,
+            backgroundColor:bodyColors,
+            barPercentage:0.7,
+            categoryPercentage:0.8,
+            order:1
+          }
+        ]
+      },
+      options:{
+        responsive:true,
+        maintainAspectRatio:false,
+        animation:{duration:200},
+        plugins:{
+          legend:{display:false},
+          tooltip:{
+            callbacks:{
+              label:ctx=>{
+                const c=candles[ctx.dataIndex];
+                if(!c)return '';
+                return ['O: '+fmt(c.o),'H: '+fmt(c.h),'L: '+fmt(c.l),'C: '+fmt(c.c),'Vol: '+c.v];
+              },
+              title:ctx=>ctx[0]?.label||''
+            }
+          }
+        },
+        scales:{
+          x:{
+            grid:{color:'rgba(136,150,168,0.07)'},
+            ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:8,autoSkip:true}
+          },
+          y:{
+            grid:{color:'rgba(136,150,168,0.07)'},
+            ticks:{color:'#4a5568',font:{size:10},callback:v=>fmt(v)},
+            beginAtZero:false
+          }
+        }
+      }
+    });
+  }catch(e){console.warn('buildCandleChart error:',e);buildChart(canvasId,co);}
 } // full timestamp for price history
 const priceChg=c=>{if(!c.price_history||c.price_history.length<2)return 0;const f=c.price_history[0].p,l=c.price_history[c.price_history.length-1].p;return f?((l-f)/f*100):0;};
 const holdings=u=>u.holdings||{};const shorts=u=>u.shorts||{};const watchlist=u=>u.watchlist||[];
@@ -717,7 +770,7 @@ const roleBadge=role=>role==='chairman'?'<span class="badge b-chair">Chairman</s
 const avatarClass=role=>role==='chairman'?'av-ch':role==='president'?'av-pr':role==='secretary'?'av-sec':role==='treasurer'?'av-tre':role==='compliance_officer'?'av-co':role==='company'?'av-c':'av-s';
 
 function toast(msg){const t=get('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3200);}
-function destroyCharts(){Object.values(charts).forEach(c=>{try{c.destroy();}catch(e){}});charts={};}
+function destroyCharts(){Object.keys(charts).forEach(k=>destroyChart(k));charts={};}
 
 // ═══════════════════════════════════════════════
 // SESSION
@@ -750,7 +803,7 @@ async function saveDivThresholdFrom(id='div-threshold'){
 async function reviewDivApproval(id,approve){
   const da=DB.divApprovals.find(x=>x.id===id);if(!da)return;
   const u=cu();
-  await sb.patch('jex_dividend_approvals','id=eq.'+id,{status:approve?'approved':'rejected',approved_by:u.name});
+  await sb.patch('jex_dividend_approvals','id=eq.'+id,{status:approve?'approved':'rejected',reviewed_by:u.name});
   da.status=approve?'approved':'rejected';da.approved_by=u.name;
   if(approve){
     // Execute the dividend now
@@ -784,12 +837,9 @@ async function saveSnapshot(label){
     ts:ts(),
     created_by:cu()?.name||'Admin',
     data:{
-      users:DB.users.map(u=>({...u})),
-      companies:DB.companies.map(c=>({...c})),
-      trades:DB.trades.slice(-200),
-      limitOrders:DB.limitOrders,
-      stopLossOrders:DB.stopLossOrders,
-      session:{...DB.session},
+      users:DB.users.map(u=>({id:u.id,name:u.name,role:u.role,cash:u.cash,holdings:u.holdings,shorts:u.shorts})),
+      companies:DB.companies.map(c=>({id:c.id,ticker:c.ticker,name:c.name,price:c.price,shares:c.shares,shares_avail:c.shares_avail,status:c.status,owner_id:c.owner_id})),
+      session:{status:DB.session.status,starting_cash:DB.session.starting_cash},
     }
   };
   // Store in jex_activity with type='snapshot' and description as JSON
@@ -2031,15 +2081,18 @@ async function placeLimitOrder(ticker,side,qty,limitPrice){
     render();return;
   }
   // Queue remainder in order book
-  if(remaining>0){
-    const orderTypeEl=document.getElementById('limit-order-type');
-  const orderType=orderTypeEl?.value||'gtc';
+  const orderTypeEl=document.getElementById('limit-order-type');
+  const orderType=(orderTypeEl?.value||'gtc').toLowerCase();
   const icebergQtyEl=document.getElementById('limit-iceberg-qty');
-  const icebergQty=orderType==='iceberg'&&icebergQtyEl?parseInt(icebergQtyEl.value)||Math.ceil(remaining/4):null;
-  // Fill-or-Kill: must fill completely now or cancel
+  const icebergQty=orderType==='iceberg'&&icebergQtyEl?Math.max(1,parseInt(icebergQtyEl.value)||Math.ceil(remaining/4)):null;
+  // Fill-or-Kill: must be fully filled NOW or cancelled entirely
   if(orderType==='fok'){
-    if(remaining>0){toast('Fill-or-Kill: Order could not be fully filled immediately — cancelled.');return;}
+    if(remaining>0){
+      toast('Fill-or-Kill cancelled — could only fill '+(qty-remaining)+' of '+qty+' shares');
+      return;
+    }
   }
+  if(remaining>0){
   const order={id:uid(),user_id:u.id,ticker,side,qty:remaining,limit_price:limitPrice,status:'open',order_type:orderType,iceberg_visible:icebergQty,ts:ts()};
     await sb.post('jex_limit_orders',order);
     DB.limitOrders.push(order);
@@ -2186,7 +2239,7 @@ async function checkLimitOrders(){
     }
   }
 }
-setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();checkShortSqueezes();},15000);
+setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();await checkPriceAlerts();checkShortSqueezes();},15000);
 
 // ═══════════════════════════════════════════════
 // TRADING
@@ -2297,9 +2350,10 @@ async function issueDividend(ticker,perShare,note){
   const freshStudents=await sb.get('jex_users','role=eq.student&status=eq.approved');
   // Update local DB with fresh data
   freshStudents.forEach(fs=>{const local=getUser(fs.id);if(local)Object.assign(local,fs);else DB.users.push(fs);});
-  const sh=freshStudents.filter(s=>(s.holdings&&s.holdings[ticker]||0)>0);
+  const allT=getCompanyTickers(ticker);
+  const sh=freshStudents.filter(s=>allT.some(t=>(s.holdings&&s.holdings[t]||0)>0));
   if(!sh.length)return toast('No shareholders yet');
-  const total=sh.reduce((s,u)=>s+Math.round(((u.holdings&&u.holdings[ticker])||0)*perShare*100)/100,0);
+  const total=sh.reduce((s,u)=>s+allT.reduce((ts2,t)=>ts2+Math.round(((u.holdings&&u.holdings[t])||0)*perShare*100)/100,0),0);
   if(owner.cash<total)return toast('Insufficient funds (need '+fmt(total)+')');
   // Check if Treasurer approval required
   const divApprovalThreshold=DB.session.dividend_approval_threshold||1000;
@@ -2455,7 +2509,17 @@ const chartIntervals={};
 function setChartType(chartId,type,ticker){
   UI['chartType_'+chartId]=type;
   const co=getCo(ticker);
-  if(co)setChartInterval(chartId,chartIntervals[chartId]||'max',co);
+  if(!co)return;
+  destroyChart(chartId);
+  const interval=chartIntervals[chartId]||'max';
+  chartIntervals[chartId]=interval;
+  // Update interval bar to reflect active state
+  const barEl=document.getElementById('ibar-'+chartId);
+  if(barEl)barEl.innerHTML=buildIntervalButtons(chartId,co);
+  setTimeout(()=>{
+    if(type==='candle')buildCandleChart(chartId,co);
+    else buildChart(chartId,co);
+  },20);
 }
 function setChartInterval(canvasId,interval,co){
   if(interval)chartIntervals[canvasId]=interval;
@@ -2491,7 +2555,7 @@ function filterByInterval(pts,interval){
       if(!p.t||!p.t.includes('T'))return false;
       try{return new Date(p.t).getTime()>=cutoff;}catch(e){return false;}
     });
-    return filtered.length>0?filtered:pts.slice(-Math.min(pts.length,10));
+    return filtered.length>0?filtered:pts; // return all if nothing in range
   }
   // Fallback: slice from end
   const counts={'1d':Math.min(pts.length,30),'5d':Math.min(pts.length,150),'1m':Math.min(pts.length,500)};
@@ -2512,17 +2576,53 @@ function fmtChartLabel(t,interval){
   }
   return t; // fallback for old string labels
 }
+function destroyChart(canvasId){
+  if(charts[canvasId]){
+    try{charts[canvasId].destroy();}catch(e){}
+    delete charts[canvasId];
+  }
+  // Also check Chart.js registry
+  const canvas=get(canvasId);
+  if(canvas&&window.Chart){
+    const existing=Chart.getChart(canvas);
+    if(existing)try{existing.destroy();}catch(e){}
+  }
+}
 function buildChart(canvasId,co){
+  destroyChart(canvasId);
   const canvas=get(canvasId);if(!canvas||!window.Chart)return;
   const interval=chartIntervals[canvasId]||'max';
   const allPts=co.price_history||[];
   const pts=filterByInterval(allPts,interval);
+  if(!pts.length)return;
   const prices=pts.map(p=>p.p);
   const labels=pts.map((p,i)=>i===pts.length-1?'Now':fmtChartLabel(p.t,interval));
-  const isUp=prices.length>0&&prices[prices.length-1]>=prices[0],lc=isUp?'#00c896':'#ff4d6a';
-  charts[canvasId]=new Chart(canvas,{type:'line',data:{labels,datasets:[{data:prices,borderColor:lc,borderWidth:2,pointRadius:pts.length>30?0:3,pointBackgroundColor:lc,fill:false,tension:0.3}]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>fmt(ctx.parsed.y),title:ctx=>ctx[0]?.label||''}}},
-      scales:{x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:6,autoSkip:true}},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#4a5568',font:{size:11},callback:v=>fmt(v)},beginAtZero:false}}}});
+  const isUp=prices.length>0&&prices[prices.length-1]>=prices[0];
+  const lc=isUp?'#00c896':'#ff4d6a';
+  const fillColor=isUp?'rgba(0,200,150,0.06)':'rgba(255,77,106,0.06)';
+  try{
+    charts[canvasId]=new Chart(canvas,{
+      type:'line',
+      data:{labels,datasets:[{
+        data:prices,borderColor:lc,borderWidth:2,
+        pointRadius:pts.length>50?0:pts.length>20?1:3,
+        pointBackgroundColor:lc,
+        fill:true,backgroundColor:fillColor,tension:0.3
+      }]},
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        animation:{duration:200},
+        plugins:{legend:{display:false},tooltip:{callbacks:{
+          label:ctx=>fmt(ctx.parsed.y),
+          title:ctx=>ctx[0]?.label||''
+        }}},
+        scales:{
+          x:{grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:6,autoSkip:true}},
+          y:{grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:10},callback:v=>fmt(v)},beginAtZero:false}
+        }
+      }
+    });
+  }catch(e){console.warn('buildChart error:',e);}
 }
 function impactPreview(co,qty,dir){if(!qty||qty<=0)return'';const np=impactPrice(co,qty,dir),delta=np-co.price,pct=((delta/co.price)*100).toFixed(2),cls=dir==='buy'?'price-up':'price-down';return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">Fill: <strong>${fmt(np)}</strong> <span class="${cls}">${delta>=0?'+':''}${fmt(delta)} (${delta>=0?'+':''}${pct}%)</span> &nbsp;|&nbsp; Total: <strong>${fmt(np*qty)}</strong></div>`;}
 function shortPrev(co,qty){if(!qty||qty<=0)return'';const c=Math.round(co.price*qty*1.5*100)/100;return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:rgba(83,74,183,0.1);border-radius:var(--radius);color:#AFA9EC">Short ${qty} @ ${fmt(co.price)} | Collateral: <strong>${fmt(c)}</strong></div>`;}
@@ -2988,6 +3088,8 @@ function renderCompanyPage(parentTicker){
         html+='<div><div style="font-size:11px;font-weight:600;color:var(--green);margin-bottom:6px;letter-spacing:0.5px">BIDS (buyers)</div>';
         if(book.bids.length){
           book.bids.slice(0,5).forEach(o=>{
+            const bidDisplayQty=o.iceberg_visible||o.qty;
+            const isBidIceberg=o.iceberg_visible&&o.qty>o.iceberg_visible;
             const pct=book.bids[0]?Math.round((o.limit_price/book.bids[0].limit_price)*100):100;
             html+='<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;margin-bottom:3px;border-radius:4px;position:relative;overflow:hidden">'
               +'<div style="position:absolute;left:0;top:0;bottom:0;background:rgba(0,200,150,0.08);width:'+pct+'%"></div>'
@@ -3037,9 +3139,10 @@ function renderCompanyPage(parentTicker){
             +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="cpTrade(&quot;sell&quot;)">Sell now</button></div></div>'
             +'<div id="cp-preview">'+impactPreview(co,1,'sell')+'</div>'
             +'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell</div>'
-            +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-qty" value="1" min="1" max="'+held+'"></div>'
-            +'<div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="cp-lmt-price" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
-            +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="cpLimit(&quot;sell&quot;)">Place limit</button></div></div>';
+            +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-sty" value="1" min="1" max="'+held+'"></div>'
+            +'<div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="cp-lmt-sprice" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
+            +'<div class="frow" style="flex:1"><label class="flabel">Type</label><select id="limit-order-type-sell"><option value="gtc">GTC</option><option value="day">Day</option><option value="fok">FOK</option></select></div>'
+            +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="cpLimit(&quot;sell&quot;)">Place limit</button></div></div>';
         } else {
           html+='<div class="empty" style="padding:16px">You don&#39;t hold any '+parentTicker+'.</div>';
         }
@@ -3193,8 +3296,12 @@ function buildSparklines(){
     DB.companies.filter(c=>c.status==='listed').forEach(c=>{
       const canvas=document.getElementById('spark-'+c.ticker);
       if(!canvas||!window.Chart)return;
-      if(charts['spark-'+c.ticker])return;
-      const pts=(c.price_history||[]).slice(-20);
+      // Always redraw sparkline to show latest prices
+      if(charts['spark-'+c.ticker]){
+        try{charts['spark-'+c.ticker].destroy();}catch(e){}
+        delete charts['spark-'+c.ticker];
+      }
+      const pts=(c.price_history||[]).filter(p=>p&&typeof p.p==='number').slice(-20);
       if(pts.length<2)return;
       const prices=pts.map(p=>p.p);
       const isUp=prices[prices.length-1]>=prices[0];
@@ -3220,7 +3327,15 @@ function cpTrade(mode){
 }
 function cpLimit(side){
   const t=UI.companyPage;
-  placeLimitOrder(t,side,get('cp-lmt-qty')?.value,get('cp-lmt-price')?.value);
+  if(side==='buy'){
+    placeLimitOrder(t,'buy',get('cp-lmt-qty')?.value,get('cp-lmt-price')?.value);
+  } else {
+    // Sync sell order type selector to the shared limit-order-type element
+    const sellTypeEl=get('limit-order-type-sell');
+    const sharedTypeEl=get('limit-order-type');
+    if(sellTypeEl&&sharedTypeEl)sharedTypeEl.value=sellTypeEl.value;
+    placeLimitOrder(t,'sell',get('cp-lmt-sty')?.value,get('cp-lmt-sprice')?.value);
+  }
 }
 function toggleWatchAndRefresh(ticker){toggleWatch(ticker).then(()=>openCompanyPage(ticker));}
 function renderMarketInPlace(){
@@ -3257,7 +3372,7 @@ function openPanel(ticker){
       ${short?`<button class="ot-btn ${mode==='cover'?'ot-cover':''}" onclick="UI.panelMode='cover';openPanel('${ticker}')">Cover</button>`:''}
     </div>
     ${mode==='buy'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Buy pushes price up. Available: <strong>${c.shares_avail}</strong> of ${c.shares.toLocaleString()}.</p>
-    <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${c.shares_avail}"></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="placeBuy('${ticker}',get('t-qty')?.value)">Buy now</button></div></div>
+    <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${c.shares_avail}" oninput="document.getElementById('cp-preview')&&(document.getElementById('cp-preview').innerHTML=impactPreview(getCo('${ticker}'),parseInt(this.value)||1,'buy'))"></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="placeBuy('${ticker}',get('t-qty')?.value)">Buy now</button></div></div>
     <div id="t-preview">${impactPreview(c,1,'buy')}</div>
     <hr class="divider" style="margin:10px 0">
     <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy</div>
@@ -3279,7 +3394,7 @@ function openPanel(ticker){
     :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="coverShort('${ticker}',get('t-qty')?.value)">Cover short</button></div></div><div id="t-preview">${impactPreview(c,short.qty,'buy')}</div>`:''}
   </div>`;
   const qi=get('t-qty');if(qi){qi.addEventListener('input',()=>{const q=parseInt(qi.value)||0,p=get('t-preview');if(!p)return;if(mode==='buy')p.innerHTML=impactPreview(c,q,'buy');else if(mode==='sell')p.innerHTML=impactPreview(c,q,'sell');else if(mode==='short')p.innerHTML=shortPrev(c,q);else if(mode==='cover')p.innerHTML=impactPreview(c,q,'buy');});}
-  panel.scrollIntoView({behavior:'smooth',block:'nearest'});setTimeout(()=>buildChart('panel-chart',c),50);
+  panel.scrollIntoView({behavior:'smooth',block:'nearest'});setTimeout(()=>{destroyChart('panel-chart');buildChart('panel-chart',c);},50);
 }
 function closePanel(){UI.panelTicker=null;destroyCharts();document.getElementById('market-content').innerHTML=renderMarket();}
 
@@ -4980,10 +5095,10 @@ function renderActivityLog(){
         </select>
       </div>
       <div><label class="flabel">Filter by ticker</label>
-        <input type="text" placeholder="e.g. BWV" value="${f.ticker||''}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.ticker=this.value;render()">
+        <input type="text" placeholder="e.g. BWV" value="${f.ticker||''}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.ticker=this.value;clearTimeout(window._actFilterTimer);window._actFilterTimer=setTimeout(render,300)">
       </div>
       <div><label class="flabel">Filter by user</label>
-        <input type="text" placeholder="Name..." value="${f.user||''}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.user=this.value;render()">
+        <input type="text" placeholder="Name..." value="${f.user||''}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.user=this.value;clearTimeout(window._actFilterTimer);window._actFilterTimer=setTimeout(render,300)">
       </div>
       <div><button class="btn btn-sm" onclick="UI.activityFilter={};render()">Clear</button></div>
     </div>
@@ -5123,7 +5238,7 @@ function render(){
       if(co){
         getCompanyTickers(co.ticker).forEach(ticker=>{
           const stock=getCo(ticker);
-          if(stock)buildChart('co-chart-'+ticker,stock);
+          if(stock){destroyChart('co-chart-'+ticker);buildChart('co-chart-'+ticker,stock);}
         });
       }
     }
@@ -5144,7 +5259,7 @@ function render(){
     }
     if(UI.navTab==='market'&&UI.companyPage){
       const allT=getCompanyTickers(UI.companyPage);
-      allT.forEach(t=>{const co=getCo(t);if(co)buildChart('cp-chart-'+t,co);});
+      allT.forEach(t=>{const co=getCo(t);if(co){destroyChart('cp-chart-'+t);buildChart('cp-chart-'+t,co);}});
     }
   },60);
 }
