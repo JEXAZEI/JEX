@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -850,6 +851,14 @@ async function savePriceBand(){
   await saveSession({price_band_pct:pct});
   toast('Price band set to ±'+pct+'%');render();
 }
+async function saveEmailJSConfig(){
+  const serviceId=(get('ejs-service')?.value||'').trim();
+  const templateId=(get('ejs-template')?.value||'').trim();
+  const pubKey=(get('ejs-pubkey')?.value||'').trim();
+  await saveSession({emailjs_service_id:serviceId||null,emailjs_template_id:templateId||null,emailjs_public_key:pubKey||null});
+  toast(serviceId?'✓ Email config saved — students can now enable email notifications':'Email config cleared');
+  render();
+}
 async function saveCBPct(){
   const pct=parseInt(document.getElementById('cb-pct')?.value);
   if(isNaN(pct)||pct<1||pct>100)return toast('Enter a value between 1 and 100');
@@ -1189,7 +1198,8 @@ async function approveReg(id,startCash){
   const u={id:r.id,name:r.name,email:r.email,password:r.password,role:r.role,status:'approved',
     cash:startCash,sec_q:r.sec_q,sec_a:r.sec_a,
     description:r.description||null,app_status:r.role==='company'?'none':null,
-    holdings:{},shorts:{},watchlist:[],classroom_id:classroomId||null,created_at:new Date().toISOString()};
+    holdings:{},shorts:{},watchlist:[],classroom_id:classroomId||null,
+    email_notifications:false,notification_email:null,created_at:new Date().toISOString()};
   await sb.post('jex_users',u);await sb.del('jex_pending','id=eq.'+id);
   DB.users.push(u);DB.pending=DB.pending.filter(x=>x.id!==id);
   await logActivity('registration',r.name+' approved ('+r.role+') with '+fmt(startCash),{userId:r.id,userName:r.name,amount:startCash});
@@ -1197,10 +1207,33 @@ async function approveReg(id,startCash){
   toast(r.name+' approved with '+fmt(startCash));render();
 }
 async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');render();}
-function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u||u.password!==pw)return toast('Wrong password');UI.userId=uid2;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}subscribeRealtime();render();}
+function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u||u.password!==pw)return toast('Wrong password');UI.userId=uid2;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();}
 function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.tradePage=0;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
+async function changeEmail(uid2,newEmail,pw){
+  const u=getUser(uid2);if(!u)return;
+  if(!newEmail||!newEmail.includes('@'))return toast('Enter a valid email address');
+  if(!pw)return toast('Enter your current password');
+  if(u.password!==pw)return toast('Incorrect password');
+  const norm_email=newEmail.trim().toLowerCase();
+  if(DB.users.find(x=>x.id!==uid2&&x.email===norm_email))return toast('That email is already in use');
+  await updateUser(uid2,{email:norm_email});
+  toast('✓ Email updated to '+norm_email);render();
+}
 async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;if(u.password!==cur)return toast('Current password incorrect');if(!nw2||nw2.length<4)return toast('Min 4 characters');if(nw2!==conf)return toast('Passwords do not match');await sb.patch('jex_users','id=eq.'+uid2,{password:nw2});u.password=nw2;toast('Password changed');render();}
 async function adminResetPw(uid2,pw){if(!pw||pw.length<4)return toast('Min 4 characters');const u=getUser(uid2);if(!u)return;await sb.patch('jex_users','id=eq.'+uid2,{password:pw});u.password=pw;toast(u.name+"'s password reset");render();}
+async function toggleEmailNotifications(enabled){
+  const u=cu();if(!u)return;
+  await updateUser(u.id,{email_notifications:enabled});
+  toast(enabled?'Email notifications enabled':'Email notifications disabled');
+  render();
+}
+async function saveNotifEmail(){
+  const u=cu();if(!u)return;
+  const email=(get('notif-email')?.value||'').trim().toLowerCase();
+  if(!email||!email.includes('@'))return toast('Enter a valid email address');
+  await updateUser(u.id,{notification_email:email});
+  toast('✓ Notification email saved: '+email);render();
+}
 async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)return;if(u.password!==curPw)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');await sb.patch('jex_users','id=eq.'+uid2,{sec_q:newQ,sec_a:norm(newA)});u.sec_q=newQ;u.sec_a=norm(newA);toast('Security question updated');render();}
 function forgotStep1(email){const u=DB.users.find(u=>u.email&&norm(u.email)===norm(email)&&u.status==='approved');if(!u)return toast('No account found with that email');UI.forgotUserId=u.id;UI.loginView='forgot-secq';render();}
 function forgotStep2(answer){const u=getUser(UI.forgotUserId);if(!u)return;if(norm(answer)!==u.sec_a)return toast('Incorrect answer — try again');UI.loginView='forgot-newpw';render();}
@@ -1912,14 +1945,79 @@ async function recordSessionOpenPrices(){
 // ═══════════════════════════════════════════════
 // NOTIFICATIONS
 // ═══════════════════════════════════════════════
+// ── Browser push notifications ───────────────────────────
+let _pushEnabled=false;
+async function requestPushPermission(){
+  if(!('Notification' in window))return false;
+  if(Notification.permission==='granted'){_pushEnabled=true;return true;}
+  if(Notification.permission==='denied')return false;
+  const p=await Notification.requestPermission();
+  _pushEnabled=p==='granted';return _pushEnabled;
+}
+function showBrowserPush(title,body){
+  if(!_pushEnabled||Notification.permission!=='granted')return;
+  try{
+    const n=new Notification('JEX — '+title,{
+      body,
+      icon:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%230f1117"/><text x="16" y="23" font-family="monospace" font-size="20" font-weight="700" fill="%23f0a500" text-anchor="middle">J</text></svg>',
+      badge:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%23f0a500"/><text x="16" y="23" font-family="monospace" font-size="20" font-weight="700" fill="%230f1117" text-anchor="middle">J</text></svg>',
+      tag:'jex-'+Date.now(),
+      requireInteraction:false
+    });
+    setTimeout(()=>n.close(),6000);
+  }catch(e){}
+}
+// Restore permission on page load
+if(typeof Notification!=='undefined'&&Notification.permission==='granted')_pushEnabled=true;
+
 async function pushNotification(userId, type, message, ticker=null){
   try{
     const rec={id:uid(),user_id:userId,type,message,ticker,read:false,ts:ts()};
     await sb.post('jex_notifications',rec);
-    // Add to local DB if it's for the current user
-    if(userId===UI.userId)DB.notifications.unshift(rec);
+    if(userId===UI.userId){
+      DB.notifications.unshift(rec);
+      // Fire browser push for current user
+      const titles={
+        dividend:'💰 Dividend received',halt:'⚠️ Trading halted',
+        stop_loss:'🛑 Stop-loss triggered',limit_fill:'⚡ Order filled',
+        after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
+        ipo:'🏢 IPO update',session:'🕐 Session update',
+        price_alert:'🔔 Price alert',resume:'✅ Trading resumed',
+        founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised'
+      };
+      showBrowserPush(titles[type]||'Notification',message);
+      // Email notification if enabled for this user
+      triggerEmailNotification(userId,type,message,ticker);
+    }
   }catch(e){console.warn('Notification failed:',e);}
 }
+// ── Email notifications ──────────────────────────────────
+// Uses EmailJS (free tier: 200 emails/month)
+// Chairman configures EmailJS in Admin → Session → Email notifications
+function triggerEmailNotification(userId,type,message,ticker){
+  const user=getUser(userId);if(!user||!user.email_notifications)return;
+  const emailAddr=user.notification_email||user.email;if(!emailAddr)return;
+  // Only email for high-priority types
+  const emailTypes=['dividend','halt','stop_loss','ipo','session','limit_fill','founder_alloc'];
+  if(!emailTypes.includes(type))return;
+  const ejsServiceId=DB.session.emailjs_service_id;
+  const ejsTemplateId=DB.session.emailjs_template_id;
+  const ejsPublicKey=DB.session.emailjs_public_key;
+  if(!ejsServiceId||!ejsTemplateId||!ejsPublicKey)return;
+  try{
+    if(typeof emailjs==='undefined')return;
+    emailjs.init(ejsPublicKey);
+    emailjs.send(ejsServiceId,ejsTemplateId,{
+      to_email:emailAddr,
+      to_name:user.name,
+      subject:'JEX — '+message.replace(/[🔔💰⚡⚠️🛑🏢🕐]/g,'').trim().slice(0,60),
+      message:message,
+      ticker:ticker||'',
+      jex_url:window.location.href
+    }).catch(e=>console.warn('EmailJS error:',e.text||e));
+  }catch(e){}
+}
+
 async function pushNotificationToHolders(ticker,type,message){
   const holders=DB.users.filter(u=>u.role==='student'&&(holdings(u)[ticker]||0)>0);
   for(const u of holders) await pushNotification(u.id,type,message,ticker);
@@ -3562,7 +3660,16 @@ function renderSettings(){
     </div>
     ${SHEETS_URL?'<div style="font-size:12px;color:var(--text2);margin-top:8px">✓ Sync active — pushing to Sheets automatically</div>':''}
   </div>`:'';
-  return sheetsSection+`<div class="card"><div class="section-title">Account</div><div class="grid2"><div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${u.name}</div></div><div class="mcard"><div class="mlabel">Email</div><div class="mval" style="font-size:14px;margin-top:4px">${u.email}</div></div></div></div>
+  return sheetsSection+`<div class="card"><div class="section-title">Account</div>
+    <div class="grid2" style="margin-bottom:12px">
+      <div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${u.name}</div></div>
+      <div class="mcard"><div class="mlabel">Email (login)</div><div class="mval" style="font-size:14px;margin-top:4px;word-break:break-all">${u.email}</div></div>
+    </div>
+    <div class="section-title" style="font-size:13px;margin-bottom:8px">Change email address</div>
+    <div class="frow"><label class="flabel">New email address</label><input type="email" id="new-email" placeholder="${u.email}" autocomplete="email"></div>
+    <div class="frow"><label class="flabel">Confirm with password</label><div class="pw-wrap"><input type="password" id="email-confirm-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('email-confirm-pw')" tabindex="-1">👁</button></div></div>
+    <button class="btn btn-primary" onclick="changeEmail('${u.id}',get('new-email')?.value,get('email-confirm-pw')?.value)">Update email</button>
+  </div>
   <div class="card"><div class="section-title">Change password</div><div class="frow"><label class="flabel">Current password</label><div class="pw-wrap"><input type="password" id="pw-cur" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('pw-cur')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="pw-new" placeholder="New password (min 4 characters)"><button type="button" class="pw-eye" onclick="togglePw('pw-new')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="pw-conf" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('pw-conf')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="changePw('${u.id}',get('pw-cur')?.value,get('pw-new')?.value,get('pw-conf')?.value)">Update password</button></div>
   ${u.role==='company'?`<div class="card"><div class="section-title">Company branding</div>
     <div class="ibox ibox-blue" style="margin-bottom:10px">Upload a logo image for your company. Shown on your ticker chip and company page. Max 200KB recommended.</div>
@@ -3571,6 +3678,25 @@ function renderSettings(){
     <div id="logo-preview" style="margin-bottom:10px"></div>
     <button class="btn btn-primary" onclick="saveLogo()">Save logo</button>
   </div>`:''}
+  <div class="card"><div class="section-title">Notifications</div>
+    <div class="ibox ibox-blue" style="margin-bottom:12px">Enable browser popups to receive alerts when trades fill, dividends are paid, or the session opens. Email notifications are optional — enter a separate address below if you want alerts sent to your email.</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);margin-bottom:12px">
+      <div>
+        <div style="font-size:13px;font-weight:500">Browser popup notifications</div>
+        <div style="font-size:12px;color:var(--text2)">${(()=>{if(typeof Notification==='undefined')return 'Not supported in this browser';if(Notification.permission==='granted')return '✓ Enabled';if(Notification.permission==='denied')return '⚠ Blocked — enable in browser settings';return 'Click to enable';})()}</div>
+      </div>
+      <div>${(()=>{
+        if(typeof Notification==='undefined')return '';
+        if(Notification.permission==='granted')return '<button class="btn btn-sm btn-success" onclick="showBrowserPush(&quot;JEX&quot;,&quot;Test!&quot;)">Send test</button>';
+        if(Notification.permission==='denied')return '<span style="font-size:11px;color:var(--red)">Blocked</span>';
+        return '<button class="btn btn-sm btn-primary" onclick="requestPushPermission().then(ok=>{ok?toast(&quot;Notifications enabled&quot;):toast(&quot;Denied — check settings&quot;);render();})">Enable</button>';
+      })()}</div>
+    </div>
+        <div class="frow"><label class="flabel" style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="email-notif-toggle" ${u.email_notifications?'checked':''} onchange="toggleEmailNotifications(this.checked)"> Enable email notifications</label></div>
+    ${u.email_notifications?`<div class="frow"><label class="flabel">Email to send notifications to</label><input type="email" id="notif-email" placeholder="${u.notification_email||u.email}" value="${u.notification_email||''}" autocomplete="email"></div>
+    <div class="ibox ibox-amber" style="margin-bottom:10px;font-size:11px">You will receive emails for: dividends paid, session open/close, IPO updates, stop-loss triggers, limit order fills, founder share grants. Setup required — see Admin → Session → Email notifications for configuration.</div>
+    <button class="btn btn-primary btn-sm" onclick="saveNotifEmail()">Save notification email</button>`:''}
+  </div>
   <div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><div class="pw-wrap"><input type="password" id="settings-secq-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('settings-secq-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`;
 }
 
@@ -4239,6 +4365,18 @@ function renderAdminSession(students){
         </div>
         <div><button class="btn btn-primary btn-sm" onclick="reassignClassroom()">Assign</button></div>
       </div>
+    </div>
+    <div class="divider"></div>
+    <div class="section-title" style="font-size:13px;margin-bottom:10px">📧 Email notifications (EmailJS)</div>
+    <div class="ibox ibox-blue" style="margin-bottom:10px">EmailJS lets JEX send emails from the browser for free (200/month). <a href="https://www.emailjs.com" target="_blank" style="color:var(--blue)">Create a free account</a>, set up an Email Service and Template, then paste the IDs here. The template should have variables: <code>to_email</code>, <code>to_name</code>, <code>subject</code>, <code>message</code>.</div>
+    <div class="grid3" style="margin-bottom:10px">
+      <div><label class="flabel">Service ID</label><input type="text" id="ejs-service" placeholder="service_xxxxxxx" value="${DB.session.emailjs_service_id||''}"></div>
+      <div><label class="flabel">Template ID</label><input type="text" id="ejs-template" placeholder="template_xxxxxxx" value="${DB.session.emailjs_template_id||''}"></div>
+      <div><label class="flabel">Public Key</label><input type="text" id="ejs-pubkey" placeholder="xxxxxxxxxxxxxxxxxxxx" value="${DB.session.emailjs_public_key||''}"></div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-primary" onclick="saveEmailJSConfig()">Save email config</button>
+      ${DB.session.emailjs_service_id?'<span style="font-size:12px;color:var(--green);align-self:center">✓ Email notifications active</span>':'<span style="font-size:12px;color:var(--text2);align-self:center">Not configured</span>'}
     </div>
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:6px;color:var(--red)">⚠ Danger zone</div>
