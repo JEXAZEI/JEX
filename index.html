@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -352,7 +353,7 @@ const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='
 // ═══════════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════════
-let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
+let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],delistApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
   founderShares:[],companyInvites:[],priceAdjustments:[],
@@ -529,7 +530,6 @@ async function loadAll(){
     priceAlerts,nwHistory,companyMembers,founderAllocations,
     priceAdjustments,flags,minutes,divApprovals,stopLossOrders});
   render(); // re-render with full data
-  checkScheduleImmediate(); // check open/close schedule as soon as data loads
 }
 
 // ═══════════════════════════════════════════════
@@ -1068,11 +1068,7 @@ function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-
 async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
 async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();}
 function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('Trading session is now open!');});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended.');});}}
-setInterval(()=>{checkSchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},5000);
-// Also check schedule immediately when page becomes visible (e.g. switching tabs)
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){checkSchedule();}});
-// And fire once on first real-time connect / loadAll completion (called after boot)
-function checkScheduleImmediate(){checkSchedule();}
+setInterval(()=>{checkSchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
 
 // ── Auto-refresh: pull latest data every 20 seconds ──────
 let _lastRefresh=0;
@@ -1960,37 +1956,19 @@ async function requestPushPermission(){
 }
 function showBrowserPush(title,body){
   if(!_pushEnabled||Notification.permission!=='granted')return;
-  const icon='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%230f1117"/><text x="16" y="23" font-family="monospace" font-size="20" font-weight="700" fill="%23f0a500" text-anchor="middle">J</text></svg>';
-  const badge='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%23f0a500"/><text x="16" y="23" font-family="monospace" font-size="20" font-weight="700" fill="%230f1117" text-anchor="middle">J</text></svg>';
-  const tag='jex-'+Date.now();
-  // Chrome requires notifications to be shown via ServiceWorker registration when available
-  if(navigator.serviceWorker&&navigator.serviceWorker.controller){
-    navigator.serviceWorker.ready.then(reg=>{
-      reg.showNotification('JEX — '+title,{body,icon,badge,tag,requireInteraction:false}).catch(()=>{
-        // Fallback to direct Notification
-        try{const n=new Notification('JEX — '+title,{body,icon,badge,tag,requireInteraction:false});setTimeout(()=>n.close(),6000);}catch(e){}
-      });
-    }).catch(()=>{
-      try{const n=new Notification('JEX — '+title,{body,icon,badge,tag,requireInteraction:false});setTimeout(()=>n.close(),6000);}catch(e){}
+  try{
+    const n=new Notification('JEX — '+title,{
+      body,
+      icon:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%230f1117"/><text x="16" y="23" font-family="monospace" font-size="20" font-weight="700" fill="%23f0a500" text-anchor="middle">J</text></svg>',
+      badge:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%23f0a500"/><text x="16" y="23" font-family="monospace" font-size="20" font-weight="700" fill="%230f1117" text-anchor="middle">J</text></svg>',
+      tag:'jex-'+Date.now(),
+      requireInteraction:false
     });
-  } else {
-    // No service worker — use direct Notification (works in Opera GX, may need SW in Chrome)
-    try{
-      const n=new Notification('JEX — '+title,{body,icon,badge,tag,requireInteraction:false});
-      setTimeout(()=>n.close(),6000);
-    }catch(e){}
-  }
+    setTimeout(()=>n.close(),6000);
+  }catch(e){}
 }
 // Restore permission on page load
 if(typeof Notification!=='undefined'&&Notification.permission==='granted')_pushEnabled=true;
-// Register a minimal ServiceWorker so Chrome can show notifications via registration.showNotification()
-(function(){
-  if(!('serviceWorker' in navigator))return;
-  const swCode='self.addEventListener(\'notificationclick\',function(e){e.notification.close();});self.addEventListener(\'push\',function(e){});';
-  const blob=new Blob([swCode],{type:'application/javascript'});
-  const url=URL.createObjectURL(blob);
-  navigator.serviceWorker.register(url,{scope:'./'}).catch(function(){});
-})();
 
 async function pushNotification(userId, type, message, ticker=null){
   try{
@@ -1998,59 +1976,47 @@ async function pushNotification(userId, type, message, ticker=null){
     await sb.post('jex_notifications',rec);
     if(userId===UI.userId){
       DB.notifications.unshift(rec);
-      // Build role-specific push title
-      const targetUser=getUser(userId);
-      const role=targetUser?.role||'student';
-      const roleTitles={
-        chairman:{
-          dividend:'💰 Dividend payment',halt:'⚠️ Market halt issued',stop_loss:'🛑 Stop-loss triggered',
-          limit_fill:'⚡ Limit order filled',after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
-          ipo:'🏢 IPO decision required',session:'🕐 Session update',price_alert:'🔔 Price alert',
-          resume:'✅ Trading resumed',founder_alloc:'🎁 Founder allocation',flag:'🚩 Compliance flag raised',
-          founder:'🏢 Company update',div_approval:'💰 Dividend approval needed'
-        },
-        president:{
-          dividend:'💰 Dividend approved',halt:'⚠️ Trading halted',stop_loss:'🛑 Stop-loss triggered',
-          limit_fill:'⚡ Order filled',after_hours:'⏰ Pre-session order',invite:'🤝 Founder invite',
-          ipo:'🏢 IPO requires review',session:'🕐 Session update',price_alert:'🔔 Price alert',
-          resume:'✅ Market resumed',founder_alloc:'🎁 Founder shares',flag:'🚩 Compliance report',
-          founder:'🏢 Governance update',div_approval:'💰 Dividend pending approval'
-        },
-        secretary:{
-          dividend:'💰 Dividend recorded',halt:'⚠️ Halt recorded',stop_loss:'🛑 Order triggered',
-          limit_fill:'⚡ Order executed',after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
-          ipo:'🏢 IPO filed',session:'📋 Session recorded',price_alert:'🔔 Price alert',
-          resume:'✅ Trade resumed',founder_alloc:'🎁 Allocation logged',flag:'🚩 Flag recorded',
-          founder:'🏢 Record update'
-        },
-        treasurer:{
-          dividend:'💰 Dividend payment out',halt:'⚠️ Trading halted',stop_loss:'🛑 Stop-loss hit',
-          limit_fill:'⚡ Order filled',after_hours:'⏰ After-hours queue',invite:'🤝 Founder invite',
-          ipo:'🏢 IPO financials',session:'💵 Session update',price_alert:'🔔 Price alert',
-          resume:'✅ Trading resumed',founder_alloc:'🎁 Shares allocated',flag:'🚩 Compliance flag',
-          div_approval:'💰 Dividend needs your approval',founder:'🏢 Shareholder update'
-        },
-        compliance_officer:{
-          dividend:'💰 Dividend issued',halt:'⚠️ Halt order',stop_loss:'🛑 Stop-loss triggered',
-          limit_fill:'⚡ Order filled',after_hours:'⏰ After-hours order',invite:'🤝 Invite',
-          ipo:'🏢 IPO filed',session:'🕐 Session status',price_alert:'🔔 Price alert',
-          resume:'✅ Trading resumed',founder_alloc:'🎁 Allocation made',flag:'🚩 Flag raised',
-          founder:'🏢 Company update'
-        },
-        default:{
-          dividend:'💰 Dividend received',halt:'⚠️ Trading halted',stop_loss:'🛑 Stop-loss triggered',
-          limit_fill:'⚡ Order filled',after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
-          ipo:'🏢 IPO update',session:'🕐 Session update',price_alert:'🔔 Price alert',
-          resume:'✅ Trading resumed',founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised',
-          founder:'🏢 Company update'
-        }
+      // Fire browser push for current user
+      const titles={
+        dividend:'💰 Dividend received',halt:'⚠️ Trading halted',
+        stop_loss:'🛑 Stop-loss triggered',limit_fill:'⚡ Order filled',
+        after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
+        ipo:'🏢 IPO update',session:'🕐 Session update',
+        price_alert:'🔔 Price alert',resume:'✅ Trading resumed',
+        founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised'
       };
-      const titleMap=roleTitles[role]||roleTitles.default;
-      showBrowserPush(titleMap[type]||'Notification',message);
+      showBrowserPush(titles[type]||'Notification',message);
+      // Email notification if enabled for this user
+      triggerEmailNotification(userId,type,message,ticker);
     }
   }catch(e){console.warn('Notification failed:',e);}
 }
-// Email notifications removed
+// ── Email notifications ──────────────────────────────────
+// Uses EmailJS (free tier: 200 emails/month)
+// Chairman configures EmailJS in Admin → Session → Email notifications
+function triggerEmailNotification(userId,type,message,ticker){
+  const user=getUser(userId);if(!user||!user.email_notifications)return;
+  const emailAddr=user.notification_email||user.email;if(!emailAddr)return;
+  // Only email for high-priority types
+  const emailTypes=['dividend','halt','stop_loss','ipo','session','limit_fill','founder_alloc'];
+  if(!emailTypes.includes(type))return;
+  const ejsServiceId=DB.session.emailjs_service_id;
+  const ejsTemplateId=DB.session.emailjs_template_id;
+  const ejsPublicKey=DB.session.emailjs_public_key;
+  if(!ejsServiceId||!ejsTemplateId||!ejsPublicKey)return;
+  try{
+    if(typeof emailjs==='undefined')return;
+    emailjs.init(ejsPublicKey);
+    emailjs.send(ejsServiceId,ejsTemplateId,{
+      to_email:emailAddr,
+      to_name:user.name,
+      subject:'JEX — '+message.replace(/[🔔💰⚡⚠️🛑🏢🕐]/g,'').trim().slice(0,60),
+      message:message,
+      ticker:ticker||'',
+      jex_url:window.location.href
+    }).catch(e=>console.warn('EmailJS error:',e.text||e));
+  }catch(e){}
+}
 
 async function pushNotificationToHolders(ticker,type,message){
   const holders=DB.users.filter(u=>u.role==='student'&&(holdings(u)[ticker]||0)>0);
@@ -2487,10 +2453,7 @@ async function placeShort(ticker,qty){
   sh[ticker]={qty:tq,avgPrice:Math.round(((ex.avgPrice*ex.qty)+(price*qty))/tq*100)/100,collateral:Math.round((ex.collateral+coll)*100)/100};
   await updateUser(u.id,{cash:Math.round((u.cash-coll)*100)/100,shorts:sh});
   const np=impactPrice(co,qty,'sell');
-  // Short does NOT change shares_avail — it's synthetic borrowing, not from pool.
-  // Clamp to prevent overcount.
-  const safeAvail=Math.min(co.shares_avail,co.shares);
-  await updateCo(ticker,{price:np,shares_avail:safeAvail,price_history:[...co.price_history,{p:np,t:isoNow()}]});
+  await updateCo(ticker,{price:np,price_history:[...co.price_history,{p:np,t:isoNow()}]});
   await recordTrade(ticker,qty,price,'short',u.id,'short');
   toast('Shorted '+qty+' × '+ticker+' @ '+fmt(price));if(UI.companyPage)render();else openPanel(ticker);
 }
@@ -2503,10 +2466,7 @@ async function coverShort(ticker,qty){
   sh[ticker]={...short,qty:short.qty-qty,collateral:Math.round((short.collateral-cb)*100)/100};
   if(sh[ticker].qty<=0)delete sh[ticker];
   await updateUser(u.id,{cash:Math.round((u.cash+cb+pnl)*100)/100,shorts:sh});
-  // Cover does NOT change shares_avail — shorts are synthetic and don't come from the pool.
-  // Clamp shares_avail to co.shares to prevent any overcount.
-  const safeAvail=Math.min(co.shares_avail,co.shares);
-  await updateCo(ticker,{price:cp,shares_avail:safeAvail,price_history:[...co.price_history,{p:cp,t:isoNow()}]});
+  await updateCo(ticker,{price:cp,price_history:[...co.price_history,{p:cp,t:isoNow()}]});
   await recordTrade(ticker,qty,cp,u.id,'cover','cover');
   toast('Covered '+qty+' × '+ticker+' | P&L: '+(pnl>=0?'+':'')+fmt(pnl));if(UI.companyPage)render();else openPanel(ticker);
 }
@@ -2671,25 +2631,275 @@ async function removeShareClass(ticker){
   toast(isConversion?ticker+' class stripped — stock remains listed':ticker+' class removed and delisted');
   render();
 }
-async function delistCompany(ticker,silent=false){
+// ═══════════════════════════════════════════════
+// DELIST SYSTEM — Voluntary & Involuntary
+// ═══════════════════════════════════════════════
+
+// ── Render: company-side delist application tab ──────────
+function renderDelistTab(co,u){
+  const existing=DB.delistApps.find(a=>a.ticker===co.ticker&&a.status==='pending');
+  const rejected=DB.delistApps.find(a=>a.ticker===co.ticker&&a.status==='rejected');
+  const shareholders=DB.users.filter(s=>s.role==='student'&&(holdings(s)[co.ticker]||0)>0);
+  const totalShares=co.shares-co.shares_avail; // shares in circulation
+  const buybackPrice=co.price; // last traded price used as offer price
+
+  let html=`<div class="ibox ibox-red" style="margin-bottom:14px">
+    <strong>⚠️ Voluntary Delisting</strong><br>
+    Submitting a delist request asks the Chairman to remove your company from JEX.
+    If approved, you must offer to buy back all outstanding shares from shareholders at the current price before delisting completes.
+    Any shares not sold back remain worthless after delisting. This action cannot be reversed without Chairman approval.
+  </div>`;
+
+  if(existing){
+    return html+`<div class="card"><div class="section-title">Pending delist request</div>
+      <div class="ibox ibox-amber">⏳ Your voluntary delist request is under review by the Chairman.</div>
+      <div style="font-size:13px;margin-top:10px"><strong>Reason:</strong> ${existing.reason}</div>
+      <div style="font-size:12px;color:var(--text2);margin-top:6px">Submitted ${existing.ts}</div>
+      <button class="btn btn-danger btn-sm" style="margin-top:14px" onclick="withdrawDelistApp('${co.ticker}')">Withdraw request</button>
+    </div>`;
+  }
+
+  html+=`<div class="card"><div class="section-title">Current shareholder exposure</div>
+    <div class="grid3" style="margin-bottom:14px">
+      <div class="mcard"><div class="mlabel">Shares in circulation</div><div class="mval">${totalShares.toLocaleString()}</div></div>
+      <div class="mcard"><div class="mlabel">Shareholders</div><div class="mval">${shareholders.length}</div></div>
+      <div class="mcard"><div class="mlabel">Buyback cost at current price</div><div class="mval" style="font-family:var(--mono);color:var(--red)">${fmt(totalShares*buybackPrice)}</div></div>
+    </div>
+    ${shareholders.length?`<table><thead><tr><th>Shareholder</th><th class="r">Shares held</th><th class="r">Buyback offer</th></tr></thead><tbody>
+      ${shareholders.map(s=>`<tr><td>${s.name}</td><td class="r" style="font-family:var(--mono)">${(holdings(s)[co.ticker]||0).toLocaleString()}</td><td class="r" style="font-family:var(--mono);color:var(--amber)">${fmt((holdings(s)[co.ticker]||0)*buybackPrice)}</td></tr>`).join('')}
+    </tbody></table>`:'<div class="ibox ibox-green">No outstanding shareholders — free to delist immediately.</div>'}
+  </div>`;
+
+  if(rejected){
+    html+=`<div class="ibox ibox-red" style="margin-bottom:14px">❌ Your previous delist request was rejected by the Chairman. You may submit a new one below.</div>`;
+  }
+
+  html+=`<div class="card"><div class="section-title">Submit voluntary delist request</div>
+    <div class="frow"><label class="flabel">Reason for delisting</label>
+      <textarea id="delist-reason" rows="3" placeholder="e.g. Business is winding down, no longer viable to operate on JEX..."></textarea>
+    </div>
+    <div class="frow"><label class="flabel">Confirm company name</label>
+      <input type="text" id="delist-confirm" placeholder="Type '${co.name}' to confirm">
+    </div>
+    <button class="btn btn-danger" onclick="submitDelistApp('${co.ticker}','${co.name}')">Submit delist request</button>
+  </div>`;
+
+  return html;
+}
+
+// ── Submit voluntary delist application ──────────────────
+async function submitDelistApp(ticker,coName){
+  const co=getCo(ticker);if(!co)return;
+  const reason=(document.getElementById('delist-reason')?.value||'').trim();
+  const confirm2=(document.getElementById('delist-confirm')?.value||'').trim();
+  if(!reason||reason.length<10)return toast('Please provide a detailed reason (at least 10 characters)');
+  if(confirm2!==coName)return toast('Company name does not match — type it exactly to confirm');
+  if(DB.delistApps.find(a=>a.ticker===ticker&&a.status==='pending'))return toast('You already have a pending delist request');
+  const u=cu();
+  const shareholders=DB.users.filter(s=>s.role==='student'&&(holdings(s)[co.ticker]||0)>0);
+  const totalCirc=co.shares-co.shares_avail;
+  const app={id:uid(),ticker,company_name:co.name,user_id:u.id,user_name:u.name,
+    reason,shares_in_circulation:totalCirc,buyback_price:co.price,
+    shareholders:shareholders.length,status:'pending',type:'voluntary',ts:ts()};
+  DB.delistApps.push(app);
+  // Notify Chairman and President
+  const admins=DB.users.filter(x=>x.role==='chairman'||x.role==='president');
+  for(const a of admins){
+    await pushNotification(a.id,'ipo','🏳️ '+co.name+' ('+ticker+') has submitted a voluntary delist request — '+reason.slice(0,60),ticker);
+  }
+  await logActivity('ipo',co.name+' submitted voluntary delist request: '+reason,{ticker,userId:u.id,userName:u.name});
+  toast('Delist request submitted — awaiting Chairman review');
+  UI.companyTab='delist';render();
+}
+
+async function withdrawDelistApp(ticker){
+  const app=DB.delistApps.find(a=>a.ticker===ticker&&a.status==='pending');
+  if(!app)return;
+  app.status='withdrawn';
+  await logActivity('ipo',getCo(ticker)?.name+' withdrew voluntary delist request',{ticker});
+  toast('Delist request withdrawn');render();
+}
+
+// ── Render: admin delist panel (Chairman/President) ──────
+function renderAdminDelistPanel(){
+  const pending=DB.delistApps.filter(a=>a.status==='pending');
+  const reviewed=DB.delistApps.filter(a=>a.status!=='pending'&&a.status!=='withdrawn').slice(0,10);
+  const listed=DB.companies.filter(c=>c.status==='listed');
+
+  let html=`<div class="card"><div class="section-title">Voluntary delist requests</div>`;
+  if(!pending.length){
+    html+='<div class="empty">No pending delist requests</div>';
+  } else {
+    pending.forEach(app=>{
+      const co=getCo(app.ticker);
+      const shareholders=DB.users.filter(s=>s.role==='student'&&co&&(holdings(s)[co.ticker]||0)>0);
+      html+=`<div style="border:1px solid var(--red);border-radius:var(--radius);padding:14px;margin-bottom:12px;background:rgba(255,77,106,0.04)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <strong>${app.company_name}</strong>
+          <span class="badge b-gray" style="font-family:var(--mono)">${app.ticker}</span>
+          <span class="badge b-amber">Voluntary</span>
+          <span style="font-size:11px;color:var(--text2);margin-left:auto">${app.ts} — ${app.user_name}</span>
+        </div>
+        <div style="font-size:13px;margin-bottom:8px;color:var(--text2)">"${app.reason}"</div>
+        <div class="grid3" style="margin-bottom:12px">
+          <div class="mcard"><div class="mlabel">Shares in circulation</div><div class="mval">${(app.shares_in_circulation||0).toLocaleString()}</div></div>
+          <div class="mcard"><div class="mlabel">Shareholders</div><div class="mval">${shareholders.length}</div></div>
+          <div class="mcard"><div class="mlabel">Buyback cost</div><div class="mval" style="font-family:var(--mono);color:var(--red)">${fmt((app.shares_in_circulation||0)*(app.buyback_price||co?.price||0))}</div></div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-success btn-sm" onclick="approveDelistApp('${app.id}',true)">✓ Approve — begin buyback window</button>
+          <button class="btn btn-danger btn-sm" onclick="approveDelistApp('${app.id}',false)">✗ Reject</button>
+          ${app.shares_in_circulation===0?`<button class="btn btn-warning btn-sm" onclick="approveDelistApp('${app.id}',true,true)">⚡ Approve & delist immediately (no shareholders)</button>`:''}
+        </div>
+      </div>`;
+    });
+  }
+  html+='</div>';
+
+  // Involuntary delist controls
+  html+=`<div class="card"><div class="section-title">Involuntary delisting</div>
+    <div class="ibox ibox-red" style="margin-bottom:14px">Involuntary delisting is immediate — no buyback window. All orders are cancelled, all shareholders are notified, and shares become worthless. Use for compliance violations or insolvency.</div>
+    <div class="frow"><label class="flabel">Select company</label>
+      <select id="inv-delist-ticker">
+        <option value="">— Select a listed company —</option>
+        ${listed.map(c=>`<option value="${c.ticker}">${c.name} (${c.ticker})</option>`).join('')}
+      </select>
+    </div>
+    <div class="frow"><label class="flabel">Reason</label>
+      <textarea id="inv-delist-reason" rows="2" placeholder="e.g. Persistent compliance violations, fraudulent financial disclosures..."></textarea>
+    </div>
+    <button class="btn btn-danger" onclick="forceDelistCompany()">⚠️ Force delist immediately</button>
+  </div>`;
+
+  // Buyback windows in progress
+  const buybackWindows=DB.delistApps.filter(a=>a.status==='buyback_open');
+  if(buybackWindows.length){
+    html+=`<div class="card"><div class="section-title">Buyback windows in progress</div>`;
+    buybackWindows.forEach(app=>{
+      const co=getCo(app.ticker);
+      const remaining=DB.users.filter(s=>s.role==='student'&&co&&(holdings(s)[co.ticker]||0)>0);
+      html+=`<div style="padding:12px;border:1px solid var(--amber);border-radius:var(--radius);margin-bottom:10px;background:rgba(240,165,0,0.05)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <strong>${app.company_name}</strong>
+          <span class="badge b-amber">Buyback window open</span>
+          <span style="font-size:11px;color:var(--text2);margin-left:auto">${remaining.length} shareholders remain</span>
+        </div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">
+          Buyback price: <strong style="font-family:var(--mono)">${fmt(app.buyback_price)}/share</strong> — shareholders can sell back from their portfolio.
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-danger btn-sm" onclick="finaliseDelistCompany('${app.ticker}','${app.id}')">Finalise delist (close buyback window)</button>
+        </div>
+      </div>`;
+    });
+    html+='</div>';
+  }
+
+  if(reviewed.length){
+    html+=`<div class="card"><div class="section-title">Delist history</div>
+      ${reviewed.map(a=>`<div class="app-row">
+        <div class="app-info">
+          <div class="app-name">${a.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span> <span class="badge b-${a.type==='voluntary'?'blue':'red'}">${a.type}</span></div>
+          <div class="app-meta">${a.ts}${a.reason?' — '+a.reason.slice(0,60):''}</div>
+        </div>
+        <span class="badge b-${a.status==='approved'||a.status==='delisted'?'green':a.status==='rejected'?'red':'gray'}">${a.status}</span>
+      </div>`).join('')}
+    </div>`;
+  }
+
+  return html;
+}
+
+async function approveDelistApp(appId, approve, immediate=false){
+  const app=DB.delistApps.find(a=>a.id===appId);if(!app)return;
+  const co=getCo(app.ticker);if(!co)return;
+  const u=cu();
+  if(!approve){
+    app.status='rejected';
+    await pushNotification(app.user_id,'ipo','❌ Your delist request for '+app.company_name+' was rejected by the Chairman.',app.ticker);
+    await logActivity('ipo','Delist request for '+app.company_name+' rejected by '+u.name,{ticker:app.ticker});
+    toast('Delist request rejected');render();return;
+  }
+  if(immediate){
+    // No shareholders — delist straight away
+    app.status='delisted';
+    await executeDelistCompany(app.ticker,'voluntary',app.reason);
+    await pushNotification(app.user_id,'ipo','✅ Your delist request was approved. '+app.company_name+' has been delisted from JEX.',app.ticker);
+    toast(app.company_name+' delisted immediately');render();return;
+  }
+  // Open buyback window
+  app.status='buyback_open';
+  app.buyback_opened_at=isoNow();
+  await pushNotification(app.user_id,'ipo','✅ Delist approved. A buyback window is now open — shareholders can sell their shares back. You will be notified when the Chairman closes the window.',app.ticker);
+  // Notify all shareholders of the buyback window
+  const shareholders2=DB.users.filter(s=>s.role==='student'&&(holdings(s)[co.ticker]||0)>0);
+  for(const s of shareholders2){
+    await pushNotification(s.id,'halt','📢 '+co.name+' ('+app.ticker+') is delisting from JEX. A buyback window is open at '+fmt(app.buyback_price)+'/share — sell your shares from your Portfolio before the window closes.',app.ticker);
+  }
+  await logActivity('ipo','Delist buyback window opened for '+app.company_name+' @ '+fmt(app.buyback_price)+'/share',{ticker:app.ticker,userId:u.id,userName:u.name});
+  toast('Buyback window opened — shareholders notified. Finalise when ready.');
+  render();
+}
+
+async function finaliseDelistCompany(ticker, appId){
+  const app=DB.delistApps.find(a=>a.id===appId);
+  const co=getCo(ticker);if(!co)return;
+  const remaining=DB.users.filter(s=>s.role==='student'&&(holdings(s)[co.ticker]||0)>0);
+  if(!confirm('Close buyback window and delist '+co.name+'?\n\n'+remaining.length+' shareholder(s) still hold shares — they will become worthless.'))return;
+  if(app)app.status='delisted';
+  await executeDelistCompany(ticker,'voluntary','Voluntary delist — buyback window closed');
+  toast(co.name+' delisted. All remaining shares are now worthless.');
+  render();
+}
+
+async function forceDelistCompany(){
+  const ticker=(document.getElementById('inv-delist-ticker')?.value||'').trim();
+  const reason=(document.getElementById('inv-delist-reason')?.value||'').trim();
+  if(!ticker)return toast('Select a company');
+  if(!reason||reason.length<5)return toast('Enter a reason');
+  const co=getCo(ticker);if(!co)return;
+  if(!confirm('⚠️ INVOLUNTARY DELIST\n\nThis will immediately delist '+co.name+' ('+ticker+').\n\nAll shareholder shares become WORTHLESS immediately — no buyback window.\n\nReason: '+reason+'\n\nThis cannot be undone.'))return;
+  const app={id:uid(),ticker,company_name:co.name,user_id:co.owner_id,user_name:getUser(co.owner_id)?.name||'',
+    reason,shares_in_circulation:co.shares-co.shares_avail,buyback_price:co.price,
+    shareholders:DB.users.filter(s=>s.role==='student'&&(holdings(s)[ticker]||0)>0).length,
+    status:'delisted',type:'involuntary',ts:ts()};
+  DB.delistApps.push(app);
+  // Notify company owner
+  await pushNotification(co.owner_id,'ipo','⚠️ Your company '+co.name+' has been involuntarily delisted by the exchange. Reason: '+reason,ticker);
+  await executeDelistCompany(ticker,'involuntary',reason);
+  toast(co.name+' involuntarily delisted');render();
+}
+
+// ── Core delist execution (shared by voluntary & involuntary) ─
+async function executeDelistCompany(ticker, type, reason){
   const co=DB.companies.find(c=>c.ticker===ticker);if(!co)return;
-  if(!silent&&!confirm('Delist '+co.name+' ('+ticker+')? The company can reapply for IPO later.'))return;
-  // Soft delist — keep the record so the company can reapply
+  const u=cu();
+  // Mark delisted
   await sb.patch('jex_companies','ticker=eq.'+ticker,{status:'delisted'});
   co.status='delisted';
-  // Cancel all open limit orders for this ticker
+  // Cancel all open limit orders
   const openOrders=DB.limitOrders.filter(o=>o.ticker===ticker&&(o.status==='open'||o.status==='after_hours'));
   for(const o of openOrders){
     await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'cancelled'});
     o.status='cancelled';
-    await pushNotification(o.user_id,'halt','📋 Limit order cancelled — '+ticker+' has been delisted.',ticker);
+    await pushNotification(o.user_id,'halt','📋 Order cancelled — '+ticker+' has been delisted.',ticker);
   }
   // Cancel stop-loss orders
   const slOrders=(DB.stopLossOrders||[]).filter(s=>s.ticker===ticker&&s.status==='active');
   for(const s of slOrders){await sb.patch('jex_stop_loss','id=eq.'+s.id,{status:'cancelled'});s.status='cancelled';}
-  // Notify shareholders
-  await pushNotificationToHolders(ticker,'halt','⚠️ '+co.name+' ('+ticker+') has been delisted from JEX.');
-  await logActivity('ipo',co.name+' ('+ticker+') delisted',{ticker});
+  // Notify all shareholders — shares are now worthless
+  const holders=DB.users.filter(s=>s.role==='student'&&(holdings(s)[ticker]||0)>0);
+  const typeLabel=type==='involuntary'?'involuntarily delisted':'delisted';
+  for(const s of holders){
+    await pushNotification(s.id,'halt','⚠️ '+co.name+' ('+ticker+') has been '+typeLabel+' from JEX. Your '+holdings(s)[ticker]+' share(s) are now worthless. Reason: '+reason,ticker);
+  }
+  await logActivity('ipo',co.name+' ('+ticker+') '+typeLabel+' — '+reason+' (by '+(u?.name||'System')+')',{ticker,userId:u?.id,userName:u?.name});
+}
+
+async function delistCompany(ticker,silent=false){
+  const co=DB.companies.find(c=>c.ticker===ticker);if(!co)return;
+  if(!silent&&!confirm('Delist '+co.name+' ('+ticker+')? The company can reapply for IPO later.'))return;
+  await executeDelistCompany(ticker,'involuntary','Admin delist');
   if(!silent){toast(co.name+' delisted — company can reapply for IPO');render();}
 }
 async function relistCompany(ticker){
@@ -2769,16 +2979,14 @@ function buildChartIntervalBar(canvasId,co){
 function fmtChartLabel(t,interval){
   if(!t)return '';
   // ISO timestamp
-  if(t.includes&&t.includes('T')&&(t.includes('Z')||t.includes('+'))){
+  if(t.includes('T')&&t.includes('Z')){
     const d=new Date(t);
-    if(isNaN(d))return t;
-    if(interval==='1d')return d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
-    if(interval==='5d')return d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
-    if(interval==='1m')return d.toLocaleString([],{year:'numeric',month:'short',day:'numeric'});
-    return d.toLocaleString([],{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+    if(interval==='1d')return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+    if(interval==='5d')return d.toLocaleDateString([],{weekday:'short',hour:'2-digit',minute:'2-digit'});
+    if(interval==='1m')return d.toLocaleDateString([],{month:'short',day:'numeric'});
+    return d.toLocaleDateString([],{month:'short',day:'numeric'});
   }
-  // Fallback string labels like 'IPO', 'Dilution', etc — show as-is with current date context
-  return t;
+  return t; // fallback for old string labels
 }
 function destroyChart(canvasId){
   if(charts[canvasId]){
@@ -2800,14 +3008,7 @@ function buildChart(canvasId,co){
   const pts=filterByInterval(allPts,interval);
   if(!pts.length)return;
   const prices=pts.map(p=>p.p);
-  const labels=pts.map((p,i)=>{
-    if(i===pts.length-1&&p.t&&(p.t.includes('T')||p.t.includes('-'))){
-      // Last point: show "Now (date time)"
-      const d=new Date(p.t);
-      if(!isNaN(d))return 'Now '+d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
-    }
-    return fmtChartLabel(p.t,interval);
-  });
+  const labels=pts.map((p,i)=>i===pts.length-1?'Now':fmtChartLabel(p.t,interval));
   const isUp=prices.length>0&&prices[prices.length-1]>=prices[0];
   const lc=isUp?'#00c896':'#ff4d6a';
   const fillColor=isUp?'rgba(0,200,150,0.06)':'rgba(255,77,106,0.06)';
@@ -2828,8 +3029,8 @@ function buildChart(canvasId,co){
           title:ctx=>ctx[0]?.label||''
         }}},
         scales:{
-          x:{display:true,grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:6,autoSkip:true}},
-          y:{display:true,grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:10},callback:v=>fmt(v)},beginAtZero:false}
+          x:{grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:6,autoSkip:true}},
+          y:{grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:10},callback:v=>fmt(v)},beginAtZero:false}
         }
       }
     });
@@ -3493,7 +3694,7 @@ function renderMarket(){
       <tbody>${listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
     const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
-    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}<span style="font-size:10px;color:var(--text2);font-weight:400">/100</span></span></td>`:'<td style="color:var(--text3)">—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="9"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
+    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);const col=hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)';return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${col}">${hs}<span style="font-size:11px;font-weight:500;color:${col}">/100</span></span></td>`:'<td style="color:var(--text3);font-family:var(--mono)">—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="9"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
     </div>
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
       +((DB.minutes||[]).filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${m.title}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}</div>`:'')
@@ -3798,19 +3999,19 @@ function renderMyStock(){
     <button class="tab ${UI.companyTab==='classes'?'active':''}" onclick="UI.companyTab='classes';render()">Share classes ${pendingClassApp?'<span class="badge b-amber" style="margin-left:4px">'+pendingClassApp+'</span>':''}</button>
     <button class="tab ${UI.companyTab==='votes'?'active':''}" onclick="UI.companyTab='votes';render()">Votes ${myVotes.length?'<span class="badge b-purple" style="margin-left:4px">'+myVotes.length+'</span>':''}</button>
     <button class="tab ${UI.companyTab==='news'?'active':''}" onclick="UI.companyTab='news';render()">News ${myNews.length?'<span class="badge b-amber" style="margin-left:4px">'+myNews.length+'</span>':''}</button>
-
     <button class="tab ${UI.companyTab==='dividends'?'active':''}" onclick="UI.companyTab='dividends';render()">Dividends</button>
     <button class="tab ${UI.companyTab==='buyback'?'active':''}" onclick="UI.companyTab='buyback';render()">Buyback</button>
     <button class="tab ${UI.companyTab==='dilution'?'active':''}" onclick="UI.companyTab='dilution';render()">Dilution ${DB.dilApps.filter(d=>getCompanyTickers(co.ticker).includes(d.ticker)&&d.status==='pending').length?'<span class="badge b-amber" style="margin-left:4px">'+DB.dilApps.filter(d=>getCompanyTickers(co.ticker).includes(d.ticker)&&d.status==='pending').length+'</span>':''}</button>
+    <button class="tab ${UI.companyTab==='delist'?'active':''}" onclick="UI.companyTab='delist';render()" style="color:var(--red)">Delist</button>
   </div>
   ${UI.companyTab==='stock'?renderStockOverview(co,u)
   :UI.companyTab==='founders'?renderFoundersTab(co,u)
   :UI.companyTab==='classes'?renderClassesTab(co)
   :UI.companyTab==='votes'?renderCompanyVotesTab(co)
   :UI.companyTab==='news'?renderCompanyNewsTab(co,myNews)
-
   :UI.companyTab==='dividends'?renderDivTab(co,myDivs)
   :UI.companyTab==='buyback'?renderBBTab(co,myBBs)
+  :UI.companyTab==='delist'?renderDelistTab(co,u)
   :renderDilTab(co)}`;
 }
 
@@ -4459,7 +4660,12 @@ function renderAdminResetForm(){
   form.innerHTML=`<div style="font-size:13px;margin-bottom:10px;padding:10px;background:var(--bg3);border-radius:var(--radius)">Resetting: <strong>${u.name}</strong><br><span style="font-size:12px;color:var(--text2)">Security question: ${u.sec_q||'—'}</span></div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="admin-reset-pw" placeholder="New password (min 4 characters)"><button type="button" class="pw-eye" onclick="togglePw('admin-reset-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="adminResetPw('${u.id}',get('admin-reset-pw')?.value)">Reset password</button>`;
 }
 function renderAdminIPO(pIPO,rIPO){
-  return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${a.name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${a.description||'no desc'}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewIPO('${a.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewIPO('${a.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${a.name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}`;
+  const pendingDelists=DB.delistApps.filter(a=>a.status==='pending').length;
+  const buybackOpen=DB.delistApps.filter(a=>a.status==='buyback_open').length;
+  const delistBadge=(pendingDelists+buybackOpen)>0?` <span class="badge b-red" style="margin-left:4px">${pendingDelists+buybackOpen}</span>`:'';
+  return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${a.name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${a.description||'no desc'}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewIPO('${a.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewIPO('${a.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${a.name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}
+  </div>
+  <div class="card"><div class="section-title">Delist applications${delistBadge}</div>${renderAdminDelistPanel()}</div>`;
 }
 function renderAdminDilution(pDil,rDil){
   return`<div class="card"><div class="section-title">Pending dilution requests</div>${pDil.length?pDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${d.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span> <span class="badge b-coral">+${d.pct_increase}%</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares — "${d.reason}"</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewDilution('${d.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewDilution('${d.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending dilution requests</div>'}${rDil.length?`<hr class="divider">${rDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${d.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares</div></div><span class="badge ${d.status==='approved'?'b-green':'b-red'}">${d.status}</span></div>`).join('')}`:''}`;
