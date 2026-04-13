@@ -8,7 +8,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -530,6 +529,7 @@ async function loadAll(){
     priceAlerts,nwHistory,companyMembers,founderAllocations,
     priceAdjustments,flags,minutes,divApprovals,stopLossOrders});
   render(); // re-render with full data
+  checkScheduleImmediate(); // check open/close schedule as soon as data loads
 }
 
 // ═══════════════════════════════════════════════
@@ -1068,7 +1068,11 @@ function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-
 async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
 async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();}
 function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('Trading session is now open!');});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended.');});}}
-setInterval(()=>{checkSchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
+setInterval(()=>{checkSchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},5000);
+// Also check schedule immediately when page becomes visible (e.g. switching tabs)
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){checkSchedule();}});
+// And fire once on first real-time connect / loadAll completion (called after boot)
+function checkScheduleImmediate(){checkSchedule();}
 
 // ── Auto-refresh: pull latest data every 20 seconds ──────
 let _lastRefresh=0;
@@ -1956,19 +1960,37 @@ async function requestPushPermission(){
 }
 function showBrowserPush(title,body){
   if(!_pushEnabled||Notification.permission!=='granted')return;
-  try{
-    const n=new Notification('JEX — '+title,{
-      body,
-      icon:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%230f1117"/><text x="16" y="23" font-family="monospace" font-size="20" font-weight="700" fill="%23f0a500" text-anchor="middle">J</text></svg>',
-      badge:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%23f0a500"/><text x="16" y="23" font-family="monospace" font-size="20" font-weight="700" fill="%230f1117" text-anchor="middle">J</text></svg>',
-      tag:'jex-'+Date.now(),
-      requireInteraction:false
+  const icon='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%230f1117"/><text x="16" y="23" font-family="monospace" font-size="20" font-weight="700" fill="%23f0a500" text-anchor="middle">J</text></svg>';
+  const badge='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%23f0a500"/><text x="16" y="23" font-family="monospace" font-size="20" font-weight="700" fill="%230f1117" text-anchor="middle">J</text></svg>';
+  const tag='jex-'+Date.now();
+  // Chrome requires notifications to be shown via ServiceWorker registration when available
+  if(navigator.serviceWorker&&navigator.serviceWorker.controller){
+    navigator.serviceWorker.ready.then(reg=>{
+      reg.showNotification('JEX — '+title,{body,icon,badge,tag,requireInteraction:false}).catch(()=>{
+        // Fallback to direct Notification
+        try{const n=new Notification('JEX — '+title,{body,icon,badge,tag,requireInteraction:false});setTimeout(()=>n.close(),6000);}catch(e){}
+      });
+    }).catch(()=>{
+      try{const n=new Notification('JEX — '+title,{body,icon,badge,tag,requireInteraction:false});setTimeout(()=>n.close(),6000);}catch(e){}
     });
-    setTimeout(()=>n.close(),6000);
-  }catch(e){}
+  } else {
+    // No service worker — use direct Notification (works in Opera GX, may need SW in Chrome)
+    try{
+      const n=new Notification('JEX — '+title,{body,icon,badge,tag,requireInteraction:false});
+      setTimeout(()=>n.close(),6000);
+    }catch(e){}
+  }
 }
 // Restore permission on page load
 if(typeof Notification!=='undefined'&&Notification.permission==='granted')_pushEnabled=true;
+// Register a minimal ServiceWorker so Chrome can show notifications via registration.showNotification()
+(function(){
+  if(!('serviceWorker' in navigator))return;
+  const swCode='self.addEventListener(\'notificationclick\',function(e){e.notification.close();});self.addEventListener(\'push\',function(e){});';
+  const blob=new Blob([swCode],{type:'application/javascript'});
+  const url=URL.createObjectURL(blob);
+  navigator.serviceWorker.register(url,{scope:'./'}).catch(function(){});
+})();
 
 async function pushNotification(userId, type, message, ticker=null){
   try{
@@ -1976,47 +1998,59 @@ async function pushNotification(userId, type, message, ticker=null){
     await sb.post('jex_notifications',rec);
     if(userId===UI.userId){
       DB.notifications.unshift(rec);
-      // Fire browser push for current user
-      const titles={
-        dividend:'💰 Dividend received',halt:'⚠️ Trading halted',
-        stop_loss:'🛑 Stop-loss triggered',limit_fill:'⚡ Order filled',
-        after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
-        ipo:'🏢 IPO update',session:'🕐 Session update',
-        price_alert:'🔔 Price alert',resume:'✅ Trading resumed',
-        founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised'
+      // Build role-specific push title
+      const targetUser=getUser(userId);
+      const role=targetUser?.role||'student';
+      const roleTitles={
+        chairman:{
+          dividend:'💰 Dividend payment',halt:'⚠️ Market halt issued',stop_loss:'🛑 Stop-loss triggered',
+          limit_fill:'⚡ Limit order filled',after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
+          ipo:'🏢 IPO decision required',session:'🕐 Session update',price_alert:'🔔 Price alert',
+          resume:'✅ Trading resumed',founder_alloc:'🎁 Founder allocation',flag:'🚩 Compliance flag raised',
+          founder:'🏢 Company update',div_approval:'💰 Dividend approval needed'
+        },
+        president:{
+          dividend:'💰 Dividend approved',halt:'⚠️ Trading halted',stop_loss:'🛑 Stop-loss triggered',
+          limit_fill:'⚡ Order filled',after_hours:'⏰ Pre-session order',invite:'🤝 Founder invite',
+          ipo:'🏢 IPO requires review',session:'🕐 Session update',price_alert:'🔔 Price alert',
+          resume:'✅ Market resumed',founder_alloc:'🎁 Founder shares',flag:'🚩 Compliance report',
+          founder:'🏢 Governance update',div_approval:'💰 Dividend pending approval'
+        },
+        secretary:{
+          dividend:'💰 Dividend recorded',halt:'⚠️ Halt recorded',stop_loss:'🛑 Order triggered',
+          limit_fill:'⚡ Order executed',after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
+          ipo:'🏢 IPO filed',session:'📋 Session recorded',price_alert:'🔔 Price alert',
+          resume:'✅ Trade resumed',founder_alloc:'🎁 Allocation logged',flag:'🚩 Flag recorded',
+          founder:'🏢 Record update'
+        },
+        treasurer:{
+          dividend:'💰 Dividend payment out',halt:'⚠️ Trading halted',stop_loss:'🛑 Stop-loss hit',
+          limit_fill:'⚡ Order filled',after_hours:'⏰ After-hours queue',invite:'🤝 Founder invite',
+          ipo:'🏢 IPO financials',session:'💵 Session update',price_alert:'🔔 Price alert',
+          resume:'✅ Trading resumed',founder_alloc:'🎁 Shares allocated',flag:'🚩 Compliance flag',
+          div_approval:'💰 Dividend needs your approval',founder:'🏢 Shareholder update'
+        },
+        compliance_officer:{
+          dividend:'💰 Dividend issued',halt:'⚠️ Halt order',stop_loss:'🛑 Stop-loss triggered',
+          limit_fill:'⚡ Order filled',after_hours:'⏰ After-hours order',invite:'🤝 Invite',
+          ipo:'🏢 IPO filed',session:'🕐 Session status',price_alert:'🔔 Price alert',
+          resume:'✅ Trading resumed',founder_alloc:'🎁 Allocation made',flag:'🚩 Flag raised',
+          founder:'🏢 Company update'
+        },
+        default:{
+          dividend:'💰 Dividend received',halt:'⚠️ Trading halted',stop_loss:'🛑 Stop-loss triggered',
+          limit_fill:'⚡ Order filled',after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
+          ipo:'🏢 IPO update',session:'🕐 Session update',price_alert:'🔔 Price alert',
+          resume:'✅ Trading resumed',founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised',
+          founder:'🏢 Company update'
+        }
       };
-      showBrowserPush(titles[type]||'Notification',message);
-      // Email notification if enabled for this user
-      triggerEmailNotification(userId,type,message,ticker);
+      const titleMap=roleTitles[role]||roleTitles.default;
+      showBrowserPush(titleMap[type]||'Notification',message);
     }
   }catch(e){console.warn('Notification failed:',e);}
 }
-// ── Email notifications ──────────────────────────────────
-// Uses EmailJS (free tier: 200 emails/month)
-// Chairman configures EmailJS in Admin → Session → Email notifications
-function triggerEmailNotification(userId,type,message,ticker){
-  const user=getUser(userId);if(!user||!user.email_notifications)return;
-  const emailAddr=user.notification_email||user.email;if(!emailAddr)return;
-  // Only email for high-priority types
-  const emailTypes=['dividend','halt','stop_loss','ipo','session','limit_fill','founder_alloc'];
-  if(!emailTypes.includes(type))return;
-  const ejsServiceId=DB.session.emailjs_service_id;
-  const ejsTemplateId=DB.session.emailjs_template_id;
-  const ejsPublicKey=DB.session.emailjs_public_key;
-  if(!ejsServiceId||!ejsTemplateId||!ejsPublicKey)return;
-  try{
-    if(typeof emailjs==='undefined')return;
-    emailjs.init(ejsPublicKey);
-    emailjs.send(ejsServiceId,ejsTemplateId,{
-      to_email:emailAddr,
-      to_name:user.name,
-      subject:'JEX — '+message.replace(/[🔔💰⚡⚠️🛑🏢🕐]/g,'').trim().slice(0,60),
-      message:message,
-      ticker:ticker||'',
-      jex_url:window.location.href
-    }).catch(e=>console.warn('EmailJS error:',e.text||e));
-  }catch(e){}
-}
+// Email notifications removed
 
 async function pushNotificationToHolders(ticker,type,message){
   const holders=DB.users.filter(u=>u.role==='student'&&(holdings(u)[ticker]||0)>0);
@@ -2453,7 +2487,10 @@ async function placeShort(ticker,qty){
   sh[ticker]={qty:tq,avgPrice:Math.round(((ex.avgPrice*ex.qty)+(price*qty))/tq*100)/100,collateral:Math.round((ex.collateral+coll)*100)/100};
   await updateUser(u.id,{cash:Math.round((u.cash-coll)*100)/100,shorts:sh});
   const np=impactPrice(co,qty,'sell');
-  await updateCo(ticker,{price:np,price_history:[...co.price_history,{p:np,t:isoNow()}]});
+  // Short does NOT change shares_avail — it's synthetic borrowing, not from pool.
+  // Clamp to prevent overcount.
+  const safeAvail=Math.min(co.shares_avail,co.shares);
+  await updateCo(ticker,{price:np,shares_avail:safeAvail,price_history:[...co.price_history,{p:np,t:isoNow()}]});
   await recordTrade(ticker,qty,price,'short',u.id,'short');
   toast('Shorted '+qty+' × '+ticker+' @ '+fmt(price));if(UI.companyPage)render();else openPanel(ticker);
 }
@@ -2466,7 +2503,10 @@ async function coverShort(ticker,qty){
   sh[ticker]={...short,qty:short.qty-qty,collateral:Math.round((short.collateral-cb)*100)/100};
   if(sh[ticker].qty<=0)delete sh[ticker];
   await updateUser(u.id,{cash:Math.round((u.cash+cb+pnl)*100)/100,shorts:sh});
-  await updateCo(ticker,{price:cp,price_history:[...co.price_history,{p:cp,t:isoNow()}]});
+  // Cover does NOT change shares_avail — shorts are synthetic and don't come from the pool.
+  // Clamp shares_avail to co.shares to prevent any overcount.
+  const safeAvail=Math.min(co.shares_avail,co.shares);
+  await updateCo(ticker,{price:cp,shares_avail:safeAvail,price_history:[...co.price_history,{p:cp,t:isoNow()}]});
   await recordTrade(ticker,qty,cp,u.id,'cover','cover');
   toast('Covered '+qty+' × '+ticker+' | P&L: '+(pnl>=0?'+':'')+fmt(pnl));if(UI.companyPage)render();else openPanel(ticker);
 }
@@ -2729,14 +2769,16 @@ function buildChartIntervalBar(canvasId,co){
 function fmtChartLabel(t,interval){
   if(!t)return '';
   // ISO timestamp
-  if(t.includes('T')&&t.includes('Z')){
+  if(t.includes&&t.includes('T')&&(t.includes('Z')||t.includes('+'))){
     const d=new Date(t);
-    if(interval==='1d')return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-    if(interval==='5d')return d.toLocaleDateString([],{weekday:'short',hour:'2-digit',minute:'2-digit'});
-    if(interval==='1m')return d.toLocaleDateString([],{month:'short',day:'numeric'});
-    return d.toLocaleDateString([],{month:'short',day:'numeric'});
+    if(isNaN(d))return t;
+    if(interval==='1d')return d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+    if(interval==='5d')return d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+    if(interval==='1m')return d.toLocaleString([],{year:'numeric',month:'short',day:'numeric'});
+    return d.toLocaleString([],{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
   }
-  return t; // fallback for old string labels
+  // Fallback string labels like 'IPO', 'Dilution', etc — show as-is with current date context
+  return t;
 }
 function destroyChart(canvasId){
   if(charts[canvasId]){
@@ -2758,7 +2800,14 @@ function buildChart(canvasId,co){
   const pts=filterByInterval(allPts,interval);
   if(!pts.length)return;
   const prices=pts.map(p=>p.p);
-  const labels=pts.map((p,i)=>i===pts.length-1?'Now':fmtChartLabel(p.t,interval));
+  const labels=pts.map((p,i)=>{
+    if(i===pts.length-1&&p.t&&(p.t.includes('T')||p.t.includes('-'))){
+      // Last point: show "Now (date time)"
+      const d=new Date(p.t);
+      if(!isNaN(d))return 'Now '+d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+    }
+    return fmtChartLabel(p.t,interval);
+  });
   const isUp=prices.length>0&&prices[prices.length-1]>=prices[0];
   const lc=isUp?'#00c896':'#ff4d6a';
   const fillColor=isUp?'rgba(0,200,150,0.06)':'rgba(255,77,106,0.06)';
@@ -2779,8 +2828,8 @@ function buildChart(canvasId,co){
           title:ctx=>ctx[0]?.label||''
         }}},
         scales:{
-          x:{grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:6,autoSkip:true}},
-          y:{grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:10},callback:v=>fmt(v)},beginAtZero:false}
+          x:{display:true,grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:6,autoSkip:true}},
+          y:{display:true,grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:10},callback:v=>fmt(v)},beginAtZero:false}
         }
       }
     });
@@ -3440,11 +3489,11 @@ function renderMarket(){
       <div class="section-title" style="margin-bottom:0;flex:1">Listed companies</div>
       <input type="text" id="market-search" placeholder="Search by name or ticker..." style="max-width:240px;padding:6px 10px;font-size:13px" oninput="renderMarketInPlace()">
     </div>
-      <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${(u.role==='student'||u.role==='company')?'<th>Watch</th><th></th>':''}</tr></thead>
+      <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${(u.role==='student'||u.role==='company')?'<th>Watch</th><th>Health</th><th></th>':''}</tr></thead>
       <tbody>${listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
     const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
-    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td><div style="font-size:10px;color:var(--text2);line-height:1.2">Health</div><div style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</div></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
+    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${c.name}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${c.description}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}<span style="font-size:10px;color:var(--text2);font-weight:400">/100</span></span></td>`:'<td style="color:var(--text3)">—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')}${!listed.length?`<tr><td colspan="9"><div class="empty">No listed companies yet</div></td></tr>`:''}</tbody></table>
     </div>
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
       +((DB.minutes||[]).filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${m.title}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}</div>`:'')
