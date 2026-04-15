@@ -353,7 +353,7 @@ const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='
 // ═══════════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════════
-let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],delistApps:[],trades:[],dividends:[],buybacks:[],
+let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],delistApps:[],disputes:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
   founderShares:[],companyInvites:[],priceAdjustments:[],
@@ -473,7 +473,7 @@ setInterval(checkInactivity,60000); // check every minute
 document.addEventListener('mousemove',resetActivityTimer,{passive:true});
 document.addEventListener('keydown',resetActivityTimer,{passive:true});
 document.addEventListener('touchstart',resetActivityTimer,{passive:true});
-let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null};
+let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:'',dateFrom:'',dateTo:''},auditFilter:{type:'',ticker:'',user:'',dateFrom:'',dateTo:''},classroomFilter:null};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
@@ -1045,7 +1045,7 @@ async function setSession(status){
     description+=' — ran for '+mins+' minute'+(mins!==1?'s':'');
     _sessionOpenedAt=null;
   }
-  if(status==='open')_sessionOpenedAt=Date.now();
+  if(status==='open'){_sessionOpenedAt=Date.now();resetTimerWarnings();}
   await logActivity('session',description,{userId:u?.id,userName:u?.name});
   if(status==='open'){await pushNotificationToAll('session','🟢 Trading session is now open!');activateAfterHoursOrders();recordSessionOpenPrices();}
   if(status==='closed'){
@@ -1064,7 +1064,36 @@ async function setSession(status){
   render();
 }
 async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);render();}
-function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
+function tickTimer(){
+  if(!DB.session.ends_at)return;
+  const rem=DB.session.ends_at-Date.now();
+  if(rem<=0){
+    saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{
+      clearInterval(sessionTimer);sessionTimer=null;
+      showBrowserPush('Session closed','Trading has ended. All day orders have been cancelled.');
+      render();toast('⏰ Session ended!');
+    });
+    return;
+  }
+  const el=get('timer-el');
+  if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}
+  const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';
+  // Milestone warnings — fire once per milestone
+  if(!window._warnedMin5&&rem<=5*60000&&rem>4*60000){
+    window._warnedMin5=true;
+    toast('⚠️ 5 minutes remaining in this session!');
+    showBrowserPush('⚠️ 5 minutes left','Trading session closes in 5 minutes — finish your orders!');
+    const u=cu();if(u)pushNotification(u.id,'session','⚠️ 5 minutes left in this trading session — wrap up your orders!',null);
+  }
+  if(!window._warnedMin1&&rem<=60000&&rem>45000){
+    window._warnedMin1=true;
+    toast('🔴 1 minute remaining — session closing soon!');
+    showBrowserPush('🔴 1 minute left','Session closes in 60 seconds!');
+    const u=cu();if(u)pushNotification(u.id,'session','🔴 1 minute left! Session is about to close.',null);
+  }
+}
+// Reset warning flags when a session opens
+function resetTimerWarnings(){window._warnedMin5=false;window._warnedMin1=false;}
 async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
 async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();}
 function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('Trading session is now open!');});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended.');});}}
@@ -1877,15 +1906,15 @@ async function snapshotAllNW(){
 // ═══════════════════════════════════════════════
 // PRICE ALERTS
 // ═══════════════════════════════════════════════
-async function addPriceAlert(ticker,targetPrice,direction){
+async function addPriceAlert(ticker,targetPrice,direction,repeat=false){
   const u=cu();if(!u)return;
   targetPrice=parseFloat(targetPrice);
   if(isNaN(targetPrice)||targetPrice<=0)return toast('Enter a valid price');
   if(!direction)return toast('Select above or below');
-  const rec={id:uid(),user_id:u.id,ticker,target_price:targetPrice,direction,triggered:false,ts:ts()};
+  const rec={id:uid(),user_id:u.id,ticker,target_price:targetPrice,direction,triggered:false,repeat:!!repeat,ts:ts()};
   await sb.post('jex_price_alerts',rec);
   DB.priceAlerts.push(rec);
-  toast('Alert set: '+ticker+' '+direction+' '+fmt(targetPrice));render();
+  toast('Alert set: '+ticker+' '+direction+' '+fmt(targetPrice)+(repeat?' (repeating)':''));render();
 }
 async function deletePriceAlert(id){
   await sb.del('jex_price_alerts','id=eq.'+id);
@@ -1898,10 +1927,37 @@ async function checkPriceAlerts(){
     const co=getCo(a.ticker);if(!co)continue;
     const triggered=(a.direction==='above'&&co.price>=a.target_price)||(a.direction==='below'&&co.price<=a.target_price);
     if(!triggered)continue;
-    await sb.patch('jex_price_alerts','id=eq.'+a.id,{triggered:true});
-    a.triggered=true;
-    await pushNotification(a.user_id,'price_alert','🎯 Price alert: '+a.ticker+' is '+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0)+' (now '+fmt(co.price)+')',a.ticker);
-    toast('Price alert triggered: '+a.ticker+' '+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0));
+    if(a.repeat){
+      // Reset for repeat alerts — mark triggered briefly then reset
+      a.triggered=true;
+      setTimeout(async()=>{
+        a.triggered=false;
+        await sb.patch('jex_price_alerts','id=eq.'+a.id,{triggered:false});
+      },60000); // 1 min cooldown before re-firing
+    } else {
+      await sb.patch('jex_price_alerts','id=eq.'+a.id,{triggered:true});
+      a.triggered=true;
+    }
+    await pushNotification(a.user_id,'price_alert','🎯 Alert: '+a.ticker+' is '+(a.direction||'?')+' '+fmt(parseFloat(a.target_price)||0)+' — now '+fmt(co.price)+(a.repeat?' (repeating alert)':''),a.ticker);
+    toast('Alert: '+a.ticker+' '+(a.direction||'?')+' '+fmt(parseFloat(a.target_price)||0));
+  }
+  // Spike + volume detection for watched stocks
+  const u=cu();if(!u)return;
+  const myWatchlist=watchlist(u);
+  for(const ticker of myWatchlist){
+    const co=getCo(ticker);if(!co||!co.price_history||co.price_history.length<3)continue;
+    const pts=co.price_history.slice(-6);
+    const recent=pts[pts.length-1].p,prev=pts[0].p;
+    if(prev>0){
+      const pct=Math.abs((recent-prev)/prev*100);
+      const key='spike_'+ticker+'_'+Math.floor(Date.now()/300000);
+      if(pct>=5&&!localStorage.getItem(key)){
+        localStorage.setItem(key,'1');
+        const dir=recent>prev?'up':'down';
+        await pushNotification(u.id,'price_alert','📊 Spike detected: '+ticker+' moved '+dir+' '+pct.toFixed(1)+'% in the last few price points (watched stock)',ticker);
+        toast('📊 Spike: '+ticker+' '+dir+' '+pct.toFixed(1)+'%');
+      }
+    }
   }
 }
 
@@ -3258,7 +3314,7 @@ function renderLogin(){
     <input type="checkbox" id="reg-tos" style="width:16px;height:16px;min-width:16px;margin-top:2px;accent-color:var(--blue);cursor:pointer">
     <span style="font-size:12px;color:var(--text2);line-height:1.5">
       I have read and agree to the
-<a href="https://drive.google.com/file/d/1oRVEAXrhy8eWbYnyzJ-LyuDpflKpw2_F/view?usp=drive_link" target="_blank" rel="noopener noreferrer" style="color:var(--blue);font-weight:500;text-decoration:underline">JEX Terms of Service, Rules &amp; Regulations</a>
+<a href="data:application/pdf;base64,JVBERi0xLjQKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgKG9wZW5zb3VyY2UpCjEgMCBvYmoKPDwKL0YxIDIgMCBSIC9GMiAzIDAgUiAvRjMgNSAwIFIgL0Y0IDYgMCBSCj4+CmVuZG9iagoyIDAgb2JqCjw8Ci9CYXNlRm9udCAvSGVsdmV0aWNhIC9FbmNvZGluZyAvV2luQW5zaUVuY29kaW5nIC9OYW1lIC9GMSAvU3VidHlwZSAvVHlwZTEgL1R5cGUgL0ZvbnQKPj4KZW5kb2JqCjMgMCBvYmoKPDwKL0Jhc2VGb250IC9IZWx2ZXRpY2EtQm9sZCAvRW5jb2RpbmcgL1dpbkFuc2lFbmNvZGluZyAvTmFtZSAvRjIgL1N1YnR5cGUgL1R5cGUxIC9UeXBlIC9Gb250Cj4+CmVuZG9iago0IDAgb2JqCjw8Ci9Db250ZW50cyAxNCAwIFIgL01lZGlhQm94IFsgMCAwIDYxMiA3OTIgXSAvUGFyZW50IDEzIDAgUiAvUmVzb3VyY2VzIDw8Ci9Gb250IDEgMCBSIC9Qcm9jU2V0IFsgL1BERiAvVGV4dCAvSW1hZ2VCIC9JbWFnZUMgL0ltYWdlSSBdCj4+IC9Sb3RhdGUgMCAvVHJhbnMgPDwKCj4+IAogIC9UeXBlIC9QYWdlCj4+CmVuZG9iago1IDAgb2JqCjw8Ci9CYXNlRm9udCAvSGVsdmV0aWNhLUJvbGRPYmxpcXVlIC9FbmNvZGluZyAvV2luQW5zaUVuY29kaW5nIC9OYW1lIC9GMyAvU3VidHlwZSAvVHlwZTEgL1R5cGUgL0ZvbnQKPj4KZW5kb2JqCjYgMCBvYmoKPDwKL0Jhc2VGb250IC9aYXBmRGluZ2JhdHMgL05hbWUgL0Y0IC9TdWJ0eXBlIC9UeXBlMSAvVHlwZSAvRm9udAo+PgplbmRvYmoKNyAwIG9iago8PAovQ29udGVudHMgMTUgMCBSIC9NZWRpYUJveCBbIDAgMCA2MTIgNzkyIF0gL1BhcmVudCAxMyAwIFIgL1Jlc291cmNlcyA8PAovRm9udCAxIDAgUiAvUHJvY1NldCBbIC9QREYgL1RleHQgL0ltYWdlQiAvSW1hZ2VDIC9JbWFnZUkgXQo+PiAvUm90YXRlIDAgL1RyYW5zIDw8Cgo+PiAKICAvVHlwZSAvUGFnZQo+PgplbmRvYmoKOCAwIG9iago8PAovQ29udGVudHMgMTYgMCBSIC9NZWRpYUJveCBbIDAgMCA2MTIgNzkyIF0gL1BhcmVudCAxMyAwIFIgL1Jlc291cmNlcyA8PAovRm9udCAxIDAgUiAvUHJvY1NldCBbIC9QREYgL1RleHQgL0ltYWdlQiAvSW1hZ2VDIC9JbWFnZUkgXQo+PiAvUm90YXRlIDAgL1RyYW5zIDw8Cgo+PiAKICAvVHlwZSAvUGFnZQo+PgplbmRvYmoKOSAwIG9iago8PAovQ29udGVudHMgMTcgMCBSIC9NZWRpYUJveCBbIDAgMCA2MTIgNzkyIF0gL1BhcmVudCAxMyAwIFIgL1Jlc291cmNlcyA8PAovRm9udCAxIDAgUiAvUHJvY1NldCBbIC9QREYgL1RleHQgL0ltYWdlQiAvSW1hZ2VDIC9JbWFnZUkgXQo+PiAvUm90YXRlIDAgL1RyYW5zIDw8Cgo+PiAKICAvVHlwZSAvUGFnZQo+PgplbmRvYmoKMTAgMCBvYmoKPDwKL0NvbnRlbnRzIDE4IDAgUiAvTWVkaWFCb3ggWyAwIDAgNjEyIDc5MiBdIC9QYXJlbnQgMTMgMCBSIC9SZXNvdXJjZXMgPDwKL0ZvbnQgMSAwIFIgL1Byb2NTZXQgWyAvUERGIC9UZXh0IC9JbWFnZUIgL0ltYWdlQyAvSW1hZ2VJIF0KPj4gL1JvdGF0ZSAwIC9UcmFucyA8PAoKPj4gCiAgL1R5cGUgL1BhZ2UKPj4KZW5kb2JqCjExIDAgb2JqCjw8Ci9QYWdlTW9kZSAvVXNlTm9uZSAvUGFnZXMgMTMgMCBSIC9UeXBlIC9DYXRhbG9nCj4+CmVuZG9iagoxMiAwIG9iago8PAovQXV0aG9yIChKVEVEIFN0b2NrIEV4Y2hhbmdlKSAvQ3JlYXRpb25EYXRlIChEOjIwMjYwNDE0MDA1ODM4KzAwJzAwJykgL0NyZWF0b3IgKFwodW5zcGVjaWZpZWRcKSkgL0tleXdvcmRzICgpIC9Nb2REYXRlIChEOjIwMjYwNDE0MDA1ODM4KzAwJzAwJykgL1Byb2R1Y2VyIChSZXBvcnRMYWIgUERGIExpYnJhcnkgLSBcKG9wZW5zb3VyY2VcKSkgCiAgL1N1YmplY3QgKFwodW5zcGVjaWZpZWRcKSkgL1RpdGxlIChKRVggXDIwNCBUZXJtcywgUnVsZXMgJiBSZWd1bGF0aW9ucykgL1RyYXBwZWQgL0ZhbHNlCj4+CmVuZG9iagoxMyAwIG9iago8PAovQ291bnQgNSAvS2lkcyBbIDQgMCBSIDcgMCBSIDggMCBSIDkgMCBSIDEwIDAgUiBdIC9UeXBlIC9QYWdlcwo+PgplbmRvYmoKMTQgMCBvYmoKPDwKL0ZpbHRlciBbIC9BU0NJSTg1RGVjb2RlIC9GbGF0ZURlY29kZSBdIC9MZW5ndGggMTc3Ngo+PgpzdHJlYW0KR2F0bTtnTVliKiY6TzpTJS9SMkkoQz0wPVkncyZDRHJEbyhgUitiITVbSixcW2FkcEM5MWhiYm0pU1JWXGxfXmxnO1RwVEV0S2tIUjU4TCRja0lKdFVAcnEzITUrNktPJD4naSM0V1YxN20pVEc/bGkrWDpNQD9yI1JTQ2UmVDQ0Z0lKLGMvYmsoOToxQGxuJyIhRS4yM3JUUDNXNkdHVVZnWjNOKUYuUDgxXjVNOmQ/b2QwLW1QbU1sWiE5XE83VS1ENk1xO1Boci9VY0o6UEBvIlNcV0szMURwTUw7QDBtJXVCRCVPbHFgaUJGblJjbUshPXQ+blZsVEtSIUo7RENfLjFfdSokMWpsSnUoT0grTHVKQjg4QTFURy0oODgtUlpkTlc7bUxvVlVmQk5vcVFQa01LZEJhVFk8aTMsL3JObEgqT2gwQzVaO0FLbGBZbSwkLmtvb1liKTF1V1M8MXVVXGlEdW40Ly5pXSZYRTEpbzJjdHIzU2IiPXBWKjhpUiUuYU5KTl5GZSk8J1BnR1s3ZlthT25ELmIlUmdlPEFDY0AiY0laaW88N3VuU0g3KUFEOEwhSyshW1RhbVkqP205czImV2RxTSphdFAvJUgmVllJb1hlSzFgbUpFbmY1PDVIYUFiSkVgLzNWa3BkLjdaJCJxXSNpdDBGbj1cSSQ0c2A1LDQ2cXJVQzBDbWptTGVlSiNARSQ4KDFNYEYnbzRLWWt0KSotUFJlPWQmMEBbJ1MzQzJeMzpQMVltOUxwJl1LKls6QV88LVheaEVENXNxWiNYRzJJakJRSUhBSEQrdWpDT01FKiImazo3N0guaipZS2JRQCg/O2VpMUhAdVs0SmpJY1lYKk4iXlJHQzJbZU9fLSVtXVFAWEo2L0dyLGtWJGZZbS9EcV9OLU4obmpGUWhwalhaOjV1MlYwcEtVTVYyJDdnZ1Y9QjNVLWFwVkFFJ3FXREwwaCZxPEVVN2dNWEZVRnNeRSE5ZGpvIktYO2JlQiNYS1hfYVVUWkUvOk8sIlwqZjlMQzpuZztvMmZAVCxtUUY6IVRXPDIrWEFwUVgpW0Y7L2RHSU8kZTpHOmFPbEE/dFNiZGQ3bmdVP0JkV3BPV3I+JixpQUIyU1g9KyNkcmJeNVUsKlJpPUR0SDNqXicqaGsuRT9MSFtrSi9vUyo/ZiU8Zm9CPDhJUWVOPlQ4P3FMYFFcUVsiMmxjIzNrR2soU0NSYShiQm5SOnMqRU8xSyQzS15ULFtpKzVDK2c3THVsXFVrXWksQm02JTNeRDVoOGMqK1A0UVZTQ15dOV07MXFZXSRBazxiQzxZWWA1aF5DUmtkalJYS1gvcTdbT3A3dV9mazw/YWM1OWBKWkUzSFFeKjwiZXMyQSs7Q2RHJmJQK2Q4PCU9PSEySGxYWW8pX09Abiptc3BlJi9LLDt0ZDBoU08rOF1lSmNvZC9KY2czW05lVmdmTEwnXmlPY1xYUkFTRl1gIlAxUjRvLVpLZGREITxsK3RrSCgpM29UcWNGQClxKlxvOXFUc2o7R2xQIWNIVidjTy1rPD8wOG9rQ2Y5XmNYM19PTiIuK25dTWxIZT9KJyJeMSFiVHEsPGdQLDdBJW4sLiteO0tgRyFsY3BkKUhBQjRqam1Wbkg4Ji1Ua1pXMmFTa2MrITNPNj1jLFIlQCM0WjgmTjoiJElvTT5iQjlCT3Q2cGtYXkhJPj5iTVs/LW1eWjs+SzdIY3MnRjRvKkRnTjohalpRWl4jKE1VVWFlJDtaTFghWltUVyY7XklMZFdHNU4sb1pyY1FzMlpBKGpHS2ZlZlA2O0xRKCdOVElLMi5GZGlDbkI2bVYqWjNCW2EhIkNQNUUoTFNPQjpXcT5ecjZQLV0yUUZXRD0pWGVtaENSUTI7ZygqU2tVQ2lcZCJQdWQtJGNePDg+QjpwSS9fKChkNz5MYUo8bjtFN01lb2E3UXIsZytgXlU0MEUxY0V1OldANVVrMF1EKzArJzRcLD5CLmheQ29hImtXUl4tZ3MtV3NJMi5mT0k4UjFaUjNMNFM7YkNdaGVMQ0lmYmdhbnE3dE5MLS9naVtPaW81SXNCJ0FJIzxsdUNNXzZZLCtSXEk9YVJDJkJDMHNALmBVOzRVPEFfR285LFtzaUciXlo7R2svJk41WTFJbzY7b1tmVGF1JE43Mms2cnQ3JSt1LGVAIi5pbm4/JTU4RV5rOnJbYTFVKmJUbyFeJFJ0Uk4sLmQvIUxZZUhvS2BxST1gMzowXC5BN04tU2o4VjBFdV08L3RSdWZoOWwqPVY2ak1obGdtJSNqbUVUPWMzVkEzWDdxTkorKDRvcmMyQDlnZWZGXCxxdT8oYjBfbDdWZTNjIn4+ZW5kc3RyZWFtCmVuZG9iagoxNSAwIG9iago8PAovRmlsdGVyIFsgL0FTQ0lJODVEZWNvZGUgL0ZsYXRlRGVjb2RlIF0gL0xlbmd0aCAyMDc0Cj4+CnN0cmVhbQpHYXUwRGdOKSUsJjpPOlNscTpRakBrZSsvWmghN2c6N0Atalw/WEsqOU84aFNQKXQxbyIrWVJlcFk/IWteO3IycU9tTyRHIkctWCFtYi1GJj9rRD9fJF9NLENuN2h0Vz84R3NxLzY5UitkMjNYM0U0UyUoRy8zQzJkb2hwTkZPJ0EzYyNHalQwcTFyVjZ1NThASkUoZyRKRXNGX2twMiFQP0VHMCVGWE9PR01eQzAtXFVxWiY7VycuUVVnPS4hXXRCU1kkViYlR2RzallFRTk2WUs4M00yIklOcjYzUFZRO3NmOVQlPSNsXixaRUEqO3BPUmsmK2lDYDJ0QzBXOEhWPXFFTC50aSgqajckLFBJIkI3VEdVVjlqQVNgaE8uI2FBXjUsPz8yZFleQ284XjJCLVxINy9ALmtjVDwiQ3B0Z2MrK1YiVkE2WVBqPTRtWzZsWilZczBxQTA1NVgmajxHImpSWiFhR15iVlZqNyMmZi8xKC9NOThYUnNUMmoua0ojWjcvSWozRzZGc3EnKEktQi9aNTpxaVdtczxuaCFla3JtYFEua05uPEJXJ0Y6OixqJ0ZfJlsmMTxTWlRQalloQVBBQV1fSE9LPF9mWSonWitaYUY4S2xUTiVIcTdfRDtlLlsoLy50WlhuRTFLOztbNUsobCFeMXJcWEAhLU1IUl1AdTVbIl9lRkskIm5TXD5ZO11QZSZ0Q2toLCpdUUUsQkwjVSRiViNULzkkcyRYMDlhJ1c9KVozUS9eOzwxXyMlcjMqMUlmczhXL1RNOT1MNCxfTTY/NiZCXyRnVWQkSlVqJy9dRTtsU1kqZiQlJU8uK25mJEtoTHNwYEhXJFBuNyRnQVRrY250LiVDY3A1XVpgZjBCaEZGT11oQ2slNEY3Q2YiTmZJOiZsK0QyYjEmV3FbP0dUI21cPVElOj8pKXNYX2osLCo3XTNQXzQ4NTtZLDdhc11INXJNKSFKM2lTVl91LGo9Wl9LQmlpbCppNFA+U1ZhMF1JOmZMW2tOMGMwNWF1Z0suajtxWW5JdFNPNm5lJStdUU4nJGtkSU5zKTc3V1E0U3VDPT8iJi8hWks3Q0RjMW9dXE1yTktGOyEzYU9eXmwpVGo6bDt0I1lvTSdyWzdTK1ddTCFhOiUrMEVaT0hoIz9RVVs2IiJVVHMoMDhoUm8oMiwicTVXc3RDZlEwRXAuI188cktcYVIyayRqOHUscidjKGE5PmluVyQ/KCxZVyxNdE1SM2YiJktnLF8uRGA+dVlhaklPVTJUJDRjXWRPSHJuODpYTFVQXVktaVFvJWN0ZkQzN0NjQVEtLDE/bGk9My5qIitZOnFTbHJtMkQ2QHR0VFk7N1VVWl1YQUsmS20yQVxGI2pgOEcoL0deNGxZNERONTktczQhdWdhPEs0XWQnJz5GIVhFMitNQ1hnNEhbUEFhbldENF49QiJjbS83TkQ+I0NGYVtqcDArOj1VNlxNIWJ0QzcsJ2tSayJEXVkqOWxvP1RxcykrXTU3QDIrJi89R3FZTGgmPyVVYm9sIXBmNCoyUV9DcGNBdF5BNXJ0cT9OYUxYWmYjKnQ9RFEoUEw7WG9ZKGw7U0Yia1VHWWNESnBJNEQ1UW9Fay1LVUk/PVkiRDBbUyFqRm5AZz1NYzJVR2tLWzIiKHBnLVwrdSVEa1F1VWMtKjg3IyFbRzUtKSFnLlQuUS5mPWEmLzBqcDgrVWNoNCU7NCFjT3VZRF5AS2Vxbjw5Z0lraiInVE4ibG9XUytROT46SGknVTtEUkRxKTJtPCxsV1k/YW0zZEtMRmxYWG1hKTJJLnVYWkYwZzxlbG5kc10kQTAhS24/YzY0W2ZXVGRubzYyclJgUztIZVZRKC1UVHBwNGtVcTNlRlxCbD4sYCIpOWpjP2RzT01zPl8hcTRzS1ldM0Q0S1pmQ1NzbEZjUGtDPTdnPUk3XC9mXUNAJztpLTNxcFN0TTc7NkRLUmQuT01iRV1uX0Q4MWtyPVpPRkRyRSdpSyZITEZGdC48LjM/OCFMdWlUZTleU3QoaHAqNU4yJkEjYEtQU1dYOV4uOl08OXJTPFkoKixRLUAmLGc3aydVQFQpZFM4bDY1aW5RM00oNGZLNT8nY2BIJk06bnFoVylCUTBocU1IYGdsbypPRE8uMmJpPyNRKzg0SXJFZXBsbDtrMmJOS0paNDNGZVhTKVgjMzYrYF10dUN1R1E0KldIZ2YmNUAsakVCR19mY1NWWFpBMEgxNUVjbyhnbyJyMFomW1w9ajhbUiZBTHBmLU9qYUVpR15gOzdATlYuLkhWTUlETm1ESnAoZHM6MEJsU051PUVdK2UiRG5kR2Q2QUQ0JVxxRDEmSWtOP1VAWG5HYEBcY2k7cWBWbUZqMUxXUj8vZTohJmwpMUstNVZzZWZxclVKLWAlXjR0QlZlPUJrXkY/XEZcUjxpPHBgZ1Q6UEc/NllMJDFRKEBaXkhEPXJsMmdPJCM2YktoLG5kZUhTcS87UkUramUuLlpxKCs4X14iXUJkLUJKXTNWVjg6JVkkaz0jLGhSUnErXD5FNilfZClCcEk7WkMzNkFpYUctXDEnVTg0RjJEXCoiamtcMHQvcD00YTtbbWxGc2wyZ21mYix1SGNDLVYpVzxVWDxORltEUHJZOyFNI0Y9Zj9VV1ldaFxNWU51IU8vMG44OG5lVlhdPXNwOSlfXl9kPiZvNFI0cS8rJFlUdDgwQzhuNWY1LlglZVZgSm4qN2coXE1xNUlhPCxXcn4+ZW5kc3RyZWFtCmVuZG9iagoxNiAwIG9iago8PAovRmlsdGVyIFsgL0FTQ0lJODVEZWNvZGUgL0ZsYXRlRGVjb2RlIF0gL0xlbmd0aCAyMTgyCj4+CnN0cmVhbQpHYXUwRDlsbmNTJkFANy5vUCNnUDZxRlU3OTcpOiY9TEp0SF82cFpVL244VTMlSG4xWiddWFxYWT1HM1ZTNyQ4XFBEWkskQWspYTE/YmMjazZUMEI2bywyKy1ZRiJuUFhbQStBYjtEO09qakVXUFxsdF4oMy0yWyFya2BcaUBKZmhZMTVvRnRtPWAyQFE4QFBDX0tgSUtfYG4jI2EvOnBMWlpdXjFsb1hCOTAtJV5ATjlVOEBaV1BSWU9fUkhWN0BEVCcnWD5lPm9gITtzYENgWDdUcG5ZaCZzXTdlPEFdISZCb1QpQWJASVxCL0xkIWJkUFwzP0d0XUU+MFc/RFRrWWdQSCd0TyFyUUpaQk9TR0ohQmRxQVU4X3JWLF07cmJJNyw+IlVcWDVbMSIwO3FWa2VMTERKLygyJUc8TVpFSVEqU1AjL24kSj0rLE4qNUMwRjJkJnM3KkNJJlFUN2xzU2xMY2UuWktpdSROVltmKV8/R2NQa0k3blRUTEIoVUxpX0JZLThdTW5ecFpILFkjWCJOXS5CLjlUWmBgKmFSKDpwQUpERGE6X044U0wzW0ltcThEUilyOF1YIV1pLTVCT2w0NEpvTnI3IURhXnFiaTBQLi03TlZRXTBOWD5bQjQwKm1ldVMjRTJgMWpQPFZOL1NWM25LdEMyZjRVPSpnMk5iLyIxUz9zWkVjWTZlRU0mSSVDMGdzLm1RYU9ack03MydXRltWWEBLPTNqPHNwb2w+YW1HMTcpY1ZAcCNjS2U/OkJSMD9yOGdGSzo7S2JXSEhgNEUsWDQlaU8zb0dpXE8oYU5YNW5mUjQtOz1BKys8Zj9KMVpVQDVqaXE6bEA8RU1bRzhrdEInOzZLbWFER05yUjIrN2A7WG4vQl0vVFthTGEpT1ssSjVwOj5aK1VTaCZjIy9TdFYoPTpbLz5GRyFORFJRNEZjWGYwQis9cUdSaEUsLG9nRUM1IVVrYWprTCFcSHIjJig/LilaQ1dQbl47XGVWMDtIN1pcKScwUCYuYDdSN0wrOGpXRTI9ZTMzX29NPlRMcDhPMSU4UV9maSpLKztSMTBfMXI/ZHUvS0hzXWgiZUBMQjxvbkJFLEZCJTxQIlw8Ti5kb24vITV1RSU4Ryg9PmdKWnVmRm4zaGIycyNpYXJEKWBRLlZNIicoXU11VnNcaFRlNUEmU1kySWQ3J11DMTIzMSJtJnI1M1ZLRzA3Ijknci8/Tyo4cFFsMWtNOTouQyItNitEX1xoNnVxLCMnU01eJU8iMTpwWyI3R1RnLCktV2EsWitUZCpUOm8/LTk8SGFIKiQqbj9uVWEsKihNSS5VIXNnWW1FN11XciFML0czNXFQc1UmKypqaHFzWio1MzAzNyI4ZjxoYS1NJE1aWm9QXkFASm1UJ01JbVBwTkZMIkdoM20sQmtaQkVfXlJkOTxVL3FwQGVpWVJucF09KHFvV2AjXWVAUHReRiNKNTw9TEJidENfRj0xNT89cl1HbjRtUkJ1SVgxWC9uLiJeUigpZiRzMEguJDE8bjEtMy5sb1xxRDdyXStqWD1uOj10UU0nZCs8WnFwUUw9PTldVC1zcU4lXlBLViQ3JXVMZVcpIVg+QC9DU0xQLjZbXi9aTGonT1twbj9CVE9ROTYzRy8jKzkiRF80X0NqSm5SMSxdbTEqSWQzUjVKaGJQKWVHNE4qM1UzSE8taDhgTk8uYGo9bW9UP0JIKkk9LTYtbiNsXSldKHUtZGo1bmg/REtYP2NjLmhEQlxDZmcvVDZpLSFIJD5SREFKb2NPTCNxPkVWKFswU1MtVCJJcyNLcz5iRyI3cD4iLnJSOXAsRz9vXSIwNSw5RkNeKTxdMXIlazZtc05NRidOMkhUXnFxZlMkdWBLaWt0WyJhLnA7RkhAVVQwV2FlNV1WTFA5O0RSYVluUnBMbEpFW0AqMjtRMiFiWDRCU2QwaTRPXytGYj1sO0FQLF0jVipoTy1aMkIzWksxNVRkP19sZlgpUGdeZWQ/JG9xIjs8WidKcWNsSkRQP2FrXEFnR0tJUmEuPTA0OWZwQ0xoVjhTQ2hFOjtgN0RDKVIqaXVsWFY9LE08VVpYZVJVVXEnM3JXSFhOS2QyVDhvMUBrZ15eVzlxa0tLa3I+VUZPL2NsL2cxV2A2dXFHXVBPOFBHUF1qR0YpXSQrX25bKD0zQS45QGNCT2NVTnE8dHIoQnNoJyYiUyEzW2xPWW1qdSc0UVFcIlZxazZUJj8mKV0kXWtWPkRrMTsxbUFSRllAQm8zQVlQYkJyVjpVc3NVVV5JUkA/YzAwPzxEZUNkaCRYLFVHOmxQTiUwQVIwJ0VFJG47WFcrWGcjL1pEaCQ8UElfXFpZQjhCSWRMOz5xKyE3KDwvVGAzWFtDVzgtVkRrbjchUGxZPmFKTSpsMUFYbEBxP1BPX1xwJmZRZFdRYzArRE1pSSglUzhUSlNDW1NWM1AjM085QWZfPlw+Q1Y6WjtYbkh1Yi1wMCxncGlfOCNfY0hALDIsV3UrMy9AMktdXzRMUmopVCZvLS5XVC8iQTIyJScrVG1KWERpWGlJIVY7Kj1KVEdobi5VVFtIaSpvO3NkJGFMS1lbTUdLKy85LnJuVytlUyttIigvbFFgOWJKbyczXVJbQVMjciNlWExsVnAvPkA7MG9LajJkWXFiXkRia2puT1g7Zm41Y0FrbFwra0phaSlhY14pMGRjMjQtKl5lXXJfSVA0MFNTKU9EZUUpTlNbWTtONXBxXzEiW2c2dEwiSG4jVDYycDFmM0VXV0VibjU0NChJdHA8ZSNWVkg3ZjM4XDIzT1JRMSdLSmZvSkpTcWJeVmxVWDhJWSdVU2NzM3VbSlpjTzRCX0RvZ1hqaE4jcVouWEw7XkJNX0VpNnRjTiRaUCEtM34+ZW5kc3RyZWFtCmVuZG9iagoxNyAwIG9iago8PAovRmlsdGVyIFsgL0FTQ0lJODVEZWNvZGUgL0ZsYXRlRGVjb2RlIF0gL0xlbmd0aCAyMzAwCj4+CnN0cmVhbQpHYXUwRD8kIl5oJ1JmX1pcNTA1aitmW15rNWk1aGVtXEglK0MhPzNaLTgxOmFUUFlzVlo3QTYpWU9CIlAkKl0mXVJGNCVzNDhYSHBTcFRuOSJRXFNyRTFdXWZvW0FiSlwuJ2hsQnNzW0JrUkQ4IlE+VTpOP1M2cUpBaiNjUilaKkhcLTNhN04sMXBjR2QmXzJFaGRXKDpKcTE/IyFeRSdsIVBUZlg3cCdKa0Y/Ljs2Q0xzUURRQm83W1gvXz0sW2tERmcoWDY6V1JEN2JNZENKZXNuJz0vLGxpKGFRUXB1SERCOTJOSik9YltQIlsidEFsMS5iLCpuKyxcO3FiVFJCUF5DYThPYipZO2QtNF9VSDRUXFhjIloxVS5jaUc/UyMvIyVCN2Q4Lzxtc2A8U0VtM14mSW0sKSxIVlMlYUpxMk4sUCpqQUk7OmBEXmdzLlo6Xkk6cy5cPEAoNll1NUVAR3BNVkRNQGNXbGpGRTAwS1pnSUhfOVplMSs9XC11MktBOVotUDZPdDJDRE9ZZk5IYihNKDMsYE9PJ05eQFInYT1pTytgcyNXcy0uaFJFJ1xiKDkyTTE8Pi5rVE5UPmU/YG9naWhNUlNGOWwzK0M0JGUkX3BgYGY4XFQwJTFmLkkvK1dvcT1YZm8icUxmZ1ZVQDJILWdyOD4sKVZhSURvTDNsWnE/Y0A8Q1NVTF1UZjUjXmtqO2xHbkNTaEFabXE+UG05V3N0WjVjW2UpQ2wlVFJjTjBwKE5ZOWFULVlVVjQpITZHR10pO3JyZUojTDBVSVY5KSE2MWszUWMwVWNgV1pfO1JLRDpLOTNGSTotTWw/S29MVk5iMkRUJFApNDVUQ15bIS0uMklVOTslcWxJLiNfWTxaMG9pSDxbTU1wMzcoNGQ9VzMzYztUZ0JNOixLQDIhN0Y5cnExXVUkZiVFRUU/My8+bVxePWUhMlUoL3BsM3BJVmwoIkhOJFYjRmFQY3NqYkhXdG5eR2pFXHVXJyg/NV9aIXM2XkVlPmkwKTVaTDhQUFZpQTZESTBQXCUvYm1uUUZuLW1cOyRVMz4sUTJCQ0g9YW0qLE9IbV9DVCZCYztKYmlYPCU1OSxeb2pPW0psVUJFWiMkJEo/PEpvT0lqNDw0Nm4uSFlXISpJMmFWRmEjdXFvRFwvIXE9V248cEFOJXRScy1mOFpmPFlaaWoxXi41XCNmJD9TOSZVaW9BPyRWLUAhWVklJytTLyNXOHMpaSEpVlQwWlA2K21WUionU0lcOWVER1NgNm5CcWImTzZgJGFhcT06X0hTNWAmNWQvJSEzRCxjKUxmO2BiVm9WdGVda0Jta1dTPEA9O2pYX3BCJ1h1U2xMdVEuXElkSm5jNVlVKC0ucnMtPDFhODxUJiRaV3RidVFXSCJSdEdjdWZNUjFoUlpaK0ZLKSM+UDdGQnFORT5lPkZdI1tcISVbUD1bX1pjXTtScjpzWWM+bGUjTTBwJk5BVTdOaGE0JW1rdV9gJkBQRiU4Uz0zN19OTyFuRUZvUTpGR3B0LVpNLTZrSyErdGgxaWhyRy9MdTVvPWtJbUtwLnJLOW05LzgwJWtrRDlKQDhaXDluWlFZYi5IWms9IjBNZzxFXCJPWEJKU1I6NC9zWl5eZVchdSNhL2xbQU4jcWhvajJpWlRqXylAdFpIR0gwMFRpPF1xQ1ZpQlVCRyYrOkVgKzptJyFmIWM5ZkhfRFgnIV9WXEozZltHWm5bczExc2R0KFx0Kz0wV2lmcEQibDtpWC5XcWpZOXMoUms0Ny4sc1I0KWtaIyJIJlRHYFY1T3FBPyEzRmFzWlIhci9caVROaEUjUVVEIT1FaTQ8TyExPlROUHFEPGY3P1FzViJRdUdJUkhRYk9SIlVPMlVIOFU9ZWRZVHNfRlhMM1VlZD1DY2V0RiVHXV10cXIvM0RVKjFzSE1jVENnLTBDcCFqPUFrQ2w5S2dXck9sTlhncV9tazxGXTVkR0dAQGdhY0VfKGIoN0FIYFhnREVFPFhRWipHN1Q7TDxOPCc1OWZfQDNtWUtea1teIVY4JDhWdXNUaXRjLllgRSpOYEtiSkBsUCpFaVUkOCJhZjdEIj9WKW0tdVBLbFpLQmhoLHFdQ3NnMy06UC1db2RYMVBBa1hzJmI7aSM4VGMjakxGTktyNFpPcDwtODNWKjozOyhoRFklKkssJixJRC86W2VDWm85YlplNDxqTmlFYVkjXjllSDtxTkZqTz5pUyQhJk9bY2kzMWVna2BaZ1hKPS91JlhDZjdjLWFWPksyczhPb09tRyFwKDZpUCIoXElHc0NTPkZdLTI9VmxKc0hpMVE7bUhEIzBPVnVrSjIjOUQ/SihvYEpoWnFHRnFwPVIoXnVvUFYpSyJCMTomSUg3ZlVXXDE+WjovWGdaaDpYNGVyVDRUOFNoISt0K0ZkbURzZD01ciE/V25dYnVSZjctKmlddFRxQCpFUEk2NFMwdWA8J09nJGg9KGkxaDJENDs8UW40QnMpUl5kaiRvRyVBKlhiUktdMCUqNnVfK2BKNF4uJEA+M0FnLCwpXms9bVgyRU8mVXU8bktBOjZFaXVwUj8lWDA2UyNGJVdSPTlIOjMlV11icT1IUFI1VFg0MUxJcFRYMlpjc0BrT1YxJHE4N0c0KnBxYjFaV1xobl8pNCxjJ2BSNDBhb29oPiReVktbYkMqPEdcSCMoZi9EIS4jYj4mXFc1MUVnKkNfYVl0SExUWnQ/UTlSSzZRU0slSEBjQXNXXi5BaCRfYmBQWypaQTNjR0cuRUdtWEppWmRwI2gvJkNncE1xLk5GJ0tCZ0Bmc0NBNGcsXigpa0koYm1MJiMkR21vQSpJamVAb1xGWEc/IyhITWAwPHI/Rz9LS08/OVZiNzliLFI5XXI3TEE/UCFEdHUyUW1iI20sT0lwKW4rb0pqYEFFbyhGXklvZydtJkxNcklybyw4Z0RmZTxUVzNLM0NpRmVyNCojYytcOmwwYSEpWWRjSSsoPnFJQUM8MGxIX2lkTVNxcEZsZERBL2FuYXFJaEklQ0lwdUtqcF1oRmxqUzh+PmVuZHN0cmVhbQplbmRvYmoKMTggMCBvYmoKPDwKL0ZpbHRlciBbIC9BU0NJSTg1RGVjb2RlIC9GbGF0ZURlY29kZSBdIC9MZW5ndGggMTc1MAo+PgpzdHJlYW0KR2F0bTphYD9FIiZBQHJrXG9MPWo7YDlFI1xFI1ErLWZxPkwxOkBaUWo4dEkqTiNAZGQhKWVpV28ncHU3Om9jSG4lXkYvMyUwR0BGbWU6JTM2bTRhVnFsWCtzW2dSTlwrZWdCXmBKVUJIODg3VU5EQVFCKD86RT5nLy5aNDRaM10+Zk10SjIiVUdAYFVMX0JcMVhJSmt0bHBRM0xvOGpgaVtpN0I/RjEqIT9CakBNSS9ZNlhhR2Euamc7KDBuTk5mOj9uQ28hbS5YJSczNSM5I0ZVPGQrLW5OSTxBX0d0bSIjP2YtWjNuaHIiNCtcY2BEWU5RIkIncGNnKFU+KytoPXJGUjdEQ3Q1ZFsubHRHPSw3L2hEbypXVU1fKiVXI1olSTdCU2c1KVZvUHMnMi9TUnMrYWdzJElEOlheIyJzLFQjTUh0b21LVjQkZksxOFlwdV51N1lLQWpNWW85RlM4S1UhYzRFMkdnQVFIZy1GJ2UrViVWY2djZ2ZkW0JsaiFRKDQsYSpgMiU9clBKOjgvRDptTDtMTFt0KTlXRSonJE5LaigyTC4/IWBmLW8lLiVnMTNDbEVSPjEjXEUqaCI+XmxyTD5dXy1WUi03XTQrKnNcXi82TTk/V1NhJ2RyPCM5QFBoUlBCRzlhViEjX0YhM0NjU0MwSyxOKzgoaVA1ZTMxcjEkRjJLIWs5WTtBNmZvYGhPR08hKSNGVXImMUZpTlFKK3JJI2UhbXRBRHNxJD0rdFM+Vkc4SzVzJCNgJTdFLiVdNzxUZkNNUGlkN1FpTWlOKzkqWFMkaFZcUVo3bVJ1SEd1ZXJsNGhfR09eSVNzKjBzMjVVOiRzNG5ZJj0tXFdjaTJgYEZWMjVAU2pYJzNHI1pzN1gnMiEqVU0pUkgzPFk7VUc5J1RbYiMkcD8lJy00Xmc5X2NlWS8oYCNAQl1WP25Ta1AodHRtVDlYPnA8anBpQko4MCJjWm1xZiE6YGJfWCc/bGk/UGg4cXJqQDNfM1EnYDchKklFTkYqaCpzPUI9VTI7blY/UGk/PzVlI1BXdUtgLlQ8VTAzNyhGRkBedGl1Q3FVK3JoMS5zMWtpNShFdCp1REVUV0FmLT8iRjBfSF1PcXNuUV0yKztpJ1ksJWRLVys8SjhXYWBCYi0nS2sqLV48VXJlVj4oUDhmc19HWkFDN0lwUV1kUEJURCxxK2VyNHFHaXIlLWUhQjElbVo0LVdLWnNiJGs6NUsyYVQibyg7Y0dITVZbNTljdURXMW8jaFdGMV1IalInXU5eLW9PXFkjNUwiVWVbLmxaWVBfLTQzXiNJXWxiUmpJUkFsNCUqNDNTMVBuUmonR2NHNjoiJ0pOVlYyJWEqJyhjYS02I25cXGRUVSJkb3IpVy5gIzA3TyVeYjI4PXMwJDYibDM9XTdMYFNdZz1OVy5DcjdIUXFGblNnSygjSDQ/MkMqPzEvTTosOkdzcydfT0dXc2dLbFRBOmNDY1MkV2shNm9Na2hZWkI7IzBPQ1tQMm5lLy04SG1hODRTM1Itb0gnKVBERTVGNiVYSXNbLF5yNmFJMSs/UjlMIUdXSWRTWEEyVDY0cSIsKVciTCg3KFs/RmdAOVhXSl5eXVducVhAOWs8b3NGX2dqQU5kUzs6Om1jUmxOVj5PJl1FU0FDJHErKFRSZFJdK1hPLGRDNVJdbEthVlBiTklxTVcvU1VkYk8hN2puY2BpYlUzL0NqRFBnQUVoYU50JWNdNGwrOj1YLzV0LCE1OUFATTVKUkFiZFI3YyIoSls2amQkJGtkbDdHMTY7NUNNTyRYYTplW2ZkKUgqQGtjMGFeZCZGXExIRSdISUckKFc0MWFHN2g0ITheUSpMTVxiN0ZsWFREXUc+LGxSKS9JTUc9RmRzRkhwM3ArJkFaTitcU1VxLioqam1YcV5VYT0rLl5oUUphP1VhTWxqcE9kW2B1KEJjTUk/NUBlZ1ZwbVBCcEpHWl5AWl0mamlAPyZxb0lAJCxzS2gySCYsNjI5TzVeWWRyPVJtJ0koTThTZHEjLDYjMXQrRVtrUDFObk4uUXUlX3NjZzs6NSVTPUInI1ZgRERhT1okXWZKdWhPZ0c/SSM2SkY0OmghcV1fOFBXR145TyJhJWU/Q203aTcrUkdRJmxKTEIzM2FRNmhzTlk4XkwxN2lQLUMtT0JMJl1fRyNGcTxCPmtdVzw/XlJsJVApaz5iMm9CK1FSQVIxOFRrXlNGLmFYYDlnKFxaalU5azZiZSpQMEtJKjhFb2ZKQkRmKz1UWCVzSDg5NFBBRVRCRzdoblJPMEZoOkRmKGtkS1FkYj9jbDYhSEhUXFR+PmVuZHN0cmVhbQplbmRvYmoKeHJlZgowIDE5CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDA2MSAwMDAwMCBuIAowMDAwMDAwMTIyIDAwMDAwIG4gCjAwMDAwMDAyMjkgMDAwMDAgbiAKMDAwMDAwMDM0MSAwMDAwMCBuIAowMDAwMDAwNTM2IDAwMDAwIG4gCjAwMDAwMDA2NTUgMDAwMDAgbiAKMDAwMDAwMDczOCAwMDAwMCBuIAowMDAwMDAwOTMzIDAwMDAwIG4gCjAwMDAwMDExMjggMDAwMDAgbiAKMDAwMDAwMTMyMyAwMDAwMCBuIAowMDAwMDAxNTE5IDAwMDAwIG4gCjAwMDAwMDE1ODkgMDAwMDAgbiAKMDAwMDAwMTg5OCAwMDAwMCBuIAowMDAwMDAxOTgzIDAwMDAwIG4gCjAwMDAwMDM4NTEgMDAwMDAgbiAKMDAwMDAwNjAxNyAwMDAwMCBuIAowMDAwMDA4MjkxIDAwMDAwIG4gCjAwMDAwMTA2ODMgMDAwMDAgbiAKdHJhaWxlcgo8PAovSUQgCls8ZTQ0MzZlMTc1YWE5ODM0NDRhNjcxYWU5NTI0N2Y1ZTI+PGU0NDM2ZTE3NWFhOTgzNDQ0YTY3MWFlOTUyNDdmNWUyPl0KJSBSZXBvcnRMYWIgZ2VuZXJhdGVkIFBERiBkb2N1bWVudCAtLSBkaWdlc3QgKG9wZW5zb3VyY2UpCgovSW5mbyAxMiAwIFIKL1Jvb3QgMTEgMCBSCi9TaXplIDE5Cj4+CnN0YXJ0eHJlZgoxMjUyNQolJUVPRgo=" target="_blank" rel="noopener noreferrer" style="color:var(--blue);font-weight:500;text-decoration:underline">JEX Terms of Service, Rules &amp; Regulations</a>
       . By checking this box I confirm I understand and accept all rules governing JEX participation.
     </span>
   </label>
@@ -3328,8 +3384,8 @@ function renderNav(){
   let tabs;
   if(isChairman(u))tabs=[['admin','Admin'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
   else if(isAdmin(u))tabs=[['admin','Admin'],['market','Market'],['settings','Settings']];
-  else if(u.role==='company')tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
-  else tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['leaderboard','Leaderboard'],['orders','Orders'+(()=>{if(!UI.userId)return'';const u=DB.users.find(x=>x.id===UI.userId);if(!u)return'';const open=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='open').length;const ah=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='after_hours').length;const sl=(DB.stopLossOrders||[]).filter(s=>s.user_id===u.id&&s.status==='active').length;const tot=open+ah+sl;return tot?' <span class="badge b-amber" style="font-size:10px">'+tot+'</span>':''})()],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
+  else if(u.role==='company')tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['watchlist','Watchlist'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
+  else tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['watchlist','Watchlist'],['leaderboard','Leaderboard'],['orders','Orders'+(()=>{if(!UI.userId)return'';const u=DB.users.find(x=>x.id===UI.userId);if(!u)return'';const open=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='open').length;const ah=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='after_hours').length;const sl=(DB.stopLossOrders||[]).filter(s=>s.user_id===u.id&&s.status==='active').length;const tot=open+ah+sl;return tot?' <span class="badge b-amber" style="font-size:10px">'+tot+'</span>':''})()],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   return `<div class="nav">${tabs.map(([k,v])=>`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
 }
 
@@ -3853,6 +3909,9 @@ function renderPortfolio(){
     <button class="tab ${UI.portfolioTab==='dividends'?'active':''}" onclick="UI.portfolioTab='dividends';render()">Dividends</button>
     <button class="tab ${UI.portfolioTab==='history'?'active':''}" onclick="UI.portfolioTab='history';render()">Trade history</button>
     <button class="tab ${UI.portfolioTab==='nwchart'?'active':''}" onclick="UI.portfolioTab='nwchart';render()">Net worth chart</button>
+    <button class="tab ${UI.portfolioTab==='benchmark'?'active':''}" onclick="UI.portfolioTab='benchmark';render()">vs Market</button>
+    <button class="tab ${UI.portfolioTab==='alerts'?'active':''}" onclick="UI.portfolioTab='alerts';render()">Alerts</button>
+    <button class="tab ${UI.portfolioTab==='statement'?'active':''}" onclick="UI.portfolioTab='statement';render()">Statement</button>
     <button class="tab" onclick="exportStudentPDF()" style="margin-left:auto;color:var(--blue)">📄 Export PDF</button>
   </div>`;
 
@@ -3895,8 +3954,11 @@ function renderPortfolio(){
     return tabs+'<div class="card"><div class="section-title">Watched stocks</div><table><thead><tr><th>Ticker</th><th>Company</th><th>Price</th><th>Change</th><th>Avail.</th><th></th><th></th></tr></thead><tbody>'+wrows+'</tbody></table></div>';
   }
 
-  if(UI.portfolioTab==='history') return tabs+renderTradingHistory();
+  if(UI.portfolioTab==='history') return tabs+renderTradingHistory()+'<br>'+renderDisputeForm();
   if(UI.portfolioTab==='nwchart') return tabs+renderNWChart(u);
+  if(UI.portfolioTab==='benchmark') return tabs+renderBenchmarkChart(u);
+  if(UI.portfolioTab==='alerts') return tabs+renderMyAlertsTab();
+  if(UI.portfolioTab==='statement') return tabs+renderStudentStatement(u);
 
   // dividends tab
   if(!myDivs.length)return tabs+'<div class="empty">No dividends received yet</div>';
@@ -5139,6 +5201,7 @@ function renderStudentOrders(){
 // RENDER: TRADING HISTORY (per stock)
 // ═══════════════════════════════════════════════
 function renderExchangeStats(){
+  const _idxCard=renderMarketIndexCard();
   const listed=DB.companies.filter(c=>c.status==='listed');
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
   const today=new Date().toLocaleDateString();
@@ -5555,39 +5618,75 @@ function renderTreasurerBudgetWarnings(){
 
 function renderActivityLog(){
   const f=UI.activityFilter||{};
-  const typeIcon={trade:'↔',ipo:'🏢',dividend:'💰',news:'📰',announcement:'📢',limit_fill:'⚡',balance_adj:'💵',session:'🕐',registration:'✓',limit_order:'📋',flag:'🚩',cofound:'👥',founder_alloc:'🎁'};
-  const typeBadge={trade:'b-gray',ipo:'b-green',dividend:'b-teal',news:'b-amber',announcement:'b-blue',limit_fill:'b-purple',balance_adj:'b-coral',session:'b-gray',registration:'b-blue',limit_order:'b-gray'};
+  const typeIcon={trade:'↔',ipo:'🏢',dividend:'💰',news:'📰',announcement:'📢',limit_fill:'⚡',balance_adj:'💵',session:'🕐',registration:'✓',limit_order:'📋',flag:'🚩',cofound:'👥',founder_alloc:'🎁',dispute:'⚖️'};
+  const typeBadge={trade:'b-gray',ipo:'b-green',dividend:'b-teal',news:'b-amber',announcement:'b-blue',limit_fill:'b-purple',balance_adj:'b-coral',session:'b-gray',registration:'b-blue',limit_order:'b-gray',dispute:'b-red'};
   const types=[...new Set(DB.activity.map(a=>a.type))].sort();
+  const allUsers=[...new Set(DB.users.filter(u=>u.status==='approved').map(u=>u.name))].sort();
+  const allTickers=[...new Set(DB.companies.map(c=>c.ticker))].sort();
   const filtered=DB.activity.filter(a=>{
     if(f.type&&a.type!==f.type)return false;
     if(f.ticker&&!(a.description||'').toLowerCase().includes(f.ticker.toLowerCase())&&(a.ticker||'').toLowerCase()!==f.ticker.toLowerCase())return false;
     if(f.user&&!(a.user_name||'').toLowerCase().includes(f.user.toLowerCase())&&!(a.description||'').toLowerCase().includes(f.user.toLowerCase()))return false;
+    if(f.dateFrom&&a.ts&&a.ts<f.dateFrom)return false;
+    if(f.dateTo&&a.ts&&a.ts>f.dateTo+' 23:59:59')return false;
     return true;
   });
-  return`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Activity log <div style="display:flex;align-items:center;gap:8px"><span style="font-size:12px;font-weight:400;color:var(--text2)">${filtered.length} of ${DB.activity.length} events</span><button class="btn btn-sm" onclick="exportTableCSV('activity')">📥 CSV</button></div></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;margin-bottom:12px;align-items:end">
-      <div><label class="flabel">Filter by type</label>
-        <select onchange="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.type=this.value;render()">
-          <option value="">All types</option>
-          ${types.map(t=>`<option value="${t}" ${f.type===t?'selected':''}>${t}</option>`).join('')}
-        </select>
-      </div>
-      <div><label class="flabel">Filter by ticker</label>
-        <input type="text" placeholder="e.g. BWV" value="${f.ticker||''}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.ticker=this.value;clearTimeout(window._actFilterTimer);window._actFilterTimer=setTimeout(render,300)">
-      </div>
-      <div><label class="flabel">Filter by user</label>
-        <input type="text" placeholder="Name..." value="${f.user||''}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.user=this.value;clearTimeout(window._actFilterTimer);window._actFilterTimer=setTimeout(render,300)">
-      </div>
-      <div><button class="btn btn-sm" onclick="UI.activityFilter={};render()">Clear</button></div>
+  const pendingDisputes=(DB.disputes||[]).filter(d=>d.status==='open');
+  return`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+    Audit Trail ${pendingDisputes.length?`<span class="badge b-red" style="margin-left:6px">${pendingDisputes.length} dispute${pendingDisputes.length!==1?'s':''}</span>`:''}
+    <div style="display:flex;align-items:center;gap:8px">
+      <span style="font-size:12px;font-weight:400;color:var(--text2)">${filtered.length} of ${DB.activity.length} events</span>
+      <button class="btn btn-sm" onclick="exportTableCSV('activity')">📥 CSV</button>
     </div>
-    ${filtered.length?`<table><thead><tr><th>Time</th><th>Type</th><th>Description</th><th>Amount</th><th title="Audit hash">🔒</th></tr></thead>
-    <tbody>${filtered.slice(0,100).map(a=>`<tr>
-      <td style="color:var(--text2);white-space:nowrap">${a.ts||''}</td>
-      <td><span class="badge ${typeBadge[a.type]||'b-gray'}">${typeIcon[a.type]||''} ${a.type}</span></td>
-      <td style="font-size:12px">${a.description}</td>
-      <td style="font-family:var(--mono);font-size:12px">${a.amount!=null?(a.amount>=0?'+':'')+fmt(a.amount):''}</td>
-      <td title="${a.entry_hash||'no hash'}" style="font-size:9px;color:var(--text3);font-family:var(--mono)">${a.entry_hash?a.entry_hash.slice(-4):'—'}</td>
-    </tr>`).join('')}</tbody></table>`:'<div class="empty">No matching activity</div>'}
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr auto;gap:8px;margin-bottom:12px;align-items:end;flex-wrap:wrap">
+    <div><label class="flabel">Type</label>
+      <select onchange="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.type=this.value;render()">
+        <option value="">All types</option>
+        ${types.map(t=>`<option value="${t}" ${f.type===t?'selected':''}>${t}</option>`).join('')}
+      </select>
+    </div>
+    <div><label class="flabel">Ticker</label>
+      <select onchange="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.ticker=this.value;render()">
+        <option value="">All tickers</option>
+        ${allTickers.map(t=>`<option value="${t}" ${f.ticker===t?'selected':''}>${t}</option>`).join('')}
+      </select>
+    </div>
+    <div><label class="flabel">User</label>
+      <select onchange="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.user=this.value;render()">
+        <option value="">All users</option>
+        ${allUsers.map(u=>`<option value="${u}" ${f.user===u?'selected':''}>${u}</option>`).join('')}
+      </select>
+    </div>
+    <div><label class="flabel">From date</label>
+      <input type="date" value="${f.dateFrom||''}" onchange="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.dateFrom=this.value;render()">
+    </div>
+    <div><label class="flabel">To date</label>
+      <input type="date" value="${f.dateTo||''}" onchange="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.dateTo=this.value;render()">
+    </div>
+    <div><button class="btn btn-sm" onclick="UI.activityFilter={};render()" style="margin-top:18px">Clear</button></div>
+  </div>
+  ${pendingDisputes.length?`<div class="card" style="margin-bottom:14px;border-color:var(--red)"><div class="section-title" style="color:var(--red)">⚖️ Open trade disputes (${pendingDisputes.length})</div>
+    ${pendingDisputes.map(d=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+        <div><strong>${d.student_name}</strong> <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker||'—'}</span> <span class="badge b-red">dispute</span></div>
+        <span style="font-size:11px;color:var(--text2)">${d.ts}</span>
+      </div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">${d.description}</div>
+      <div class="btn-row">
+        <button class="btn btn-sm btn-success" onclick="resolveDispute('${d.id}','resolved')">✓ Resolved</button>
+        <button class="btn btn-sm btn-danger" onclick="resolveDispute('${d.id}','dismissed')">✗ Dismiss</button>
+      </div>
+    </div>`).join('')}
+  </div>`:''}
+  ${filtered.length?`<table><thead><tr><th>Time</th><th>Type</th><th>Description</th><th>Amount</th><th title="Audit hash">🔒</th></tr></thead>
+  <tbody>${filtered.slice(0,200).map(a=>`<tr>
+    <td style="color:var(--text2);white-space:nowrap;font-size:12px">${a.ts||''}</td>
+    <td><span class="badge ${typeBadge[a.type]||'b-gray'}">${typeIcon[a.type]||''} ${a.type}</span></td>
+    <td style="font-size:12px">${a.description}</td>
+    <td style="font-family:var(--mono);font-size:12px">${a.amount!=null?(a.amount>=0?'+':'')+fmt(a.amount):''}</td>
+    <td title="${a.entry_hash||'no hash'}" style="font-size:9px;color:var(--text3);font-family:var(--mono)">${a.entry_hash?a.entry_hash.slice(-4):'—'}</td>
+  </tr>`).join('')}</tbody></table>`:'<div class="empty">No matching activity</div>'}
   </div>`;
 }
 
@@ -5681,6 +5780,319 @@ function generatePDFReport(){
   setTimeout(()=>w.print(),500);
 }
 
+
+// ═══════════════════════════════════════════════
+// MARKET INDEX
+// ═══════════════════════════════════════════════
+function calcMarketIndex(){
+  const listed=DB.companies.filter(c=>c.status==='listed');
+  if(!listed.length)return null;
+  // Equal-weighted index — average of all price changes from first known price
+  const changes=listed.map(c=>{
+    const h=c.price_history||[];
+    if(h.length<2)return 0;
+    return(c.price-h[0].p)/h[0].p;
+  });
+  return changes.reduce((s,v)=>s+v,0)/changes.length;
+}
+function calcMarketIndexHistory(){
+  // Build a synthetic market index timeseries from all company price histories
+  const listed=DB.companies.filter(c=>c.status==='listed');
+  if(!listed.length)return[];
+  // Collect all unique timestamps
+  const tsSet=new Set();
+  listed.forEach(c=>(c.price_history||[]).forEach(p=>{if(p.t&&p.t.includes('T'))tsSet.add(p.t);}));
+  const timestamps=[...tsSet].sort();
+  if(timestamps.length<2)return[];
+  return timestamps.slice(-60).map(t=>{
+    const vals=listed.map(c=>{
+      const h=(c.price_history||[]).filter(p=>p.t&&p.t<=t);
+      if(!h.length)return null;
+      const first=(c.price_history||[])[0]?.p||h[0].p;
+      return first>0?(h[h.length-1].p/first):1;
+    }).filter(v=>v!=null);
+    return{t,v:vals.length?vals.reduce((s,v)=>s+v,0)/vals.length:1};
+  });
+}
+
+// ═══════════════════════════════════════════════
+// FEATURE 1: STUDENT TRADING STATEMENT
+// ═══════════════════════════════════════════════
+function renderStudentStatement(u){
+  const myTrades=DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id).slice().reverse();
+  const myDivs=DB.dividends.filter(d=>(d.payouts||[]).some(p=>p.userId===u.id));
+  const _pnl=calcPnLAttribution(u.id)||{trade:0,dividend:0,short:0,unrealised:0,total:0};
+  const startCash=DB.session.starting_cash||10000;
+  const totalReturn=Math.round((nw(u)-startCash)/startCash*10000)/100;
+
+  const csvTrades=['Time,Ticker,Side,Qty,Price,Value,Type',
+    ...myTrades.map(t=>{
+      const side=t.buyer_id===u.id?'BUY':'SELL';
+      return`${t.ts},${t.ticker},${side},${t.qty},${t.price.toFixed(2)},${(t.price*t.qty).toFixed(2)},${t.type||'market'}`;
+    })].join('\n');
+
+  return`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+    Trading Statement
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-sm btn-success" onclick="downloadStudentCSV()">📥 CSV</button>
+      <button class="btn btn-sm btn-primary" onclick="exportStudentPDF()">📄 PDF</button>
+    </div>
+  </div>
+  <div class="grid4" style="margin-bottom:14px">
+    <div class="mcard"><div class="mlabel">Starting cash</div><div class="mval" style="font-family:var(--mono)">${fmt(startCash)}</div></div>
+    <div class="mcard"><div class="mlabel">Net worth</div><div class="mval ${nw(u)>=startCash?'green':'red'}" style="font-family:var(--mono)">${fmt(nw(u))}</div></div>
+    <div class="mcard"><div class="mlabel">Total return</div><div class="mval ${totalReturn>=0?'green':'red'}" style="font-family:var(--mono)">${totalReturn>=0?'+':''}${totalReturn}%</div></div>
+    <div class="mcard"><div class="mlabel">Total trades</div><div class="mval">${myTrades.length}</div></div>
+  </div>
+  <div class="grid4" style="margin-bottom:14px">
+    <div class="mcard"><div class="mlabel">Realised P&L</div><div class="mval ${_pnl.trade>=0?'green':'red'}" style="font-family:var(--mono)">${_pnl.trade>=0?'+':''}${fmt(_pnl.trade)}</div></div>
+    <div class="mcard"><div class="mlabel">Unrealised</div><div class="mval ${_pnl.unrealised>=0?'green':'red'}" style="font-family:var(--mono)">${_pnl.unrealised>=0?'+':''}${fmt(_pnl.unrealised)}</div></div>
+    <div class="mcard"><div class="mlabel">Short P&L</div><div class="mval ${_pnl.short>=0?'green':'red'}" style="font-family:var(--mono)">${_pnl.short>=0?'+':''}${fmt(_pnl.short)}</div></div>
+    <div class="mcard"><div class="mlabel">Dividends</div><div class="mval green" style="font-family:var(--mono)">+${fmt(_pnl.dividend)}</div></div>
+  </div></div>
+  <div class="card"><div class="section-title">Trade history (${myTrades.length})</div>
+    ${myTrades.length?`<table><thead><tr><th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Type</th></tr></thead><tbody>
+    ${myTrades.map(t=>{const side=t.buyer_id===u.id?'<span class="badge b-teal">BUY</span>':'<span class="badge b-red">SELL</span>';const tt=t.type==='short'?'<span class="badge b-purple">short</span>':t.type==='cover'?'<span class="badge b-amber">cover</span>':t.type==='book_match'?'<span class="badge b-blue">matched</span>':'<span class="badge b-gray">market</span>';
+    return`<tr><td style="color:var(--text2);font-size:12px">${t.ts}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td>${side}</td><td style="font-family:var(--mono)">${t.qty}</td><td style="font-family:var(--mono)">${fmt(t.price)}</td><td style="font-family:var(--mono);font-weight:500">${fmt(t.price*t.qty)}</td><td>${tt}</td></tr>`;}).join('')}
+    </tbody></table>`:'<div class="empty">No trades yet</div>'}
+  </div>
+  <div class="card"><div class="section-title">Dividends received (${myDivs.length})</div>
+    ${myDivs.length?`<table><thead><tr><th>Time</th><th>Company</th><th>Per share</th><th>Shares</th><th>Received</th></tr></thead><tbody>
+    ${myDivs.map(d=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);if(!p)return'';return`<tr><td style="color:var(--text2)">${d.ts}</td><td>${d.company_name}</td><td style="font-family:var(--mono)">${fmt(d.per_share)}</td><td>${p.shares}</td><td style="color:var(--green);font-family:var(--mono);font-weight:500">+${fmt(p.payout)}</td></tr>`;}).join('')}
+    </tbody></table>`:'<div class="empty">No dividends received</div>'}
+  </div>
+  <script>window._studentCSV=${JSON.stringify(csvTrades)}<\/script>`;
+}
+function downloadStudentCSV(){
+  const u=cu();if(!u)return;
+  const myTrades=DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id).slice().reverse();
+  const myDivs=DB.dividends.filter(d=>(d.payouts||[]).some(p=>p.userId===u.id));
+  const _pnl=calcPnLAttribution(u.id)||{trade:0,dividend:0,short:0,unrealised:0,total:0};
+  let csv='JEX Trading Statement\n';
+  csv+='Name,'+u.name+'\n';
+  csv+='Generated,'+new Date().toLocaleString()+'\n\n';
+  csv+='SUMMARY\n';
+  csv+='Net Worth,'+fmt(nw(u))+'\n';
+  csv+='Starting Cash,'+fmt(DB.session.starting_cash||10000)+'\n';
+  csv+='Realised P&L,'+fmt(_pnl.trade)+'\n';
+  csv+='Short P&L,'+fmt(_pnl.short)+'\n';
+  csv+='Dividends,'+fmt(_pnl.dividend)+'\n\n';
+  csv+='TRADE HISTORY\n';
+  csv+='Time,Ticker,Side,Qty,Price,Value,Type\n';
+  myTrades.forEach(t=>{
+    const side=t.buyer_id===u.id?'BUY':'SELL';
+    csv+=`${t.ts},${t.ticker},${side},${t.qty},${t.price.toFixed(2)},${(t.price*t.qty).toFixed(2)},${t.type||'market'}\n`;
+  });
+  csv+='\nDIVIDENDS\n';
+  csv+='Time,Company,Per share,Shares,Received\n';
+  myDivs.forEach(d=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);if(!p)return;csv+=`${d.ts},${d.company_name},${d.per_share},${p.shares},${p.payout}\n`;});
+  const blob=new Blob([csv],{type:'text/csv'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='jex_statement_'+u.name.replace(/ /g,'_')+'_'+new Date().toISOString().slice(0,10)+'.csv';a.click();
+  toast('Statement downloaded');
+}
+
+// ═══════════════════════════════════════════════
+// FEATURE 2: PERSISTENT ALERTS TAB
+// ═══════════════════════════════════════════════
+function renderMyAlertsTab(){
+  const u=cu();if(!u)return'';
+  const listed=DB.companies.filter(c=>c.status==='listed');
+  const myActive=DB.priceAlerts.filter(a=>a.user_id===u.id&&!a.triggered);
+  const myTriggered=DB.priceAlerts.filter(a=>a.user_id===u.id&&a.triggered).slice(-20);
+  return`<div class="card"><div class="section-title">Set a price alert</div>
+    <div class="ibox ibox-blue">Alerts fire when a stock crosses a price level. Repeating alerts reset after 1 minute and can fire again.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;align-items:flex-end;margin-bottom:12px">
+      <div><label class="flabel">Stock</label>
+        <select id="new-alert-ticker">
+          <option value="">— Select —</option>
+          ${listed.map(c=>`<option value="${c.ticker}">${c.name} (${c.ticker}) — ${fmt(c.price)}</option>`).join('')}
+        </select>
+      </div>
+      <div><label class="flabel">Direction</label>
+        <select id="new-alert-dir"><option value="above">Above</option><option value="below">Below</option></select>
+      </div>
+      <div><label class="flabel">Target price ($)</label>
+        <input type="number" id="new-alert-price" placeholder="e.g. 15.00" step="0.01" min="0.01">
+      </div>
+      <div>
+        <label class="flabel">Repeat?</label>
+        <select id="new-alert-repeat"><option value="">One-shot</option><option value="1">Repeating</option></select>
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="addPriceAlert(get('new-alert-ticker')?.value,get('new-alert-price')?.value,get('new-alert-dir')?.value,get('new-alert-repeat')?.value==='1')">Set alert</button>
+  </div>
+  <div class="card"><div class="section-title">Active alerts (${myActive.length})</div>
+    ${myActive.length?`<table><thead><tr><th>Stock</th><th>Direction</th><th>Target</th><th>Current</th><th>Type</th><th></th></tr></thead><tbody>
+    ${myActive.map(a=>{const co=getCo(a.ticker);const diff=co?((a.direction==='above'?a.target_price-co.price:co.price-a.target_price)/co.price*100).toFixed(1):null;
+    return`<tr>
+      <td><span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></td>
+      <td><span class="badge ${a.direction==='above'?'b-green':'b-red'}">${a.direction}</span></td>
+      <td style="font-family:var(--mono);font-weight:500">${fmt(parseFloat(a.target_price))}</td>
+      <td style="font-family:var(--mono)">${co?fmt(co.price):'—'} ${diff!=null?`<span style="font-size:11px;color:var(--text2)">(${diff}% away)</span>`:''}</td>
+      <td><span class="badge ${a.repeat?'b-amber':'b-gray'}">${a.repeat?'repeating':'one-shot'}</span></td>
+      <td><button class="btn btn-sm btn-danger" onclick="deletePriceAlert('${a.id}')">×</button></td>
+    </tr>`;}).join('')}
+    </tbody></table>`:`<div class="empty">No active alerts. Set one above.</div>`}
+  </div>
+  ${myTriggered.length?`<div class="card"><div class="section-title">Recently triggered</div>
+    <table><thead><tr><th>Stock</th><th>Direction</th><th>Target</th></tr></thead><tbody>
+    ${myTriggered.reverse().map(a=>`<tr>
+      <td><span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></td>
+      <td>${a.direction}</td>
+      <td style="font-family:var(--mono)">${fmt(parseFloat(a.target_price))}</td>
+    </tr>`).join('')}
+    </tbody></table>
+    <button class="btn btn-sm btn-danger" style="margin-top:10px" onclick="clearTriggeredAlerts()">Clear history</button>
+  </div>`:''}`;
+}
+async function clearTriggeredAlerts(){
+  const u=cu();if(!u)return;
+  const toDelete=DB.priceAlerts.filter(a=>a.user_id===u.id&&a.triggered);
+  for(const a of toDelete){await sb.del('jex_price_alerts','id=eq.'+a.id);}
+  DB.priceAlerts=DB.priceAlerts.filter(a=>!(a.user_id===u.id&&a.triggered));
+  toast('Cleared triggered alerts');render();
+}
+
+// ═══════════════════════════════════════════════
+// FEATURE 3: BENCHMARK / VS MARKET CHART
+// ═══════════════════════════════════════════════
+function renderBenchmarkChart(u){
+  const history=DB.nwHistory.filter(h=>h.user_id===u.id).slice(-60);
+  const startCash=DB.session.starting_cash||10000;
+  return`<div class="card"><div class="section-title">Portfolio vs Market Index</div>
+    <div class="ibox ibox-blue">Your net worth growth compared to the equal-weighted JEX Market Index (average price change across all listed companies).</div>
+    <div style="position:relative;height:280px"><canvas id="benchmark-chart"></canvas></div>
+    <div style="display:flex;gap:16px;justify-content:center;margin-top:10px;font-size:12px">
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:3px;background:#378ADD;display:inline-block;border-radius:2px"></span>Your portfolio</span>
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:3px;background:#f0a500;display:inline-block;border-radius:2px"></span>Market index</span>
+    </div>
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════
+// FEATURE 4: WATCHLIST PAGE
+// ═══════════════════════════════════════════════
+function renderWatchlistPage(){
+  const u=cu();
+  const watched=DB.companies.filter(c=>c.status==='listed'&&isWatched(c.ticker));
+  if(!watched.length)return`<div class="card"><div class="section-title">My Watchlist</div>
+    <div class="empty">Your watchlist is empty.<br><br>Click the ☆ star on any stock in the Market to add it here.</div></div>`;
+  const marketIdx=calcMarketIndex();
+  return`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+    My Watchlist <span style="font-size:12px;font-weight:400;color:var(--text2)">${watched.length} stock${watched.length!==1?'s':''}</span>
+  </div>
+  ${marketIdx!=null?`<div class="ibox ibox-blue" style="margin-bottom:14px">
+    <strong>Market index:</strong> <span class="${marketIdx>=0?'price-up':'price-down'}" style="font-family:var(--mono);font-weight:700">${marketIdx>=0?'+':''}${(marketIdx*100).toFixed(2)}%</span>
+    <span style="font-size:11px;color:var(--text2);margin-left:8px">equal-weighted avg of all listed companies</span>
+  </div>`:''}
+  <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Health</th><th>Avail.</th><th></th><th></th></tr></thead>
+  <tbody>${watched.map(c=>{
+    const chg=priceChg(c);const hs=calcHealthScore(c);const col=hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)';
+    return`<tr>
+      <td><span style="font-weight:500">${c.name}</span><br><span style="font-size:11px;color:var(--text2)">${c.description||''}</span></td>
+      <td><span class="badge b-gray" style="font-family:var(--mono)">${c.ticker}</span></td>
+      <td style="font-family:var(--mono);font-weight:500">${fmt(c.price)}</td>
+      <td class="${chg>=0?'price-up':'price-down'}" style="font-family:var(--mono)">${fmtChg(chg)}</td>
+      <td><canvas id="wl-spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td>
+      <td style="font-family:var(--mono);font-weight:700;color:${col}">${hs!=null?hs+'<span style="font-size:10px;color:'+col+'">/100</span>':'-'}</td>
+      <td style="color:var(--text2);font-size:12px">${c.shares_avail.toLocaleString()}</td>
+      <td><button class="wstar on" onclick="toggleWatch('${c.ticker}')">★</button></td>
+      <td><button class="btn btn-sm btn-primary" onclick="setTab('market');setTimeout(()=>openPanel('${c.ticker}'),50)">Trade</button></td>
+    </tr>`;}).join('')}
+  </tbody></table></div>`;
+}
+
+// ═══════════════════════════════════════════════
+// FEATURE 5: TRADE DISPUTE SYSTEM
+// ═══════════════════════════════════════════════
+async function submitTradeDispute(ticker,tradeId,description){
+  const u=cu();if(!u)return;
+  if(!description||description.trim().length<10)return toast('Please describe the issue (at least 10 characters)');
+  const trade=tradeId?DB.trades.find(t=>t.id===tradeId):null;
+  const rec={
+    id:uid(),student_id:u.id,student_name:u.name,
+    ticker:(ticker||trade?.ticker||'—').trim().toUpperCase(),
+    trade_id:tradeId||null,
+    description:description.trim(),
+    status:'open',ts:ts()
+  };
+  DB.disputes.push(rec);
+  // Notify Compliance Officer
+  const co2=DB.users.find(x=>x.role==='compliance_officer');
+  if(co2)await pushNotification(co2.id,'flag','⚖️ Trade dispute from '+u.name+': '+description.trim().slice(0,60),ticker||null);
+  const chair=DB.users.find(x=>x.role==='chairman'||x.role==='president');
+  if(chair)await pushNotification(chair.id,'flag','⚖️ Trade dispute submitted by '+u.name+': '+description.trim().slice(0,60),ticker||null);
+  await logActivity('dispute',u.name+' filed a trade dispute: '+description.trim().slice(0,60),{ticker:ticker||null,userId:u.id,userName:u.name});
+  toast('Dispute submitted — Compliance Officer has been notified');
+  render();
+}
+async function resolveDispute(id,action){
+  const d=DB.disputes.find(x=>x.id===id);if(!d)return;
+  d.status=action;
+  const u=cu();
+  await pushNotification(d.student_id,'flag','⚖️ Your trade dispute has been '+action+' by '+u.name+'.',d.ticker||null);
+  await logActivity('dispute',u.name+' '+action+' dispute from '+d.student_name+(d.description?': '+d.description.slice(0,50):'')+'',{userId:u.id,userName:u.name});
+  toast('Dispute '+action);render();
+}
+function renderDisputeForm(){
+  const u=cu();if(!u)return'';
+  const myDisputes=(DB.disputes||[]).filter(d=>d.student_id===u.id).slice(-10).reverse();
+  const listed=DB.companies.filter(c=>c.status==='listed');
+  const myTrades=DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id).slice(-20).reverse();
+  return`<div class="card"><div class="section-title">Submit a Trade Dispute</div>
+    <div class="ibox ibox-amber">Use this form if you believe a trade was filled at the wrong price, executed incorrectly, or violates exchange rules. Your dispute will be sent directly to the Compliance Officer.</div>
+    <div class="grid2" style="margin-bottom:12px">
+      <div><label class="flabel">Related stock (optional)</label>
+        <select id="dispute-ticker">
+          <option value="">— Select a ticker —</option>
+          ${listed.map(c=>`<option value="${c.ticker}">${c.ticker} — ${c.name}</option>`).join('')}
+        </select>
+      </div>
+      <div><label class="flabel">Related trade (optional)</label>
+        <select id="dispute-trade-id">
+          <option value="">— Select a specific trade —</option>
+          ${myTrades.map(t=>`<option value="${t.id}">${t.ts} — ${t.ticker} ${t.buyer_id===u.id?'BUY':'SELL'} ${t.qty}×${fmt(t.price)}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="frow"><label class="flabel">Describe the issue</label>
+      <textarea id="dispute-desc" rows="3" placeholder="e.g. My buy order for AAAA filled at $15.20 but the price shown was $12.72 — I believe this is a technical error..."></textarea>
+    </div>
+    <button class="btn btn-warning" onclick="submitTradeDispute(get('dispute-ticker')?.value,get('dispute-trade-id')?.value,get('dispute-desc')?.value)">⚖️ Submit dispute</button>
+  </div>
+  ${myDisputes.length?`<div class="card"><div class="section-title">My disputes</div>
+    ${myDisputes.map(d=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+        <div><span class="badge b-gray" style="font-family:var(--mono)">${d.ticker||'—'}</span> <span class="badge ${d.status==='open'?'b-amber':d.status==='resolved'?'b-green':'b-gray'}">${d.status}</span></div>
+        <span style="font-size:11px;color:var(--text2)">${d.ts}</span>
+      </div>
+      <div style="font-size:12px;color:var(--text2)">${d.description}</div>
+    </div>`).join('')}
+  </div>`:''}`;
+}
+
+// ═══════════════════════════════════════════════
+// EXCHANGE STATS: add market index card
+// ═══════════════════════════════════════════════
+function renderMarketIndexCard(){
+  const listed=DB.companies.filter(c=>c.status==='listed');
+  if(!listed.length)return'';
+  const idx=calcMarketIndex();
+  const totalMktCap=listed.reduce((s,c)=>s+c.price*c.shares,0);
+  const totalTrades=DB.trades.length;
+  const avgHealth=listed.map(c=>calcHealthScore(c)).filter(h=>h!=null);
+  const avgH=avgHealth.length?Math.round(avgHealth.reduce((s,h)=>s+h,0)/avgHealth.length):null;
+  return`<div class="card" style="border-left:3px solid var(--amber)"><div class="section-title">JEX Market Index</div>
+    <div class="grid4">
+      <div class="mcard"><div class="mlabel">Index change</div><div class="mval ${idx>=0?'green':'red'}" style="font-family:var(--mono)">${idx!=null?(idx>=0?'+':'')+( idx*100).toFixed(2)+'%':'—'}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">equal-weighted avg</div></div>
+      <div class="mcard"><div class="mlabel">Total market cap</div><div class="mval" style="font-family:var(--mono)">${fmt(totalMktCap)}</div></div>
+      <div class="mcard"><div class="mlabel">Listed companies</div><div class="mval">${listed.length}</div></div>
+      <div class="mcard"><div class="mlabel">Avg health score</div><div class="mval ${avgH>=70?'green':avgH>=40?'':' red'}" style="font-family:var(--mono)">${avgH!=null?avgH+'/100':'—'}</div></div>
+    </div>
+    <div style="position:relative;height:100px;margin-top:8px"><canvas id="mkt-idx-chart"></canvas></div>
+  </div>`;
+}
+
 // ═══════════════════════════════════════════════
 // MAIN RENDER
 // ═══════════════════════════════════════════════
@@ -5696,6 +6108,7 @@ function getPageContent(){
   if(t==='orders')return renderStudentOrders();
   if(t==='notifications')return renderNotifications();
   if(t==='exchange')return renderExchangeStats();
+  if(t==='watchlist')return renderWatchlistPage();
   if(t==='trades')return renderTrades(isAdmin(u));
   if(t==='apply')return renderApply();
   if(t==='mystock')return renderMyStock();
@@ -5731,6 +6144,40 @@ function render(){
       }
     }
     if(UI.navTab==='market'&&!UI.companyPage)buildSparklines();
+    if(UI.navTab==='watchlist'){
+      setTimeout(()=>{
+        DB.companies.filter(c=>c.status==='listed'&&isWatched(c.ticker)).forEach(c=>{
+          const canvas=document.getElementById('wl-spark-'+c.ticker);if(!canvas||!window.Chart)return;
+          if(charts['wl-spark-'+c.ticker])try{charts['wl-spark-'+c.ticker].destroy();}catch(e){}
+          const pts=(c.price_history||[]).filter(p=>p&&typeof p.p==='number').slice(-20);if(pts.length<2)return;
+          const prices=pts.map(p=>p.p);const isUp=prices[prices.length-1]>=prices[0];
+          charts['wl-spark-'+c.ticker]=new Chart(canvas,{type:'line',data:{labels:prices.map((_,i)=>i),datasets:[{data:prices,borderColor:isUp?'#00c896':'#ff4d6a',borderWidth:1.5,pointRadius:0,fill:false,tension:0.3}]},options:{responsive:false,animation:false,plugins:{legend:{display:false},tooltip:{enabled:false}},scales:{x:{display:false},y:{display:false}}}});
+        });
+      },80);
+    }
+    if(UI.navTab==='portfolio'&&UI.portfolioTab==='benchmark'){
+      setTimeout(()=>{
+        const u=cu();if(!u)return;
+        const history=DB.nwHistory.filter(h=>h.user_id===u.id).slice(-60);
+        const mktHistory=calcMarketIndexHistory();
+        const canvas=document.getElementById('benchmark-chart');if(!canvas||!window.Chart)return;
+        if(charts['benchmark-chart'])try{charts['benchmark-chart'].destroy();}catch(e){}
+        const startCash=DB.session.starting_cash||10000;
+        const myData=history.map(h=>Math.round((h.nw/startCash-1)*10000)/100);
+        const myLabels=history.map(h=>h.ts||'');
+        const mktData=mktHistory.map(m=>Math.round((m.v-1)*10000)/100);
+        const mktLabels=mktHistory.map(m=>m.t);
+        // Align to longer dataset
+        const labels=myLabels.length>=mktLabels.length?myLabels:mktLabels;
+        charts['benchmark-chart']=new Chart(canvas,{type:'line',data:{labels,datasets:[
+          {label:'Your portfolio %',data:myData,borderColor:'#378ADD',borderWidth:2,pointRadius:0,fill:false,tension:0.3},
+          {label:'Market index %',data:mktData,borderColor:'#f0a500',borderWidth:2,pointRadius:0,fill:false,tension:0.3,borderDash:[4,3]}
+        ]},options:{responsive:true,maintainAspectRatio:false,
+          plugins:{legend:{display:true,labels:{color:'#8896a8',font:{size:11}}},tooltip:{callbacks:{label:ctx=>ctx.dataset.label+': '+(ctx.parsed.y>=0?'+':'')+ctx.parsed.y+'%'}}},
+          scales:{x:{grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:6,autoSkip:true}},
+            y:{grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:10},callback:v=>(v>=0?'+':'')+v+'%'},beginAtZero:false}}}});
+      },80);
+    }
     if(UI.navTab==='portfolio'&&UI.portfolioTab==='nwchart'){
       setTimeout(()=>{
         const u=cu();if(!u)return;
@@ -5743,6 +6190,17 @@ function render(){
         charts['nw-chart']=new Chart(canvas,{type:'line',data:{labels:history.map(h=>h.ts||''),datasets:[{data:prices,borderColor:isUp?'#00c896':'#ff4d6a',borderWidth:2,pointRadius:2,pointBackgroundColor:isUp?'#00c896':'#ff4d6a',fill:true,backgroundColor:isUp?'rgba(0,200,150,0.08)':'rgba(255,77,106,0.08)',tension:0.3}]},
           options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>fmt(ctx.parsed.y)}}},
             scales:{x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:8,autoSkip:true}},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#4a5568',font:{size:11},callback:v=>fmt(v)},beginAtZero:false}}}});
+      },80);
+    }
+    if(UI.navTab==='exchange'){
+      setTimeout(()=>{
+        const canvas=document.getElementById('mkt-idx-chart');if(!canvas||!window.Chart)return;
+        const mktHistory=calcMarketIndexHistory();if(mktHistory.length<2)return;
+        if(charts['mkt-idx-chart'])try{charts['mkt-idx-chart'].destroy();}catch(e){}
+        const isUp=(mktHistory[mktHistory.length-1].v||1)>=1;
+        charts['mkt-idx-chart']=new Chart(canvas,{type:'line',data:{labels:mktHistory.map(m=>m.t.slice(11,16)||''),datasets:[{data:mktHistory.map(m=>Math.round((m.v-1)*10000)/100),borderColor:isUp?'#00c896':'#ff4d6a',borderWidth:2,pointRadius:0,fill:true,backgroundColor:isUp?'rgba(0,200,150,0.07)':'rgba(255,77,106,0.07)',tension:0.3}]},
+          options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>(ctx.parsed.y>=0?'+':'')+ctx.parsed.y+'%'}}},
+            scales:{x:{display:false},y:{grid:{color:'rgba(136,150,168,0.07)'},ticks:{color:'#4a5568',font:{size:9},callback:v=>(v>=0?'+':'')+v+'%'},beginAtZero:false}}}});
       },80);
     }
     if(UI.navTab==='market'&&UI.companyPage){
