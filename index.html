@@ -3514,7 +3514,7 @@ function renderMarket(){
       <div class="section-title" style="margin-bottom:0;flex:1">Listed companies</div>
       <input type="text" id="market-search" placeholder="Search by name or ticker..." style="max-width:240px;padding:6px 10px;font-size:13px" oninput="renderMarketInPlace()">
     </div>
-      <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${(u.role==='student'||u.role==='company')?'<th>Watch</th><th></th>':''}</tr></thead>
+      <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${(u.role==='student'||u.role==='company')?'<th>Watch</th><th>Health</th><th></th>':''}</tr></thead>
       <tbody>${listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
     const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
