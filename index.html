@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -529,7 +530,7 @@ async function loadAll(){
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
     activity,shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms]=await Promise.all([
+    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals]=await Promise.all([
     sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_news','order=created_at.desc&limit=50'),
     sb.get('jex_ipo_applications','order=created_at.asc'),
@@ -1200,7 +1201,7 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newMinutes,newDivApprovals]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals]=await Promise.all([
       sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_companies','order=created_at.asc'),
@@ -1221,6 +1222,8 @@ async function autoRefresh(){
     DB.companyMembers=newMembers;
     DB.founderAllocations=newAllocs;
     DB.flags=newFlags;
+    DB.classrooms=newClassrooms;
+    DB.stopLossOrders=newStopLoss;
     DB.minutes=newMinutes;
     DB.divApprovals=newDivApprovals;
     // Merge new trades (avoid duplicates)
@@ -1320,7 +1323,7 @@ async function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u)re
   const candidate=isHashed(stored)?await hashPw(pw):pw; // support legacy plain-text during migration
   if(stored!==candidate)return toast('Wrong password');
   // Auto-migrate plain-text password to hash on successful login
-  if(!isHashed(stored)){const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+uid2,{password:h});}UI.userId=uid2;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();}
+  if(!isHashed(stored)){const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+uid2,{password:h});}UI.userId=uid2;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();await loadAll();}
 function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.tradePage=0;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
 async function changeEmail(uid2,newEmail,pw){
   const u=getUser(uid2);if(!u)return;
@@ -1585,10 +1588,6 @@ async function adjustStockPrice(ticker,pct,reason){
 // ═══════════════════════════════════════════════
 // FOUNDERS & CO-FOUNDERS
 // ═══════════════════════════════════════════════
-function getCompanyFounders(ticker){
-  const co=getCo(ticker);if(!co)return[];
-  return DB.companyMembers.filter(m=>m.company_user_id===co.owner_id&&m.status==='accepted').map(m=>({student_id:m.student_id,student_name:getUser(m.student_id)?.name||'?',status:'active'}));
-}
 function isFounder(ticker,userId){
   const co=getCo(ticker);if(!co)return false;
   return DB.companyMembers.some(m=>m.company_user_id===co.owner_id&&m.student_id===userId&&m.status==='accepted');
@@ -1600,21 +1599,6 @@ function canManageCompany(co){
 }
 
 // addFounderAtRegistration removed — founders use jex_company_members
-
-async function inviteFounder(ticker,studentName){
-  if(!studentName||!studentName.trim())return toast('Enter a student name');
-  const co=getCo(ticker);if(!co)return;
-  const founders=getCompanyFounders(ticker);
-  if(founders.length>=3)return toast('Maximum 3 founders — remove one first');
-  const student=DB.users.find(u=>u.role==='student'&&u.status==='approved'&&u.name.toLowerCase()===studentName.trim().toLowerCase());
-  if(!student)return toast('Student not found: '+studentName.trim());
-  if((DB.companyMembers||[]).find(f=>f.company_ticker===ticker&&f.student_id===student.id))return toast(student.name+' is already a founder');
-  const rec={id:uid(),company_ticker:ticker,company_name:co.name,student_id:student.id,student_name:student.name,role:'co-founder',status:'active',invited_by:cu()?.name,ts:ts()};
-  // jex_founders table removed — using jex_company_members
-  await logActivity('founder',student.name+' added as co-founder of '+co.name,{ticker,userId:student.id,userName:student.name});
-  await pushNotification(student.id,'founder','🏢 You have been added as a co-founder of '+co.name+'!',ticker);
-  toast(student.name+' added as co-founder');render();
-}
 
 // removeFounder v1 removed
 
@@ -2012,11 +1996,11 @@ async function checkCircuitBreakers(){
     const pctMove=Math.abs((co.price-openPrice)/openPrice*100);
     if(pctMove>=threshold){
       const reason='Circuit breaker: '+co.ticker+' moved '+Math.round(pctMove)+'% from session open (threshold: '+threshold+'%)';
-      await haltStock(co.ticker,reason);
+      await haltStock(co.ticker,reason,true);
       toast('⚡ Circuit breaker triggered on '+co.ticker+' — trading halted');
       // Auto-resume after 5 minutes
       setTimeout(async()=>{
-        if(isHalted(co.ticker))await resumeStock(co.ticker);
+        if(isHalted(co.ticker))await resumeStock(co.ticker,true);
       },5*60*1000);
     }
   }
@@ -2229,29 +2213,31 @@ async function resetExchange(){
     await loadAll();render();
   }
 }
-async function haltStock(ticker,reason){
-  if(!isAdmin(cu()))return toast('Admin access required');
+async function haltStock(ticker,reason,systemTriggered=false){
+  if(!systemTriggered&&!isAdmin(cu()))return toast('Admin access required');
   if(!ticker)return toast('Select a ticker');
   if(!reason||reason.trim().length<3)return toast('Enter a reason');
   if(isHalted(ticker))return toast(ticker+' is already halted');
   const u=cu();
-  const rec={ticker,reason:reason.trim(),halted_by:u.name,ts:ts()};
+  const rec={ticker,reason:reason.trim(),halted_by:systemTriggered?'System (Circuit Breaker)':u.name,ts:ts()};
   await sb.post('jex_halts',rec);
   DB.halts.push(rec);
-  await logActivity('halt',ticker+' trading halted — '+reason.trim(),{ticker,userId:u.id,userName:u.name});
+  await logActivity('halt',ticker+' trading halted — '+reason.trim(),{ticker,userId:u?.id,userName:systemTriggered?'System (Circuit Breaker)':u.name});
   // Notify all students who hold this stock
   await pushNotificationToHolders(ticker,'halt','⚠️ Trading halted on '+ticker+': '+reason.trim());
   await pushNotificationToAll('halt','⚠️ '+ticker+' trading has been halted: '+reason.trim());
   toast(ticker+' halted');render();
 }
-async function resumeStock(ticker){
+async function resumeStock(ticker,systemTriggered=false){
   const u=cu();
-  if(!isAdmin(u))return toast('Admin access required');
-  if(u.role==='compliance_officer')return toast('Only Chairman or President can resume a halted stock');
-  if(!confirm('Resume trading on '+ticker+'?'))return;
+  if(!systemTriggered){
+    if(!isAdmin(u))return toast('Admin access required');
+    if(u.role==='compliance_officer')return toast('Only Chairman or President can resume a halted stock');
+    if(!confirm('Resume trading on '+ticker+'?'))return;
+  }
   await sb.del('jex_halts','ticker=eq.'+ticker);
   DB.halts=DB.halts.filter(h=>h.ticker!==ticker);
-  await logActivity('resume',ticker+' trading resumed',{ticker,userId:u.id,userName:u.name});
+  await logActivity('resume',ticker+' trading resumed',{ticker,userId:u?.id,userName:systemTriggered?'System (Circuit Breaker)':u.name});
   await pushNotificationToAll('resume','✅ '+ticker+' trading has resumed');
   toast(ticker+' trading resumed');render();
 }
@@ -3809,7 +3795,15 @@ function renderSettings(){
     </div>
     ${SHEETS_URL?'<div style="font-size:12px;color:var(--text2);margin-top:8px">✓ Sync active — pushing to Sheets automatically</div>':''}
   </div>`:'';
-  return sheetsSection+`<div class="card"><div class="section-title">Account</div>
+  const emailjsSection=isChairman(u)?`<div class="card"><div class="section-title">Email notifications (EmailJS)</div>
+    <div class="ibox ibox-blue">Paste your EmailJS service/template/public key here to enable email alerts for students who opt in under Settings → Email notifications. Get these from your EmailJS account dashboard.</div>
+    <div class="frow"><label class="flabel">Service ID</label><input type="text" id="ejs-service" placeholder="service_xxxxxxx" value="${DB.session.emailjs_service_id||''}"></div>
+    <div class="frow"><label class="flabel">Template ID</label><input type="text" id="ejs-template" placeholder="template_xxxxxxx" value="${DB.session.emailjs_template_id||''}"></div>
+    <div class="frow"><label class="flabel">Public key</label><input type="text" id="ejs-pubkey" placeholder="e.g. AbCdEfGhIjKlMnOp" value="${DB.session.emailjs_public_key||''}"></div>
+    <button class="btn btn-primary" onclick="saveEmailJSConfig()">Save</button>
+    ${DB.session.emailjs_service_id&&DB.session.emailjs_template_id&&DB.session.emailjs_public_key?'<div style="font-size:12px;color:var(--text2);margin-top:8px">✓ Configured — email alerts will send for students with it enabled</div>':''}
+  </div>`:'';
+  return sheetsSection+emailjsSection+`<div class="card"><div class="section-title">Account</div>
     <div class="grid2" style="margin-bottom:12px">
       <div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${u.name}</div></div>
       <div class="mcard"><div class="mlabel">Email (login)</div><div class="mval" style="font-size:14px;margin-top:4px;word-break:break-all">${u.email}</div></div>
@@ -3838,7 +3832,7 @@ function renderSettings(){
         +'<div>'+(pushStatus==='granted'?'<button class="btn btn-sm" onclick="showBrowserPush(&quot;JEX&quot;,&quot;Test notification!&quot;)">Send test</button>':pushStatus==='denied'?'':pushStatus==='unsupported'?'':'<button class="btn btn-sm btn-primary" onclick="requestPushPermission().then(ok=>{ok?toast(&quot;✓ Notifications enabled&quot;):toast(&quot;Permission denied — check browser settings&quot;);render();})">Enable</button>')+'</div>'
         +'</div>';
       const emailRow='<div style="padding:12px 0">'
-        +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:${u.email_notifications?"10px":"0"}">'
+        +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:'+(u.email_notifications?'10px':'0')+'">'
         +'<div><div style="font-size:13px;font-weight:500;margin-bottom:2px">Email notifications</div>'
         +'<div style="font-size:12px;color:var(--text2)">'+(u.email_notifications?'Enabled — sending to '+(u.notification_email||u.email):'Get important alerts sent to your email')+'</div></div>'
         +'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" id="email-notif-toggle" '+(u.email_notifications?'checked':'')+'  onchange="toggleEmailNotifications(this.checked)"><span>'+(u.email_notifications?'On':'Off')+'</span></label>'
