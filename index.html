@@ -2079,12 +2079,40 @@ function showBrowserPush(title,body){
 // Restore permission on page load
 if(typeof Notification!=='undefined'&&Notification.permission==='granted')_pushEnabled=true;
 
+// ── Email via EmailJS ────────────────────────────────────
+function sendEmailNotification(user, type, message, ticker){
+  if(!user||!user.email_notifications)return;
+  const addr=user.notification_email||user.email;
+  if(!addr)return;
+  const important=['dividend','halt','stop_loss','ipo','session','limit_fill','founder_alloc'];
+  if(!important.includes(type))return;
+  const sid=DB.session.emailjs_service_id;
+  const tid=DB.session.emailjs_template_id;
+  const key=DB.session.emailjs_public_key;
+  if(!sid||!tid||!key)return;
+  if(typeof emailjs==='undefined')return;
+  try{
+    emailjs.init({publicKey:key});
+    emailjs.send(sid,tid,{
+      to_email:addr,
+      to_name:user.name,
+      subject:'JEX Alert — '+message.replace(/[-￿]/g,'').trim().slice(0,60),
+      message:message,
+      ticker:ticker||'',
+      app_url:window.location.origin+window.location.pathname
+    }).catch(()=>{});
+  }catch(e){}
+}
+
 async function pushNotification(userId, type, message, ticker=null){
   try{
     const rec={id:uid(),user_id:userId,type,message,ticker,read:false,ts:ts()};
     await sb.post('jex_notifications',rec);
     if(userId===UI.userId){
       DB.notifications.unshift(rec);
+      // Send email if user has it enabled
+      const emailUser=getUser(userId);
+      if(emailUser)sendEmailNotification(emailUser,type,message,ticker);
       // Fire browser push for current user
       const titles={
         dividend:'💰 Dividend received',halt:'⚠️ Trading halted',
@@ -3797,23 +3825,27 @@ function renderSettings(){
     <button class="btn btn-primary" onclick="saveLogo()">Save logo</button>
   </div>`:''}
   <div class="card"><div class="section-title">Notifications</div>
-    <div class="ibox ibox-blue" style="margin-bottom:12px">Enable browser popups to receive alerts when trades fill, dividends are paid, or the session opens. Email notifications are optional — enter a separate address below if you want alerts sent to your email.</div>
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);margin-bottom:12px">
-      <div>
-        <div style="font-size:13px;font-weight:500">Browser popup notifications</div>
-        <div style="font-size:12px;color:var(--text2)">${(()=>{if(typeof Notification==='undefined')return 'Not supported in this browser';if(Notification.permission==='granted')return '✓ Enabled';if(Notification.permission==='denied')return '⚠ Blocked — enable in browser settings';return 'Click to enable';})()}</div>
-      </div>
-      <div>${(()=>{
-        if(typeof Notification==='undefined')return '';
-        if(Notification.permission==='granted')return '<button class="btn btn-sm btn-success" onclick="showBrowserPush(&quot;JEX&quot;,&quot;Test!&quot;)">Send test</button>';
-        if(Notification.permission==='denied')return '<span style="font-size:11px;color:var(--red)">Blocked</span>';
-        return '<button class="btn btn-sm btn-primary" onclick="requestPushPermission().then(ok=>{ok?toast(&quot;Notifications enabled&quot;):toast(&quot;Denied — check settings&quot;);render();})">Enable</button>';
-      })()}</div>
-    </div>
-        <div class="frow"><label class="flabel" style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="email-notif-toggle" ${u.email_notifications?'checked':''} onchange="toggleEmailNotifications(this.checked)"> Enable email notifications</label></div>
-    ${u.email_notifications?`<div class="frow"><label class="flabel">Email to send notifications to</label><input type="email" id="notif-email" placeholder="${u.notification_email||u.email}" value="${u.notification_email||''}" autocomplete="email"></div>
-    <div class="ibox ibox-amber" style="margin-bottom:10px;font-size:11px">You will receive emails for: dividends paid, session open/close, IPO updates, stop-loss triggers, limit order fills, founder share grants. Setup required — see Admin → Session → Email notifications for configuration.</div>
-    <button class="btn btn-primary btn-sm" onclick="saveNotifEmail()">Save notification email</button>`:''}
+    ${(()=>{
+      const pushStatus=typeof Notification==='undefined'?'unsupported':Notification.permission;
+      const pushRow='<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border)">'
+        +'<div><div style="font-size:13px;font-weight:500;margin-bottom:2px">Browser popup notifications</div>'
+        +'<div style="font-size:12px;color:'+(pushStatus==='granted'?'var(--green)':pushStatus==='denied'?'var(--red)':'var(--text2)')+'">'+
+          (pushStatus==='unsupported'?'Not supported in this browser':pushStatus==='granted'?'✓ Enabled':pushStatus==='denied'?'Blocked — enable in your browser settings':'Not enabled yet')
+        +'</div></div>'
+        +'<div>'+(pushStatus==='granted'?'<button class="btn btn-sm" onclick="showBrowserPush(&quot;JEX&quot;,&quot;Test notification!&quot;)">Send test</button>':pushStatus==='denied'?'':pushStatus==='unsupported'?'':'<button class="btn btn-sm btn-primary" onclick="requestPushPermission().then(ok=>{ok?toast(&quot;✓ Notifications enabled&quot;):toast(&quot;Permission denied — check browser settings&quot;);render();})">Enable</button>')+'</div>'
+        +'</div>';
+      const emailRow='<div style="padding:12px 0">'
+        +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:${u.email_notifications?"10px":"0"}">'
+        +'<div><div style="font-size:13px;font-weight:500;margin-bottom:2px">Email notifications</div>'
+        +'<div style="font-size:12px;color:var(--text2)">'+(u.email_notifications?'Enabled — sending to '+(u.notification_email||u.email):'Get important alerts sent to your email')+'</div></div>'
+        +'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" id="email-notif-toggle" '+(u.email_notifications?'checked':'')+'  onchange="toggleEmailNotifications(this.checked)"><span>'+(u.email_notifications?'On':'Off')+'</span></label>'
+        +'</div>'
+        +(u.email_notifications?'<div class="frow" style="margin-bottom:8px"><label class="flabel">Send to email address</label><input type="email" id="notif-email" placeholder="'+(u.notification_email||u.email)+'" value="'+(u.notification_email||'')+'" autocomplete="email"></div>'
+          +'<div style="display:flex;align-items:center;gap:8px"><button class="btn btn-sm btn-primary" onclick="saveNotifEmail()">Save</button>'
+          +'<span style="font-size:11px;color:var(--text2)">Alerts for: dividends, session open/close, IPO, stop-loss, order fills</span></div>':'')
+        +'</div>';
+      return pushRow+emailRow;
+    })()}
   </div>
   <div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><div class="pw-wrap"><input type="password" id="settings-secq-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('settings-secq-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`;
 }
@@ -5449,8 +5481,8 @@ function renderActivityLog(){
   return`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Activity log <div style="display:flex;align-items:center;gap:8px"><span style="font-size:12px;font-weight:400;color:var(--text2)">${filtered.length} of ${DB.activity.length} events</span><button class="btn btn-sm" onclick="exportTableCSV('activity')">📥 CSV</button></div></div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;margin-bottom:12px;align-items:end">
       <div><label class="flabel">Filter by type</label>
-        <select onchange="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.type=this.value;render()">
-          <option value="">All types</option>
+        <select value="${f.type||''}" onchange="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.type=this.value;render()">
+          <option value="" ${!f.type?'selected':''}>All types</option>
           ${types.map(t=>`<option value="${t}" ${f.type===t?'selected':''}>${t}</option>`).join('')}
         </select>
       </div>
@@ -5460,7 +5492,7 @@ function renderActivityLog(){
       <div><label class="flabel">Filter by user</label>
         <input type="text" placeholder="Name..." value="${f.user||''}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.user=this.value;clearTimeout(window._actFilterTimer);window._actFilterTimer=setTimeout(render,300)">
       </div>
-      <div><button class="btn btn-sm" onclick="UI.activityFilter={};render()">Clear</button></div>
+      <div><button class="btn btn-sm" onclick="UI.activityFilter={type:'',ticker:'',user:''};render()">Clear filters</button></div>
     </div>
     ${filtered.length?`<table><thead><tr><th>Time</th><th>Type</th><th>Description</th><th>Amount</th><th title="Audit hash">🔒</th></tr></thead>
     <tbody>${filtered.slice(0,100).map(a=>`<tr>
