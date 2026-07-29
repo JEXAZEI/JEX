@@ -374,7 +374,9 @@ let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[]
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
   companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],
-  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10}};
+  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
+    weekly_schedule:{sun:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},mon:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},tue:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},wed:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},thu:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},fri:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},sat:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}}},
+    weekly_active:false,weekly_override:false}};
 let SHEETS_URL=null;
 let _realtimeChannels=[];
 
@@ -1130,7 +1132,10 @@ let _sessionOpenedAt=null;
 async function setSession(status){
   const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';
   clearInterval(sessionTimer);sessionTimer=null;
-  await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null});
+  // If the weekly scheduler currently has trading open and the admin manually pauses/closes it,
+  // mark an override so the scheduler doesn't immediately reopen it during the same window.
+  const overriding=DB.session.weekly_active&&status!=='open';
+  await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null,weekly_active:false,weekly_override:overriding?true:DB.session.weekly_override});
   const u=cu();
   let description='Session '+status+(u?' by '+u.name:'');
   if(status==='closed'&&_sessionOpenedAt){
@@ -1184,12 +1189,49 @@ async function setSession(status){
   }
   render();
 }
-async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);render();}
+async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null,weekly_active:false});sessionTimer=setInterval(tickTimer,500);render();}
 function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
 async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
 async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();}
 function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('Trading session is now open!');});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended.');});}}
-setInterval(()=>{checkSchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
+// ── Weekly recurring schedule (different hours per day of week, repeats every week) ──
+const WEEKDAY_KEYS=['sun','mon','tue','wed','thu','fri','sat'];
+const WEEKDAY_LABELS={sun:'Sunday',mon:'Monday',tue:'Tuesday',wed:'Wednesday',thu:'Thursday',fri:'Friday',sat:'Saturday'};
+function saveWeeklySchedule(){
+  const ws={};
+  for(const day of WEEKDAY_KEYS){
+    const enabled=!!get('wk-'+day+'-on')?.checked;
+    const oh=parseInt(get('wk-'+day+'-oh')?.value),om=parseInt(get('wk-'+day+'-om')?.value);
+    const ch=parseInt(get('wk-'+day+'-ch')?.value),cm=parseInt(get('wk-'+day+'-cm')?.value);
+    if(enabled){
+      if([oh,om,ch,cm].some(isNaN))return toast(WEEKDAY_LABELS[day]+': enter valid times');
+      if(ch*60+cm<=oh*60+om)return toast(WEEKDAY_LABELS[day]+': close time must be after open time');
+    }
+    ws[day]={enabled,open:{h:isNaN(oh)?16:oh,m:isNaN(om)?0:om},close:{h:isNaN(ch)?18:ch,m:isNaN(cm)?30:cm}};
+  }
+  saveSession({weekly_schedule:ws}).then(()=>{toast('Weekly schedule saved');render();});
+}
+function checkWeeklySchedule(){
+  const ws=DB.session.weekly_schedule;if(!ws)return;
+  const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();
+  const today=ws[WEEKDAY_KEYS[az.getDay()]];
+  const openMin=today?today.open.h*60+today.open.m:-1,closeMin=today?today.close.h*60+today.close.m:-1;
+  const inWindow=today&&today.enabled&&nowMin>=openMin&&nowMin<closeMin;
+  if(!inWindow){
+    if(DB.session.weekly_active&&DB.session.status==='open'){
+      saveSession({status:'closed',label:'Session closed',ends_at:null,weekly_active:false,weekly_override:false}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('🔴 Trading session closed (weekly schedule)');});
+    } else if(DB.session.weekly_override){
+      saveSession({weekly_override:false});
+    }
+    return;
+  }
+  if(DB.session.weekly_override)return; // admin manually overrode this window — don't fight them
+  if(DB.session.status!=='open'){
+    const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;
+    saveSession({status:'open',label:'Open until '+pad(today.close.h)+':'+pad(today.close.m)+' MST (weekly schedule)',ends_at:Date.now()+msUntilEnd,weekly_active:true}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('🟢 Trading session opened (weekly schedule)');});
+  }
+}
+setInterval(()=>{checkSchedule();checkWeeklySchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
 
 // ── Auto-refresh: pull latest data every 20 seconds ──────
 let _lastRefresh=0;
@@ -4441,6 +4483,24 @@ function renderAdmin(){
   :renderAdminListed()}`;
 }
 
+function renderWeeklySchedule(){
+  const ws=DB.session.weekly_schedule||{};
+  const today=WEEKDAY_KEYS[getAZTime().getDay()];
+  return `<div class="section-title" style="font-size:13px;margin-bottom:6px">Weekly schedule</div>
+    <div class="ibox ibox-purple" style="margin-bottom:12px">Repeats every week. Enable a day and set its open/close time (Arizona time) — trading will open and close automatically on that schedule, no need to reset it each day. A manual Pause/Close overrides the schedule until its window ends.</div>
+    ${WEEKDAY_KEYS.map(day=>{
+      const d=ws[day]||{enabled:false,open:{h:16,m:0},close:{h:18,m:30}};
+      return `<div class="row" style="align-items:center;margin-bottom:8px;${day===today?'background:var(--bg3);border-radius:var(--radius);padding:6px 8px':''}">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;width:100px;flex-shrink:0;cursor:pointer"><input type="checkbox" id="wk-${day}-on" ${d.enabled?'checked':''}> ${WEEKDAY_LABELS[day]}${day===today?' <span class="badge b-purple" style="margin-left:2px">today</span>':''}</label>
+        <div style="display:flex;gap:4px;align-items:center"><input type="number" id="wk-${day}-oh" min="0" max="23" value="${pad(d.open.h)}" style="width:52px" title="Open hour"><span style="color:var(--text2)">:</span><input type="number" id="wk-${day}-om" min="0" max="59" value="${pad(d.open.m)}" style="width:52px" title="Open minute"></div>
+        <span style="color:var(--text2);font-size:12px">to</span>
+        <div style="display:flex;gap:4px;align-items:center"><input type="number" id="wk-${day}-ch" min="0" max="23" value="${pad(d.close.h)}" style="width:52px" title="Close hour"><span style="color:var(--text2)">:</span><input type="number" id="wk-${day}-cm" min="0" max="59" value="${pad(d.close.m)}" style="width:52px" title="Close minute"></div>
+      </div>`;
+    }).join('')}
+    <button class="btn btn-primary btn-sm" style="margin-top:4px" onclick="saveWeeklySchedule()">Save weekly schedule</button>
+    ${DB.session.weekly_active?'<div class="ibox ibox-green" style="margin-top:10px">🟢 Currently open via the weekly schedule</div>':''}
+    ${DB.session.weekly_override?'<div class="ibox ibox-amber" style="margin-top:10px">⏸ Manually overridden for the rest of today\'s window</div>':''}`;
+}
 function renderAdminSession(students){
   const az=getAZTime(),sched=DB.session.scheduled_close;
   return`<div class="card"><div class="section-title">Session control</div>
@@ -4454,6 +4514,8 @@ function renderAdminSession(students){
     </div>
     <div style="display:flex;gap:8px;margin-bottom:14px"><button class="btn btn-primary" onclick="scheduleSession()">Set schedule</button><button class="btn" onclick="clearSchedule()">Clear schedule</button></div>
     ${DB.session.scheduled_open||DB.session.scheduled_close?`<div class="ibox ibox-teal" style="margin-bottom:14px">Scheduled: ${DB.session.scheduled_open?pad(DB.session.scheduled_open.h)+':'+pad(DB.session.scheduled_open.m)+' – ':''}${sched?pad(sched.h)+':'+pad(sched.m):''} MST</div>`:''}
+    <div class="divider"></div>
+    ${renderWeeklySchedule()}
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">Circuit breakers</div>
     <div class="ibox ibox-blue" style="margin-bottom:10px">If any stock moves this % from its session-open price, trading is auto-halted for 5 minutes.</div>
