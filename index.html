@@ -106,6 +106,31 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 .wk-times{display:flex;align-items:center;gap:8px}
 .wk-times input[type="time"]{width:118px}
 .wk-to{color:var(--text2);font-size:12px}
+.legal-overlay{position:fixed;inset:0;background:rgba(6,10,18,0.72);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px}
+.legal-box{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius);width:100%;max-width:720px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.5)}
+.legal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border);flex-shrink:0}
+.legal-tabs{display:flex;gap:2px}
+.legal-tab{font-size:13px;padding:6px 14px;cursor:pointer;border-radius:var(--radius);color:var(--text2);border:none;background:transparent;font-family:var(--font)}
+.legal-tab:hover{background:var(--bg3)}.legal-tab.active{background:var(--bg3);color:var(--text);font-weight:500}
+.legal-close{background:transparent;border:none;color:var(--text2);font-size:16px;cursor:pointer;padding:4px 8px;border-radius:var(--radius)}
+.legal-close:hover{background:var(--bg3);color:var(--text)}
+.legal-body{overflow-y:auto;padding:20px 24px;font-size:13px;line-height:1.6;color:var(--text)}
+.legal-body h2{font-size:16px;margin:0 0 4px;color:var(--amber)}
+.legal-body h3{font-size:14px;margin:22px 0 8px;color:var(--amber)}
+.legal-body h3:first-child{margin-top:0}
+.legal-body h4{font-size:13px;margin:14px 0 6px;color:var(--text)}
+.legal-body p{margin:0 0 10px;color:var(--text2)}
+.legal-body ul{margin:0 0 10px;padding-left:20px}
+.legal-body li{margin-bottom:5px;color:var(--text2)}
+.legal-body li strong{color:var(--text)}
+.legal-body table{width:100%;border-collapse:collapse;margin:10px 0 16px;font-size:12px}
+.legal-body th,.legal-body td{border:1px solid var(--border);padding:6px 8px;text-align:left;vertical-align:top}
+.legal-body th{background:var(--bg3);color:var(--amber)}
+.legal-body .legal-meta{font-size:11px;color:var(--text3);margin-bottom:16px}
+.legal-body .legal-warn{background:rgba(255,77,106,0.08);border:1px solid rgba(255,77,106,0.2);border-radius:var(--radius);padding:10px 12px;margin:10px 0;color:#FF8099;font-size:12px}
+.app-footer{text-align:center;font-size:11px;color:var(--text2);padding:18px 0 8px}
+.legal-link{color:var(--text2);text-decoration:underline;cursor:pointer}
+.legal-link:hover{color:var(--text)}
 .short-pos{background:rgba(83,74,183,0.08);border:1px solid rgba(83,74,183,0.2);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
 .ticker-bar{display:flex;gap:10px;overflow-x:auto;padding:6px 0;margin-bottom:14px;scrollbar-width:none}
 .ticker-item{background:var(--bg3);border-radius:var(--radius);padding:8px 12px;min-width:88px;flex-shrink:0;cursor:pointer;border:1px solid transparent}
@@ -340,6 +365,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 </head>
 <body>
 <div id="app"><div class="loading-screen"><div class="spinner"></div><div style="color:var(--text2);font-size:13px">Connecting to JEX...</div></div></div>
+<div id="legal-modal-root"></div>
 <div class="toast" id="toast"></div>
 <script>
 // ═══════════════════════════════════════════════
@@ -1319,7 +1345,7 @@ document.addEventListener('keydown',function(e){
 const SECURITY_QUESTIONS=['What is the name of your first pet?','What city were you born in?','What is your mother\'s maiden name?','What was the name of your first school?','What is your favourite book?','What was the make of your first car?','What is your oldest sibling\'s middle name?','What street did you grow up on?'];
 function secQSelect(prefix){return `<select id="${prefix}-secq"><option value="">— Select a question —</option>${SECURITY_QUESTIONS.map(q=>`<option value="${q}">${q}</option>`).join('')}</select>`;}
 
-async function registerStudent(name,email,pw,secQ,secA,classroomId=''){
+async function registerStudent(name,email,pw,secQ,secA){
   if(!name||name.trim().length<2)return toast('Enter a valid name');
   if(!validEmail(email))return toast('Enter a valid email');
   if(!pw||pw.length<4)return toast('Password must be at least 4 characters');
@@ -1346,9 +1372,7 @@ async function registerCompany(name,email,pw,desc,secQ,secA){
 }
 async function approveReg(id,startCash){
   const r=DB.pending.find(x=>x.id===id);if(!r)return;
-  // Check if Chairman manually set a classroom for this pending user
-  const classroomEl=document.getElementById('pending-classroom-'+id)||document.getElementById('classroom-'+id);
-  const classroomId=(classroomEl?.value||'').trim().toLowerCase()||null;
+  const classroomId=document.getElementById('classroom-'+id)?.value||null;
   startCash=parseFloat(startCash)||DB.session.starting_cash||10000;
   const u={id:r.id,name:r.name,email:r.email,password:r.password,role:r.role,status:'approved',
     cash:startCash,sec_q:r.sec_q,sec_a:r.sec_a,
@@ -3117,6 +3141,199 @@ function renderVoteCard(v,isOwner,isAdminUser){
 function renderConfig(){return `<div class="config-page"><div class="config-card"><div style="font-family:var(--mono);font-size:22px;font-weight:600;margin-bottom:4px"><span style="color:var(--amber)">JEX</span> — Setup required</div><div style="font-size:13px;color:var(--text2);margin-bottom:24px">Connect JEX to your Supabase database.</div><div class="ibox ibox-amber" style="margin-bottom:20px"><strong>One-time setup:</strong><br>1. Go to <strong>supabase.com</strong> and create a free account.<br>2. Create a new project.<br>3. Go to <strong>SQL Editor</strong> → paste and run <code>supabase_setup.sql</code>.<br>4. Go to <strong>Project Settings → API</strong> → copy Project URL and anon key.<br>5. Open <code>index.html</code>, paste your values into the two config lines at the top of the script.<br>6. Upload to GitHub.</div><div class="ibox ibox-blue">After setup this screen will be replaced by the JEX login.<br><br>Default logins: <code>chairman@jted.edu / chairman1234</code> and <code>president@jted.edu / president1234</code><br>Secretary and Treasurer accounts must be created via Supabase SQL.</div></div></div>`;}
 
 // ═══════════════════════════════════════════════
+// LEGAL: Terms of Service & Bylaws
+// ═══════════════════════════════════════════════
+const TOS_HTML=`
+  <h2>Terms of Service, Rules &amp; Regulations</h2>
+  <div class="legal-meta">Effective upon account registration · Subject to amendment by the Chairman, President, or the Board of Trusted Securities (BoTS).</div>
+  <p>These Terms of Service govern all participation in the JTED Stock Exchange (JEX), a simulated classroom financial market. By creating an account and agreeing to the Terms of Service at registration, you acknowledge that you have read, understood, and agree to be bound by all rules contained in this document. Ignorance of the rules is not an excuse for violations.</p>
+
+  <h3>1. Participation &amp; Eligibility</h3>
+  <p>JEX is a simulated stock exchange operated as part of the JTED program. All participants must be currently enrolled students or approved company representatives operating under instructor supervision.</p>
+  <h4>1.1 Account Registration</h4>
+  <ul>
+    <li>Each participant may hold only one student account. Creating duplicate accounts is prohibited.</li>
+    <li>Company accounts are tied to a registered business entity and may be co-managed by up to three approved founders.</li>
+    <li>Account credentials (username and password) are the sole responsibility of the account holder. Do not share your password.</li>
+    <li>All registrations are subject to Chairman or President approval before the account becomes active.</li>
+  </ul>
+  <h4>1.2 Account Conduct</h4>
+  <ul>
+    <li>Participants must use their real name and a valid school email address.</li>
+    <li>Impersonating another student, company, or officer is grounds for immediate suspension.</li>
+    <li>Accounts found to be operating under false identities will be permanently removed.</li>
+  </ul>
+
+  <h3>2. Trading Rules</h3>
+  <p>All trading activity on JEX is subject to the following rules. Violations may result in account suspension, forced position closure, financial penalties, or permanent removal.</p>
+  <h4>2.1 General Trading</h4>
+  <ul>
+    <li>Trading is only permitted during open trading sessions as declared by the Chairman or President.</li>
+    <li>All trades are final and cannot be reversed except by Chairman or President discretion.</li>
+    <li>Orders must be placed in good faith. Placing orders with no intent to hold is prohibited.</li>
+    <li>The exchange reserves the right to cancel or void any order at any time without notice.</li>
+  </ul>
+  <h4>2.2 Prohibited Conduct</h4>
+  <div class="legal-warn">The following activities are strictly prohibited and will result in immediate sanctions:</div>
+  <ul>
+    <li><strong>Wash trading:</strong> Buying and selling the same stock repeatedly to inflate volume or manipulate prices.</li>
+    <li><strong>Spoofing:</strong> Placing large limit orders with intent to cancel before execution to mislead the market.</li>
+    <li><strong>Front-running:</strong> Using non-public information to trade ahead of known orders.</li>
+    <li><strong>Collusion:</strong> Coordinating with other participants to artificially move prices.</li>
+    <li><strong>Insider trading:</strong> Executing trades based on material non-public information about a listed company.</li>
+    <li><strong>Market manipulation:</strong> Any attempt to artificially influence a stock price through deceptive means.</li>
+    <li><strong>Order stuffing:</strong> Placing excessive orders to slow down the exchange or harm other participants.</li>
+  </ul>
+  <h4>2.3 Short Selling</h4>
+  <ul>
+    <li>Short selling is permitted during open sessions only.</li>
+    <li>A collateral requirement of <strong>150% of the position value</strong> is locked at the time of shorting.</li>
+    <li>Short positions must be covered before the account holder's JEX participation ends.</li>
+    <li>Uncovered short positions at the end of a final session may be force-closed by the Chairman or President.</li>
+  </ul>
+  <h4>2.4 Limit &amp; After-Hours Orders</h4>
+  <ul>
+    <li>Limit orders placed outside of session hours are queued as after-hours orders and activate when the next session opens.</li>
+    <li>Day orders expire at session close if unfilled.</li>
+    <li>Good-till-cancelled (GTC) orders remain active across sessions until filled or manually cancelled.</li>
+  </ul>
+
+  <h3>3. Company Rules</h3>
+  <p>Companies listed on JEX are expected to operate transparently and in accordance with good corporate governance standards.</p>
+  <h4>3.1 IPO Applications</h4>
+  <ul>
+    <li>IPO applications must include accurate company information, a realistic IPO price, and a legitimate business description.</li>
+    <li>False or misleading IPO disclosures are grounds for immediate delisting and account suspension.</li>
+    <li>Once approved, the ticker symbol is permanent and cannot be changed.</li>
+  </ul>
+  <h4>3.2 Financial Disclosures</h4>
+  <ul>
+    <li>Companies are expected to post news updates and financial summaries regularly.</li>
+    <li>Material events (mergers, product launches, financial results) must be disclosed promptly.</li>
+    <li>Deliberately withholding material information to benefit insider traders is a violation.</li>
+  </ul>
+  <h4>3.3 Dividends &amp; Buybacks</h4>
+  <ul>
+    <li>Dividends must be paid from actual company cash. Declaring dividends the company cannot afford is prohibited.</li>
+    <li>Dividends exceeding the Treasurer-set threshold require prior Treasurer approval.</li>
+    <li>Share buybacks reduce the total shares outstanding and must be conducted at fair market value.</li>
+  </ul>
+  <h4>3.4 Dilution</h4>
+  <ul>
+    <li>Issuing additional shares requires a formal dilution application approved by the Chairman or President.</li>
+    <li>Dilution must be disclosed to all shareholders at the time of approval.</li>
+    <li>Excessive dilution used as a tool to harm existing shareholders may be denied.</li>
+  </ul>
+  <h4>3.5 Delisting</h4>
+  <ul>
+    <li>Companies may voluntarily apply for delisting. If approved, a buyback window will open for shareholders.</li>
+    <li>Involuntary delisting may be imposed by the Chairman or President for compliance violations, insolvency, or fraudulent conduct.</li>
+    <li>Shares held in a delisted company become worthless after delisting is finalised.</li>
+  </ul>
+
+  <h3>4. Exchange Governance</h3>
+  <h4>4.1 Officer Roles</h4>
+  <table><thead><tr><th>Role</th><th>Primary Responsibilities</th></tr></thead><tbody>
+    <tr><td>Chairman</td><td>Supreme authority. Opens/closes sessions. Approves IPOs, dilutions, share classes, and delistings.</td></tr>
+    <tr><td>President</td><td>Deputy to the Chairman. Can open/close sessions. Reviews compliance reports. Co-manages governance.</td></tr>
+    <tr><td>Secretary</td><td>Records meeting minutes. Maintains official notices. Documents exchange activity.</td></tr>
+    <tr><td>Treasurer</td><td>Reviews and approves large dividend payments. Monitors exchange-wide financial health.</td></tr>
+    <tr><td>Compliance Officer</td><td>Investigates suspected violations. Files compliance flags. Reports to Chairman and President.</td></tr>
+  </tbody></table>
+  <h4>4.2 Disputes &amp; Appeals</h4>
+  <ul>
+    <li>All disputes must be raised with the Compliance Officer in the first instance.</li>
+    <li>The Chairman's decision on any dispute is final and binding.</li>
+    <li>Participants who believe an error has occurred may request a review within one trading session.</li>
+    <li>Filing repeated frivolous disputes is itself a violation.</li>
+  </ul>
+  <h4>4.3 Session Control</h4>
+  <ul>
+    <li>The Chairman or President may open, pause, or close the market at any time.</li>
+    <li>Trading halts may be issued for individual stocks or the entire exchange.</li>
+    <li>Circuit breakers trigger automatically if a stock moves beyond the set threshold from its session-open price.</li>
+    <li>All decisions made under emergency session control are at the officers' sole discretion.</li>
+  </ul>
+
+  <h3>5. Sanctions &amp; Enforcement</h3>
+  <p>Violations of these rules will be handled progressively, though the Chairman reserves the right to apply any sanction immediately and without prior warning for serious offences.</p>
+  <table><thead><tr><th>Level</th><th>Examples</th><th>Possible Sanctions</th></tr></thead><tbody>
+    <tr><td>Minor</td><td>Accidental rule breach, first offence, procedural error.</td><td>Written warning via notification. No financial penalty.</td></tr>
+    <tr><td>Moderate</td><td>Repeated minor violations, incomplete disclosures, minor collusion.</td><td>Account freeze (1 session). Forced order cancellation.</td></tr>
+    <tr><td>Serious</td><td>Wash trading, insider trading, spoofing, deliberate manipulation.</td><td>Account suspended. Positions force-closed at market price.</td></tr>
+    <tr><td>Severe</td><td>Fraud, persistent cheating, abuse of officer role, hacking the exchange.</td><td>Permanent account removal. All holdings zeroed. Reported to the Chairman.</td></tr>
+  </tbody></table>
+
+  <h3>6. Privacy &amp; Data</h3>
+  <p>JEX collects only the information necessary to operate the exchange: name, email, password (hashed), and trading activity.</p>
+  <ul>
+    <li>Account data is stored securely in a Supabase database accessible only to exchange officers and the instructor.</li>
+    <li>Trading history, portfolio data, and net worth records may be reviewed by officers at any time.</li>
+    <li>No personal data is sold or shared with third parties outside the classroom program.</li>
+    <li>The exchange may be fully reset at the end of a program period, wiping all account data.</li>
+  </ul>
+
+  <h3>7. Amendments</h3>
+  <p>The Chairman, President, or the Board of Trusted Securities (BoTS), pursuant to Article II of the Bylaws — Corporate Governance section of the School Securities Exchange Application, reserves the right to amend, update, or replace these Terms of Service at any time. Changes will be announced via the JEX announcements system. Continued use of the exchange after an amendment constitutes acceptance of the updated terms. Participants who disagree with material changes should raise their concerns with the Compliance Officer or instructor.</p>
+
+  <h3>8. Disclaimer</h3>
+  <p>JEX is a <strong>simulated educational environment</strong>. All currency, stocks, and financial instruments within JEX are fictional and carry no real monetary value. No real money is involved. The exchange is operated solely for educational purposes as part of the JTED program. Any resemblance to real-world companies, stocks, or financial events is coincidental.</p>
+  <div class="legal-warn">Strategies or behaviours practised in JEX should not be applied to real financial markets without appropriate professional guidance. The exchange operators assume no liability for decisions made based on JEX participation.</div>
+
+  <h4>By agreeing to the Terms of Service at registration, I confirm that:</h4>
+  <ul>
+    <li>I have read and understood these Terms of Service, Rules &amp; Regulations in full.</li>
+    <li>I agree to abide by all rules set out in this document.</li>
+    <li>I understand that violations may result in sanctions up to and including permanent account removal.</li>
+    <li>I understand that JEX is a simulated educational environment and no real money is involved.</li>
+    <li>I consent to my trading activity being monitored by exchange officers and the instructor.</li>
+  </ul>
+  <div class="legal-meta">JEX — JTED Stock Exchange | Terms of Service v1.0. This document supersedes all prior verbal or written agreements regarding JEX participation.</div>
+`;
+const BYLAWS_HTML=`
+  <h2>School Securities Exchange — Bylaws</h2>
+  <div class="legal-meta">JTED Securities and Exchange Commission · Application for, and Amendments to Application for, Registration as a School Securities Exchange</div>
+  <h3>Bylaws — Corporate Governance</h3>
+  <ul>
+    <li><strong>Article I:</strong> Meetings are every Thursday, after the educational semester, per the Tucson Unified School District Calendar. The purpose of meetings is to elect the President of the Exchange and to approve or reapprove the rules and regulations of the Exchange.</li>
+    <li><strong>Article II:</strong> Special meetings may be called by the Chairman, the President, or by at least 51% of public company representatives (hereinafter known as the "Board of Trusted Securities (BoTS)"), defined as board members listed on the Exchange. Every amendment to the bylaws can only be passed and enforced with a vote of 51% on the BoTS. Afterward, it must be signed by the President and only then may it pass. A vote of 2/3 of the vote may override the President's decision.</li>
+    <li><strong>Article III:</strong> The President of the Exchange must be a member of the BoTS. To be eligible to run, an individual must first serve as an official board member. Each company is responsible for electing its board members and may establish its own rules for that process.</li>
+    <li><strong>Article IV:</strong> The President will be elected through a general election in which only members of BoTS may vote. A candidate must receive a majority of at least 51% of the total vote to win. However, a supermajority of 80% or more automatically overrides the confirmation process.</li>
+    <li><strong>Article V:</strong> After the election, the President-elect must be confirmed by the Chairman of the Exchange. If confirmed, the outgoing President transfers all powers and privileges to the new President. If the Chairman withholds confirmation, a new election is required unless the candidate has received a supermajority of 80% or more, in which case confirmation is automatic.</li>
+    <li><strong>Article VI:</strong> The Chairman of the Exchange will always be Jeremy Bishop (hereinafter known as "Mr. Bishop"). He may not be removed from this position unless he resigns voluntarily. The Chairman is responsible for approving new users and allocating them capital to trade with, approving IPOs from companies, approving issuances, and new classes of stocks.</li>
+    <li><strong>Article VII:</strong> The President may nominate a Secretary, Treasurer and a Compliance Officer. All officers must be confirmed by the Chairman. The President is responsible for approving new users and allocating them capital to trade with, approving IPOs from companies, approving issuances and new classes of stocks, opening and closing trading sessions, manual password resets, and other responsibilities that are reasonable for the day-to-day operations of the Exchange. The President will temporarily be Ariel Ramirez-Angulo until the next meeting.</li>
+    <li><strong>Article VIII:</strong> The Secretary takes notes during meetings and is responsible for sending out e-mails or other communications to important board members or officers. The Secretary is also responsible for recording the minutes of every meeting and posting said minutes on the Exchange. The Secretary will temporarily be Kyle Nguyen until the next meeting.</li>
+    <li><strong>Article IX:</strong> The Treasurer is responsible for authorizing all financial transactions and documents that the Exchange publishes to the public. The Treasurer is also responsible for monitoring the financial standings of every company listed on the Exchange. The Treasurer will temporarily be John Church until the next meeting.</li>
+    <li><strong>Article X:</strong> The Compliance Officer is responsible for monitoring all trading on the Exchange. The Compliance Officer is also responsible for halting any suspicious trades or stocks on the Exchange. The Compliance Officer will temporarily be Benjamin Arvizu until the next meeting.</li>
+  </ul>
+  <div class="legal-meta">JTED Securities and Exchange Commission · 3300 S Park Ave, Tucson, AZ 85713</div>
+`;
+function openLegalModal(type){
+  const root=document.getElementById('legal-modal-root');if(!root)return;
+  root.innerHTML=renderLegalModalHTML(type);
+}
+function switchLegalTab(type){openLegalModal(type);}
+function closeLegalModal(){const root=document.getElementById('legal-modal-root');if(root)root.innerHTML='';}
+function renderLegalModalHTML(type){
+  const isTos=type!=='bylaws';
+  return `<div class="legal-overlay" onclick="if(event.target===this)closeLegalModal()">
+    <div class="legal-box">
+      <div class="legal-header">
+        <div class="legal-tabs">
+          <button class="legal-tab ${isTos?'active':''}" onclick="switchLegalTab('tos')">Terms of Service</button>
+          <button class="legal-tab ${!isTos?'active':''}" onclick="switchLegalTab('bylaws')">Bylaws</button>
+        </div>
+        <button class="legal-close" onclick="closeLegalModal()">✕</button>
+      </div>
+      <div class="legal-body">${isTos?TOS_HTML:BYLAWS_HTML}</div>
+    </div>
+  </div>`;
+}
+function renderLegalFooter(){
+  return `<div class="app-footer">JEX — JTED Stock Exchange &nbsp;·&nbsp; <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a> &nbsp;·&nbsp; <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a></div>`;
+}
+
+// ═══════════════════════════════════════════════
 // RENDER: LOGIN
 // ═══════════════════════════════════════════════
 function renderLogin(){
@@ -3130,8 +3347,8 @@ function renderLogin(){
   if(UI.loginView==='forgot-email'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 1 of 3</div><div class="frow"><label class="flabel">Your email address</label><input type="email" id="forgot-email" placeholder="you@school.edu" onkeydown="if(event.key==='Enter')forgotStep1(get('forgot-email')?.value)"></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep1(get('forgot-email')?.value)">Continue</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${u?.name}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="forgot-pw1" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="forgot-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw2')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
-  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Classroom ID (optional)</label><input type="text" id="reg-classroom" placeholder="e.g. period-1 (ask your teacher)"></div>
-<div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
+  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div>
+<div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in. Your classroom will be assigned by your teacher after approval.</div><div class="frow" style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" id="reg-agree-tos" aria-label="I agree to the Terms of Service and Bylaws" style="width:auto;margin-top:2px"><span style="font-size:12px;color:var(--text2)">I agree to the <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a> and <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a>.</span></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(!['admin','company','student'].includes(UI.loginTab))UI.loginTab='student';
   const tabCounts={admin:admins.length,company:companies.length,student:students.length};
   const tabList=UI.loginTab==='admin'?admins:UI.loginTab==='company'?companies:students;
@@ -3147,7 +3364,12 @@ function renderLogin(){
   </div><div style="display:flex;justify-content:flex-start;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)"><button class="btn btn-sm btn-primary" onclick="UI.loginView='register';render()">Register new account</button></div></div></div>`;
 }
 function switchRegTab(type){document.querySelectorAll('.reg-tab').forEach(t=>t.classList.remove('active'));const tab=get('reg-tab-'+type);if(tab)tab.classList.add('active');get('reg-student-fields').style.display=type==='student'?'':'none';get('reg-company-fields').style.display=type==='company'?'':'none';}
-function doRegister(){const active=document.querySelector('.reg-tab.active');const type=active?.id==='reg-tab-company'?'company':'student';if(type==='student')registerStudent(get('reg-name')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value,(get('reg-classroom')?.value||'').trim().toLowerCase());else{registerCompany(get('reg-co-name')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value);}}
+function doRegister(){
+  if(!get('reg-agree-tos')?.checked)return toast('You must agree to the Terms of Service to register');
+  const active=document.querySelector('.reg-tab.active');const type=active?.id==='reg-tab-company'?'company':'student';
+  if(type==='student')registerStudent(get('reg-name')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value);
+  else registerCompany(get('reg-co-name')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value);
+}
 
 // ═══════════════════════════════════════════════
 // RENDER: CHROME
@@ -4627,7 +4849,7 @@ function renderAdminSession(students){
 }
 function renderAdminRegs(pS,pC,students,companies){
   return`<div class="card">
-    ${pS.length?`<div class="section-title">Pending students</div>${pS.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-blue">student</span></div><div class="app-meta">${esc(r.email)} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><input type="text" id="classroom-${r.id}" placeholder="classroom" style="width:80px;font-size:11px"><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:100px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
+    ${pS.length?`<div class="section-title">Pending students</div>${pS.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-blue">student</span></div><div class="app-meta">${esc(r.email)} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><select id="classroom-${r.id}" style="width:110px;font-size:11px"><option value="">No classroom</option>${DB.classrooms.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:100px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
     ${pC.length?`<div class="section-title">Pending companies</div>${pC.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-amber">company</span></div><div class="app-meta">${esc(r.email)} — ${esc(r.description||'')} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
     ${!DB.pending.length?`<div class="empty" style="padding:16px">No pending registrations</div><hr class="divider">`:''}
     <div class="section-title" style="margin-top:4px">Approved accounts</div>
@@ -5699,8 +5921,8 @@ function getPageContent(){
 function render(){
   destroyCharts();
   const app=document.getElementById('app');
-  if(!UI.userId){app.innerHTML=renderLogin();return;}
-  const u=cu();if(!u){UI.userId=null;app.innerHTML=renderLogin();return;}
+  if(!UI.userId){app.innerHTML=renderLogin()+renderLegalFooter();return;}
+  const u=cu();if(!u){UI.userId=null;app.innerHTML=renderLogin()+renderLegalFooter();return;}
   const _cu=cu();
   const _isMobileStudent=_cu&&(_cu.role==='student'||_cu.role==='company')&&window.innerWidth<=640;
   const _unread=myUnreadCount();
@@ -5711,7 +5933,7 @@ function render(){
     <button class="mbn-btn ${UI.navTab==='orders'?'active':''}" onclick="setTab('orders')"><span class="mbn-icon">📋</span>Orders</button>
     <button class="mbn-btn ${UI.navTab==='notifications'?'active':''}" onclick="setTab('notifications')"><span class="mbn-icon">🔔</span><span>${_unread?'<span style="color:var(--red)">'+_unread+'</span>':'Alerts'}</span></button>
   </div>`:'';
-  app.innerHTML=`${renderTopbar()}${renderBanner()}${renderNav()}<div class="content${_isMobileStudent?' content-bnav':''}">${getPageContent()}</div>${_bnav}`;
+  app.innerHTML=`${renderTopbar()}${renderBanner()}${renderNav()}<div class="content${_isMobileStudent?' content-bnav':''}">${getPageContent()}${renderLegalFooter()}</div>${_bnav}`;
   if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
   setTimeout(()=>{
     if(UI.navTab==='mystock'&&UI.companyTab==='stock'){
