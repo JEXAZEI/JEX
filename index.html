@@ -513,13 +513,13 @@ setInterval(checkInactivity,60000); // check every minute
 document.addEventListener('mousemove',resetActivityTimer,{passive:true});
 document.addEventListener('keydown',resetActivityTimer,{passive:true});
 document.addEventListener('touchstart',resetActivityTimer,{passive:true});
-let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null};
+let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null,lbClassroom:null};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
   // ── Phase 1: critical data needed to render login ──────
   const [users,session,companies,announcements,halts]=await Promise.all([
-    sb.get('jex_users','order=created_at.asc&select=id,name,email,password,role,status,cash,holdings,shorts,watchlist,description,app_status,sec_q,sec_a,created_at'),
+    sb.get('jex_users','order=created_at.asc&select=id,name,email,password,role,status,cash,holdings,shorts,watchlist,description,app_status,sec_q,sec_a,created_at,classroom_id,email_notifications,notification_email'),
     sb.get('jex_session','id=eq.1'),
     sb.get('jex_companies','order=created_at.asc'),
     sb.get('jex_announcements','order=created_at.desc'),
@@ -3740,10 +3740,15 @@ function closePanel(){UI.panelTicker=null;destroyCharts();document.getElementByI
 function renderLeaderboard(){
   const lbSnap=DB.session.leaderboard_snapshot;
   const isFrozen=lbSnap&&DB.session.status!=='open';
-  const ranked=isFrozen?lbSnap:DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nw(u),_divs:divRec(u),name:u.name,id:u.id,classroom_id:u.classroom_id})).sort((a,b)=>b._nw-a._nw);
+  let ranked=isFrozen?lbSnap:DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nw(u),_divs:divRec(u),name:u.name,id:u.id,classroom_id:u.classroom_id})).sort((a,b)=>b._nw-a._nw);
+  if(UI.lbClassroom)ranked=ranked.filter(u=>u.classroom_id===UI.lbClassroom);
   const rc=i=>i===0?'r-gold':i===1?'r-silver':i===2?'r-bronze':'';
   const frozenBadge=isFrozen?'<span class="badge b-amber" style="font-size:11px;font-weight:400">📸 Frozen at close</span>':'';
-  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between"><span>Net worth leaderboard</span>${frozenBadge}</div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${u.name}${u.classroom_id?` <span class="badge b-gray" style="font-size:9px">${getClassroomName(u.classroom_id)}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=10000?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):'<div class="empty">No students yet</div>'}</div>`;
+  const classroomPicker=DB.classrooms.length?`<select id="lb-classroom" style="width:auto;font-size:12px;padding:5px 8px" onchange="UI.lbClassroom=this.value||null;render()">
+      <option value="">All classrooms</option>
+      ${DB.classrooms.map(c=>`<option value="${c.id}" ${UI.lbClassroom===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
+    </select>`:'';
+  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard</span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${u.name}${!UI.lbClassroom&&u.classroom_id?` <span class="badge b-gray" style="font-size:9px">${getClassroomName(u.classroom_id)}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=10000?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>`;
 }
 
 // ═══════════════════════════════════════════════
