@@ -99,6 +99,13 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 .ibox-green{background:rgba(0,200,150,0.07);border:1px solid rgba(0,200,150,0.2);color:var(--green)}
 .ibox-red{background:rgba(255,77,106,0.08);border:1px solid rgba(255,77,106,0.2);color:var(--red)}
 .sbar-wrap{min-width:90px}.sbar-bg{height:4px;background:var(--bg3);border-radius:2px;overflow:hidden;margin-top:4px}.sbar-fill{height:4px;border-radius:2px;background:var(--blue)}
+.wk-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:8px;border-radius:var(--radius);margin-bottom:4px}
+.wk-today{background:var(--bg3)}
+.wk-daylabel{display:flex;align-items:center;gap:8px;font-size:13px;width:132px;flex-shrink:0;cursor:pointer;white-space:nowrap}
+.wk-daylabel .badge{flex-shrink:0}
+.wk-times{display:flex;align-items:center;gap:8px}
+.wk-times input[type="time"]{width:118px}
+.wk-to{color:var(--text2);font-size:12px}
 .short-pos{background:rgba(83,74,183,0.08);border:1px solid rgba(83,74,183,0.2);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
 .ticker-bar{display:flex;gap:10px;overflow-x:auto;padding:6px 0;margin-bottom:14px;scrollbar-width:none}
 .ticker-item{background:var(--bg3);border-radius:var(--radius);padding:8px 12px;min-width:88px;flex-shrink:0;cursor:pointer;border:1px solid transparent}
@@ -1040,13 +1047,8 @@ async function generateSessionRecap(u){
 // ── Classroom management ──────────────────────────────
 async function createClassroom(){
   const name=(document.getElementById('cls-name')?.value||'').trim();
-  const days=Array.from(document.querySelectorAll('.cls-day:checked')).map(el=>el.value);
-  const start=document.getElementById('cls-start')?.value;
-  const end=document.getElementById('cls-end')?.value;
   if(!name)return toast('Enter a classroom name');
-  if(!days.length)return toast('Select at least one day');
-  if(!start||!end)return toast('Set start and end times');
-  const rec={id:uid(),name,days,start_time:start,end_time:end,ts:ts()};
+  const rec={id:uid(),name,ts:ts()};
   await sb.post('jex_classrooms',rec);
   DB.classrooms.push(rec);
   toast('Classroom "'+name+'" created');render();
@@ -1064,26 +1066,13 @@ function getClassroomName(id){
 function getClassroomForUser(u){
   return DB.classrooms.find(c=>c.id===u?.classroom_id)||null;
 }
-function isClassroomTradingWindow(){
-  // Check if current time falls within ANY classroom trading window
-  // Used when cross-classroom trading is enabled
-  return true; // Session open/close is the primary gate
-}
 async function reassignClassroom(){
   const rawId=get('reassign-uid')?.value;
   const cid=get('reassign-cid-select')?.value||null;
   if(!rawId)return toast('Select a user or company');
-  if(rawId.startsWith('co:')){
-    // It's a company
-    const coId=rawId.slice(3);
-    await sb.patch('jex_companies','id=eq.'+coId,{classroom_id:cid});
-    const co=DB.companies.find(c=>c.id===coId);if(co)co.classroom_id=cid;
-    toast('Company reassigned to classroom: '+(cid||'default'));
-  } else {
-    await sb.patch('jex_users','id=eq.'+rawId,{classroom_id:cid});
-    const u=getUser(rawId);if(u)u.classroom_id=cid;
-    toast('User reassigned to classroom: '+(cid||'default'));
-  }
+  await sb.patch('jex_users','id=eq.'+rawId,{classroom_id:cid});
+  const u=getUser(rawId);if(u)u.classroom_id=cid;
+  toast('Reassigned to classroom: '+(cid||'unassigned'));
   render();
 }
 // Filter data by classroom if set
@@ -1201,8 +1190,8 @@ function saveWeeklySchedule(){
   const ws={};
   for(const day of WEEKDAY_KEYS){
     const enabled=!!get('wk-'+day+'-on')?.checked;
-    const oh=parseInt(get('wk-'+day+'-oh')?.value),om=parseInt(get('wk-'+day+'-om')?.value);
-    const ch=parseInt(get('wk-'+day+'-ch')?.value),cm=parseInt(get('wk-'+day+'-cm')?.value);
+    const[oh,om]=(get('wk-'+day+'-open')?.value||'').split(':').map(Number);
+    const[ch,cm]=(get('wk-'+day+'-close')?.value||'').split(':').map(Number);
     if(enabled){
       if([oh,om,ch,cm].some(isNaN))return toast(WEEKDAY_LABELS[day]+': enter valid times');
       if(ch*60+cm<=oh*60+om)return toast(WEEKDAY_LABELS[day]+': close time must be after open time');
@@ -4490,14 +4479,16 @@ function renderWeeklySchedule(){
     <div class="ibox ibox-purple" style="margin-bottom:12px">Repeats every week. Enable a day and set its open/close time (Arizona time) — trading will open and close automatically on that schedule, no need to reset it each day. A manual Pause/Close overrides the schedule until its window ends.</div>
     ${WEEKDAY_KEYS.map(day=>{
       const d=ws[day]||{enabled:false,open:{h:16,m:0},close:{h:18,m:30}};
-      return `<div class="row" style="align-items:center;margin-bottom:8px;${day===today?'background:var(--bg3);border-radius:var(--radius);padding:6px 8px':''}">
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;width:100px;flex-shrink:0;cursor:pointer"><input type="checkbox" id="wk-${day}-on" ${d.enabled?'checked':''}> ${WEEKDAY_LABELS[day]}${day===today?' <span class="badge b-purple" style="margin-left:2px">today</span>':''}</label>
-        <div style="display:flex;gap:4px;align-items:center"><input type="number" id="wk-${day}-oh" min="0" max="23" value="${pad(d.open.h)}" style="width:52px" title="Open hour"><span style="color:var(--text2)">:</span><input type="number" id="wk-${day}-om" min="0" max="59" value="${pad(d.open.m)}" style="width:52px" title="Open minute"></div>
-        <span style="color:var(--text2);font-size:12px">to</span>
-        <div style="display:flex;gap:4px;align-items:center"><input type="number" id="wk-${day}-ch" min="0" max="23" value="${pad(d.close.h)}" style="width:52px" title="Close hour"><span style="color:var(--text2)">:</span><input type="number" id="wk-${day}-cm" min="0" max="59" value="${pad(d.close.m)}" style="width:52px" title="Close minute"></div>
+      return `<div class="wk-row ${day===today?'wk-today':''}">
+        <label class="wk-daylabel"><input type="checkbox" id="wk-${day}-on" ${d.enabled?'checked':''}> <span>${WEEKDAY_LABELS[day]}</span>${day===today?' <span class="badge b-purple">today</span>':''}</label>
+        <div class="wk-times">
+          <input type="time" id="wk-${day}-open" value="${pad(d.open.h)}:${pad(d.open.m)}" title="Open time">
+          <span class="wk-to">to</span>
+          <input type="time" id="wk-${day}-close" value="${pad(d.close.h)}:${pad(d.close.m)}" title="Close time">
+        </div>
       </div>`;
     }).join('')}
-    <button class="btn btn-primary btn-sm" style="margin-top:4px" onclick="saveWeeklySchedule()">Save weekly schedule</button>
+    <button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="saveWeeklySchedule()">Save weekly schedule</button>
     ${DB.session.weekly_active?'<div class="ibox ibox-green" style="margin-top:10px">🟢 Currently open via the weekly schedule</div>':''}
     ${DB.session.weekly_override?'<div class="ibox ibox-amber" style="margin-top:10px">⏸ Manually overridden for the rest of today\'s window</div>':''}`;
 }
@@ -4576,42 +4567,32 @@ function renderAdminSession(students){
     </div>
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">🏫 Classroom management</div>
-    <div class="ibox ibox-blue" style="margin-bottom:12px">Create classrooms with trading schedules. Assign students and companies to classrooms. Cross-classroom trading is always allowed — classrooms are for organization and display only.</div>
-    
+    <div class="ibox ibox-blue" style="margin-bottom:12px">Classrooms are just a way of organizing which students and companies belong together — they don't restrict trading times. Cross-classroom trading is always allowed and display only.</div>
+
     ${DB.classrooms.length?`<div style="margin-bottom:12px">
       ${DB.classrooms.map(cls=>`<div style="display:flex;align-items:center;gap:8px;padding:8px;background:var(--bg3);border-radius:var(--radius);margin-bottom:6px">
         <div style="flex:1">
           <div style="font-weight:500">${esc(cls.name)}</div>
-          <div style="font-size:11px;color:var(--text2)">${(cls.days||[]).join(', ')} · ${cls.start_time||'—'} – ${cls.end_time||'—'}</div>
-          <div style="font-size:11px;color:var(--text2)">${DB.users.filter(u=>u.classroom_id===cls.id).length} students · ${DB.companies.filter(c=>c.classroom_id===cls.id).length} companies</div>
+          <div style="font-size:11px;color:var(--text2)">${DB.users.filter(u=>u.classroom_id===cls.id&&u.role==='student').length} students · ${DB.users.filter(u=>u.classroom_id===cls.id&&u.role==='company').length} companies</div>
         </div>
         <button class="btn btn-sm" style="color:var(--text2)" onclick="UI.classroomFilter=UI.classroomFilter===&quot;${cls.id}&quot;?null:&quot;${cls.id}&quot;;render()">${UI.classroomFilter===cls.id?'Showing':'Filter'}</button>
         <button class="btn btn-sm btn-danger" onclick="deleteClassroom('${cls.id}')">✕</button>
       </div>`).join('')}
     </div>`:'<div style="font-size:12px;color:var(--text2);margin-bottom:12px">No classrooms yet</div>'}
-    
+
     <div class="section-title" style="font-size:12px;margin-bottom:8px">Add classroom</div>
-    <div class="frow"><label class="flabel">Classroom name</label><input type="text" id="cls-name" placeholder="e.g. Period 1 — Mon/Wed"></div>
-    <div class="frow"><label class="flabel">Trading days</label>
-      <div style="display:flex;gap:12px;flex-wrap:wrap;padding:4px 0">
-        ${['Monday','Tuesday','Wednesday','Thursday','Friday'].map(d=>`<label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer"><input type="checkbox" class="cls-day" value="${d}"> ${d}</label>`).join('')}
-      </div>
+    <div class="row" style="align-items:flex-end;gap:8px">
+      <div class="frow" style="flex:1;margin-bottom:0"><label class="flabel">Classroom name</label><input type="text" id="cls-name" placeholder="e.g. Period 1"></div>
+      <div><button class="btn btn-primary btn-sm" onclick="createClassroom()">+ Add classroom</button></div>
     </div>
-    <div class="grid2" style="margin-bottom:8px">
-      <div><label class="flabel">Start time</label><input type="time" id="cls-start" value="16:00"></div>
-      <div><label class="flabel">End time</label><input type="time" id="cls-end" value="18:30"></div>
-    </div>
-    <button class="btn btn-primary btn-sm" onclick="createClassroom()">+ Add classroom</button>
-    
+
     <div class="divider" style="margin:14px 0"></div>
     <div class="section-title" style="font-size:12px;margin-bottom:8px">Assign user / company to classroom</div>
     <div class="row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">
       <div class="frow" style="flex:2;min-width:180px"><label class="flabel">User or company</label>
         <select id="reassign-uid">
           <option value="">— Select —</option>
-          ${[...DB.users.filter(u=>!isAdmin(u)).map(u=>({id:u.id,name:u.name,cid:u.classroom_id})),
-            ...DB.companies.filter(c=>c.status!=='pending').map(c=>({id:'co:'+c.id,name:c.name+' [co]',cid:c.classroom_id}))
-          ].map(x=>`<option value="${x.id}">${esc(x.name)} — ${getClassroomName(x.cid)||'unassigned'}</option>`).join('')}
+          ${DB.users.filter(u=>!isAdmin(u)).map(u=>`<option value="${u.id}">${esc(u.name)} [${u.role}] — ${getClassroomName(u.classroom_id)||'unassigned'}</option>`).join('')}
         </select>
       </div>
       <div class="frow" style="flex:2;min-width:150px"><label class="flabel">Assign to classroom</label>
