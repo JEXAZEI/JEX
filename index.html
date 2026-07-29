@@ -374,7 +374,9 @@ let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[]
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
   companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],
-  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10}};
+  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
+    weekly_schedule:{sun:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},mon:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},tue:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},wed:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},thu:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},fri:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},sat:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}}},
+    weekly_active:false,weekly_override:false}};
 let SHEETS_URL=null;
 let _realtimeChannels=[];
 
@@ -504,7 +506,7 @@ setInterval(checkInactivity,60000); // check every minute
 document.addEventListener('mousemove',resetActivityTimer,{passive:true});
 document.addEventListener('keydown',resetActivityTimer,{passive:true});
 document.addEventListener('touchstart',resetActivityTimer,{passive:true});
-let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null};
+let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
@@ -655,17 +657,24 @@ function computeOHLCV(priceHistory,trades,ticker,periodMs=5*60*1000){
   const start=new Date(pts[0].t).getTime();
   const end=new Date(pts[pts.length-1].t).getTime();
   const candles=[];
+  let lastClose=pts[0].p;
   for(let t=start;t<end;t+=periodMs){
     const ptsInPeriod=pts.filter(p=>{const pt=new Date(p.t).getTime();return pt>=t&&pt<t+periodMs;});
-    if(!ptsInPeriod.length)continue;
-    const prices=ptsInPeriod.map(p=>p.p);
     const vol=tickerTrades.filter(tr=>{const tt=new Date(tr.ts).getTime();return tt>=t&&tt<t+periodMs;}).reduce((s,tr)=>s+tr.qty,0);
+    if(!ptsInPeriod.length){
+      // No price activity this period — carry the last close forward as a flat candle
+      // so the chart stays continuous instead of leaving a gap.
+      candles.push({t:new Date(t).toISOString(),o:lastClose,h:lastClose,l:lastClose,c:lastClose,v:0});
+      continue;
+    }
+    const prices=ptsInPeriod.map(p=>p.p);
+    lastClose=ptsInPeriod[ptsInPeriod.length-1].p;
     candles.push({
       t:new Date(t).toISOString(),
       o:ptsInPeriod[0].p,
       h:Math.max(...prices),
       l:Math.min(...prices),
-      c:ptsInPeriod[ptsInPeriod.length-1].p,
+      c:lastClose,
       v:vol
     });
   }
@@ -687,8 +696,14 @@ function buildCandleChart(canvasId,co){
     try{return new Date(c.t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}
     catch(e){return c.t||'';}
   });
-  const wickData=candles.map(c=>([c.l,c.h]));
-  const bodyData=candles.map(c=>([Math.min(c.o,c.c),Math.max(c.o,c.c)]));
+  // Flat (no-activity) candles have o=h=l=c, which renders as a zero-height, invisible bar.
+  // Nudge just the drawn extent by a tiny epsilon so they still show as a thin flat tick —
+  // the underlying candle data (and tooltip) is untouched.
+  const allPrices=candles.flatMap(c=>[c.h,c.l]);
+  const priceRange=Math.max(...allPrices)-Math.min(...allPrices);
+  const eps=Math.max(priceRange*0.004,(candles[0].c||1)*0.001,0.01);
+  const wickData=candles.map(c=>c.h===c.l?[c.l-eps/2,c.h+eps/2]:[c.l,c.h]);
+  const bodyData=candles.map(c=>c.o===c.c?[c.o-eps/2,c.c+eps/2]:[Math.min(c.o,c.c),Math.max(c.o,c.c)]);
   const bodyColors=candles.map(c=>c.c>=c.o?'rgba(0,200,150,0.85)':'rgba(255,77,106,0.85)');
   const wickColors=candles.map(c=>c.c>=c.o?'rgba(0,200,150,0.4)':'rgba(255,77,106,0.4)');
 
@@ -1117,7 +1132,10 @@ let _sessionOpenedAt=null;
 async function setSession(status){
   const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';
   clearInterval(sessionTimer);sessionTimer=null;
-  await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null});
+  // If the weekly scheduler currently has trading open and the admin manually pauses/closes it,
+  // mark an override so the scheduler doesn't immediately reopen it during the same window.
+  const overriding=DB.session.weekly_active&&status!=='open';
+  await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null,weekly_active:false,weekly_override:overriding?true:DB.session.weekly_override});
   const u=cu();
   let description='Session '+status+(u?' by '+u.name:'');
   if(status==='closed'&&_sessionOpenedAt){
@@ -1171,12 +1189,49 @@ async function setSession(status){
   }
   render();
 }
-async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null});sessionTimer=setInterval(tickTimer,500);render();}
+async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null,weekly_active:false});sessionTimer=setInterval(tickTimer,500);render();}
 function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
 async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
 async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();}
 function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('Trading session is now open!');});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended.');});}}
-setInterval(()=>{checkSchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
+// ── Weekly recurring schedule (different hours per day of week, repeats every week) ──
+const WEEKDAY_KEYS=['sun','mon','tue','wed','thu','fri','sat'];
+const WEEKDAY_LABELS={sun:'Sunday',mon:'Monday',tue:'Tuesday',wed:'Wednesday',thu:'Thursday',fri:'Friday',sat:'Saturday'};
+function saveWeeklySchedule(){
+  const ws={};
+  for(const day of WEEKDAY_KEYS){
+    const enabled=!!get('wk-'+day+'-on')?.checked;
+    const oh=parseInt(get('wk-'+day+'-oh')?.value),om=parseInt(get('wk-'+day+'-om')?.value);
+    const ch=parseInt(get('wk-'+day+'-ch')?.value),cm=parseInt(get('wk-'+day+'-cm')?.value);
+    if(enabled){
+      if([oh,om,ch,cm].some(isNaN))return toast(WEEKDAY_LABELS[day]+': enter valid times');
+      if(ch*60+cm<=oh*60+om)return toast(WEEKDAY_LABELS[day]+': close time must be after open time');
+    }
+    ws[day]={enabled,open:{h:isNaN(oh)?16:oh,m:isNaN(om)?0:om},close:{h:isNaN(ch)?18:ch,m:isNaN(cm)?30:cm}};
+  }
+  saveSession({weekly_schedule:ws}).then(()=>{toast('Weekly schedule saved');render();});
+}
+function checkWeeklySchedule(){
+  const ws=DB.session.weekly_schedule;if(!ws)return;
+  const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();
+  const today=ws[WEEKDAY_KEYS[az.getDay()]];
+  const openMin=today?today.open.h*60+today.open.m:-1,closeMin=today?today.close.h*60+today.close.m:-1;
+  const inWindow=today&&today.enabled&&nowMin>=openMin&&nowMin<closeMin;
+  if(!inWindow){
+    if(DB.session.weekly_active&&DB.session.status==='open'){
+      saveSession({status:'closed',label:'Session closed',ends_at:null,weekly_active:false,weekly_override:false}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('🔴 Trading session closed (weekly schedule)');});
+    } else if(DB.session.weekly_override){
+      saveSession({weekly_override:false});
+    }
+    return;
+  }
+  if(DB.session.weekly_override)return; // admin manually overrode this window — don't fight them
+  if(DB.session.status!=='open'){
+    const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;
+    saveSession({status:'open',label:'Open until '+pad(today.close.h)+':'+pad(today.close.m)+' MST (weekly schedule)',ends_at:Date.now()+msUntilEnd,weekly_active:true}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('🟢 Trading session opened (weekly schedule)');});
+  }
+}
+setInterval(()=>{checkSchedule();checkWeeklySchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
 
 // ── Auto-refresh: pull latest data every 20 seconds ──────
 let _lastRefresh=0;
@@ -2750,6 +2805,10 @@ async function relistCompany(ticker){
 // ═══════════════════════════════════════════════
 // Chart interval state
 const chartIntervals={};
+function buildChartTypeToggle(chartId,type,ticker){
+  return '<button style="font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;border:1px solid '+(type==='line'?'var(--blue)':'var(--border2)')+';background:'+(type==='line'?'var(--blue)':'transparent')+';color:'+(type==='line'?'white':'var(--text2)')+'" onclick="setChartType(&quot;'+chartId+'&quot;,&quot;line&quot;,&quot;'+ticker+'&quot;)">Line</button>'
+    +'<button style="font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;border:1px solid '+(type==='candle'?'var(--blue)':'var(--border2)')+';background:'+(type==='candle'?'var(--blue)':'transparent')+';color:'+(type==='candle'?'white':'var(--text2)')+'" onclick="setChartType(&quot;'+chartId+'&quot;,&quot;candle&quot;,&quot;'+ticker+'&quot;)">Candle</button>';
+}
 function setChartType(chartId,type,ticker){
   UI['chartType_'+chartId]=type;
   const co=getCo(ticker);
@@ -2757,9 +2816,11 @@ function setChartType(chartId,type,ticker){
   destroyChart(chartId);
   const interval=chartIntervals[chartId]||'max';
   chartIntervals[chartId]=interval;
-  // Update interval bar to reflect active state
+  // Update interval bar and the Line/Candle toggle to reflect active state
   const barEl=document.getElementById('ibar-'+chartId);
   if(barEl)barEl.innerHTML=buildIntervalButtons(chartId,co);
+  const toggleEl=document.getElementById('ctoggle-'+chartId);
+  if(toggleEl)toggleEl.innerHTML=buildChartTypeToggle(chartId,type,ticker);
   setTimeout(()=>{
     if(type==='candle')buildCandleChart(chartId,co);
     else buildChart(chartId,co);
@@ -3072,11 +3133,8 @@ function renderConfig(){return `<div class="config-page"><div class="config-card
 function renderLogin(){
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
   const companies=DB.users.filter(u=>u.role==='company'&&u.status==='approved');
-  const chairman=DB.users.find(u=>u.role==='chairman');
-  const president=DB.users.find(u=>u.role==='president');
-  const secretary=DB.users.find(u=>u.role==='secretary');
-  const treasurer=DB.users.find(u=>u.role==='treasurer');
-  const complianceOfficer=DB.users.find(u=>u.role==='compliance_officer');
+  const roleOrder={chairman:0,president:1,secretary:2,treasurer:3,compliance_officer:4};
+  const admins=DB.users.filter(u=>isAdmin(u)).sort((a,b)=>(roleOrder[a.role]??9)-(roleOrder[b.role]??9));
   const pending=DB.pending.length;
   const acctRow=(u,cls)=>`<div class="acct-item" onclick="UI.pendingLoginId='${u.id}';UI.loginView='password';render()"><div class="avatar ${cls}">${esc(u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase())}</div><div><div class="acct-name">${esc(u.name)} ${roleBadge(u.role)}${isAdmin(u)&&pending?` <span class="badge b-blue">${pending} pending</span>`:''}</div>${!isAdmin(u)?`<div class="acct-email">${esc(u.email)}</div>`:''}</div></div>`;
   if(UI.loginView==='password'){const u=getUser(UI.pendingLoginId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Sign in as ${esc(u?.name||'user')}</div>${!isAdmin(u)?`<div class="frow"><label class="flabel">Email</label><div style="padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;color:var(--text2);background:var(--bg3)">${u?.email||''}</div></div>`:``}<div class="frow"><label class="flabel">Password</label><div class="pw-wrap"><input type="password" id="login-pw" placeholder="Enter password" onkeydown="if(event.key==='Enter')loginWith(UI.pendingLoginId,get('login-pw')?.value)"><button type="button" class="pw-eye" onclick="togglePw('login-pw')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn btn-primary" onclick="loginWith(UI.pendingLoginId,get('login-pw')?.value)">Sign in</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div><button class="link-btn" onclick="UI.loginView='forgot-email';render()">Forgot password?</button></div></div>`;}
@@ -3085,14 +3143,18 @@ function renderLogin(){
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="forgot-pw1" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="forgot-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw2')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
   if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Classroom ID (optional)</label><input type="text" id="reg-classroom" placeholder="e.g. period-1 (ask your teacher)"></div>
 <div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
-  return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span> — JTED Stock Exchange</div><div class="login-sub">Sign in to your account</div><div class="acct-list">
-    ${chairman?acctRow(chairman,'av-ch'):''}
-    ${president?acctRow(president,'av-pr'):''}
-    ${secretary?acctRow(secretary,'av-sec'):''}
-    ${treasurer?acctRow(treasurer,'av-tre'):''}
-    ${complianceOfficer?acctRow(complianceOfficer,'av-co'):''}
-    ${companies.map(u=>acctRow(u,'av-c')).join('')}
-    ${students.map(u=>acctRow(u,'av-s')).join('')}
+  if(!['admin','company','student'].includes(UI.loginTab))UI.loginTab='student';
+  const tabCounts={admin:admins.length,company:companies.length,student:students.length};
+  const tabList=UI.loginTab==='admin'?admins:UI.loginTab==='company'?companies:students;
+  const tabEmpty=UI.loginTab==='admin'?'No administrator accounts':UI.loginTab==='company'?'No company accounts yet':'No student accounts yet';
+  return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span> — JTED Stock Exchange</div><div class="login-sub">Sign in to your account</div>
+  <div class="reg-tabs">
+    <button class="reg-tab" style="white-space:nowrap;font-size:12px;padding:8px 4px;${UI.loginTab==='admin'?'background:var(--bg3);color:var(--text);font-weight:500':''}" onclick="UI.loginTab='admin';render()">Administrators${tabCounts.admin?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.admin+'</span>':''}</button>
+    <button class="reg-tab" style="white-space:nowrap;font-size:12px;padding:8px 4px;${UI.loginTab==='company'?'background:var(--bg3);color:var(--text);font-weight:500':''}" onclick="UI.loginTab='company';render()">Companies${tabCounts.company?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.company+'</span>':''}</button>
+    <button class="reg-tab" style="white-space:nowrap;font-size:12px;padding:8px 4px;${UI.loginTab==='student'?'background:var(--bg3);color:var(--text);font-weight:500':''}" onclick="UI.loginTab='student';render()">Students${tabCounts.student?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.student+'</span>':''}</button>
+  </div>
+  <div class="acct-list">
+    ${tabList.length?tabList.map(u=>acctRow(u,avatarClass(u.role))).join(''):`<div class="empty">${tabEmpty}</div>`}
   </div><div style="display:flex;justify-content:flex-start;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)"><button class="btn btn-sm btn-primary" onclick="UI.loginView='register';render()">Register new account</button></div></div></div>`;
 }
 function switchRegTab(type){document.querySelectorAll('.reg-tab').forEach(t=>t.classList.remove('active'));const tab=get('reg-tab-'+type);if(tab)tab.classList.add('active');get('reg-student-fields').style.display=type==='student'?'':'none';get('reg-company-fields').style.display=type==='company'?'':'none';}
@@ -3290,10 +3352,7 @@ function renderCompanyPage(parentTicker){
       const chartType=UI['chartType_'+chartId]||'line';
       html+='<div><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
         +'<div style="font-size:12px;font-weight:500;font-family:var(--mono);color:var(--text2)">'+ticker+(meta?' Class '+meta.class:'')+'</div>'
-        +'<div style="display:flex;gap:2px">'
-        +'<button style="font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;border:1px solid '+(chartType==='line'?'var(--blue)':'var(--border2)')+';background:'+(chartType==='line'?'var(--blue)':'transparent')+';color:'+(chartType==='line'?'white':'var(--text2)')+'" onclick="setChartType(&quot;'+chartId+'&quot;,&quot;line&quot;,&quot;'+ticker+'&quot;)">Line</button>'
-        +'<button style="font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;border:1px solid '+(chartType==='candle'?'var(--blue)':'var(--border2)')+';background:'+(chartType==='candle'?'var(--blue)':'transparent')+';color:'+(chartType==='candle'?'white':'var(--text2)')+'" onclick="setChartType(&quot;'+chartId+'&quot;,&quot;candle&quot;,&quot;'+ticker+'&quot;)">Candle</button>'
-        +'</div></div>'
+        +'<div id="ctoggle-'+chartId+'" style="display:flex;gap:2px">'+buildChartTypeToggle(chartId,chartType,ticker)+'</div></div>'
         +buildChartIntervalBar(chartId,stock)
         +'<div style="position:relative;height:140px"><canvas id="'+chartId+'"></canvas></div></div>';
     });
@@ -4404,7 +4463,7 @@ function renderAdmin(){
   :UI.adminTab==='ipo'?renderAdminIPO(pIPO,rIPO)
   :UI.adminTab==='dilution'?renderAdminDilution(pDil,rDil)
   :UI.adminTab==='balances'?renderAdminBalances(students)
-  :UI.adminTab==='users'?renderAdminUsers(students,companies)
+  :UI.adminTab==='users'?renderAdminUsers(students,companies,DB.users.filter(u2=>['secretary','treasurer','compliance_officer'].includes(u2.role)&&u2.status==='approved'))
   :UI.adminTab==='dashboard'?renderAdminDashboard()
   :UI.adminTab==='flags'?renderAdminFlags()
   :UI.adminTab==='snapshots'?renderSnapshotTab()
@@ -4424,6 +4483,24 @@ function renderAdmin(){
   :renderAdminListed()}`;
 }
 
+function renderWeeklySchedule(){
+  const ws=DB.session.weekly_schedule||{};
+  const today=WEEKDAY_KEYS[getAZTime().getDay()];
+  return `<div class="section-title" style="font-size:13px;margin-bottom:6px">Weekly schedule</div>
+    <div class="ibox ibox-purple" style="margin-bottom:12px">Repeats every week. Enable a day and set its open/close time (Arizona time) — trading will open and close automatically on that schedule, no need to reset it each day. A manual Pause/Close overrides the schedule until its window ends.</div>
+    ${WEEKDAY_KEYS.map(day=>{
+      const d=ws[day]||{enabled:false,open:{h:16,m:0},close:{h:18,m:30}};
+      return `<div class="row" style="align-items:center;margin-bottom:8px;${day===today?'background:var(--bg3);border-radius:var(--radius);padding:6px 8px':''}">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;width:100px;flex-shrink:0;cursor:pointer"><input type="checkbox" id="wk-${day}-on" ${d.enabled?'checked':''}> ${WEEKDAY_LABELS[day]}${day===today?' <span class="badge b-purple" style="margin-left:2px">today</span>':''}</label>
+        <div style="display:flex;gap:4px;align-items:center"><input type="number" id="wk-${day}-oh" min="0" max="23" value="${pad(d.open.h)}" style="width:52px" title="Open hour"><span style="color:var(--text2)">:</span><input type="number" id="wk-${day}-om" min="0" max="59" value="${pad(d.open.m)}" style="width:52px" title="Open minute"></div>
+        <span style="color:var(--text2);font-size:12px">to</span>
+        <div style="display:flex;gap:4px;align-items:center"><input type="number" id="wk-${day}-ch" min="0" max="23" value="${pad(d.close.h)}" style="width:52px" title="Close hour"><span style="color:var(--text2)">:</span><input type="number" id="wk-${day}-cm" min="0" max="59" value="${pad(d.close.m)}" style="width:52px" title="Close minute"></div>
+      </div>`;
+    }).join('')}
+    <button class="btn btn-primary btn-sm" style="margin-top:4px" onclick="saveWeeklySchedule()">Save weekly schedule</button>
+    ${DB.session.weekly_active?'<div class="ibox ibox-green" style="margin-top:10px">🟢 Currently open via the weekly schedule</div>':''}
+    ${DB.session.weekly_override?'<div class="ibox ibox-amber" style="margin-top:10px">⏸ Manually overridden for the rest of today\'s window</div>':''}`;
+}
 function renderAdminSession(students){
   const az=getAZTime(),sched=DB.session.scheduled_close;
   return`<div class="card"><div class="section-title">Session control</div>
@@ -4437,6 +4514,8 @@ function renderAdminSession(students){
     </div>
     <div style="display:flex;gap:8px;margin-bottom:14px"><button class="btn btn-primary" onclick="scheduleSession()">Set schedule</button><button class="btn" onclick="clearSchedule()">Clear schedule</button></div>
     ${DB.session.scheduled_open||DB.session.scheduled_close?`<div class="ibox ibox-teal" style="margin-bottom:14px">Scheduled: ${DB.session.scheduled_open?pad(DB.session.scheduled_open.h)+':'+pad(DB.session.scheduled_open.m)+' – ':''}${sched?pad(sched.h)+':'+pad(sched.m):''} MST</div>`:''}
+    <div class="divider"></div>
+    ${renderWeeklySchedule()}
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">Circuit breakers</div>
     <div class="ibox ibox-blue" style="margin-bottom:10px">If any stock moves this % from its session-open price, trading is auto-halted for 5 minutes.</div>
@@ -4635,8 +4714,18 @@ async function adjustCash(uid2){
   pushBalances();
   toast(u.name+"'s balance updated to "+fmt(newCash));render();
 }
-function renderAdminUsers(students,companies){
-  return`<div class="card"><div class="section-title">Students — balance adjustment</div>
+function renderAdminUsers(students,companies,officers){
+  return`${officers&&officers.length?`<div class="card"><div class="section-title">Officers</div>
+    <div class="ibox ibox-blue" style="margin-bottom:14px">Secretary, Treasurer, and Compliance Officer accounts. Chairman and President can't be removed here.</div>
+    ${officers.map(u=>`<div class="app-row">
+      <div class="app-info">
+        <div class="app-name">${esc(u.name)} ${roleBadge(u.role)}</div>
+        <div class="app-meta">${esc(u.email)}</div>
+      </div>
+      <button class="btn btn-sm btn-danger" onclick="removeUser('${u.id}')">Remove</button>
+    </div>`).join('')}
+  </div>`:''}
+  <div class="card"><div class="section-title">Students — balance adjustment</div>
     <div class="ibox ibox-blue" style="margin-bottom:14px">Select an operation, enter an amount, and click Apply to update a student's cash balance. Subtract will not go below $0.</div>
     ${students.length?students.map(u=>`<div class="app-row">
       <div class="app-info">
