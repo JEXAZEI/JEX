@@ -504,7 +504,7 @@ setInterval(checkInactivity,60000); // check every minute
 document.addEventListener('mousemove',resetActivityTimer,{passive:true});
 document.addEventListener('keydown',resetActivityTimer,{passive:true});
 document.addEventListener('touchstart',resetActivityTimer,{passive:true});
-let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null};
+let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
@@ -655,17 +655,24 @@ function computeOHLCV(priceHistory,trades,ticker,periodMs=5*60*1000){
   const start=new Date(pts[0].t).getTime();
   const end=new Date(pts[pts.length-1].t).getTime();
   const candles=[];
+  let lastClose=pts[0].p;
   for(let t=start;t<end;t+=periodMs){
     const ptsInPeriod=pts.filter(p=>{const pt=new Date(p.t).getTime();return pt>=t&&pt<t+periodMs;});
-    if(!ptsInPeriod.length)continue;
-    const prices=ptsInPeriod.map(p=>p.p);
     const vol=tickerTrades.filter(tr=>{const tt=new Date(tr.ts).getTime();return tt>=t&&tt<t+periodMs;}).reduce((s,tr)=>s+tr.qty,0);
+    if(!ptsInPeriod.length){
+      // No price activity this period — carry the last close forward as a flat candle
+      // so the chart stays continuous instead of leaving a gap.
+      candles.push({t:new Date(t).toISOString(),o:lastClose,h:lastClose,l:lastClose,c:lastClose,v:0});
+      continue;
+    }
+    const prices=ptsInPeriod.map(p=>p.p);
+    lastClose=ptsInPeriod[ptsInPeriod.length-1].p;
     candles.push({
       t:new Date(t).toISOString(),
       o:ptsInPeriod[0].p,
       h:Math.max(...prices),
       l:Math.min(...prices),
-      c:ptsInPeriod[ptsInPeriod.length-1].p,
+      c:lastClose,
       v:vol
     });
   }
@@ -687,8 +694,14 @@ function buildCandleChart(canvasId,co){
     try{return new Date(c.t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}
     catch(e){return c.t||'';}
   });
-  const wickData=candles.map(c=>([c.l,c.h]));
-  const bodyData=candles.map(c=>([Math.min(c.o,c.c),Math.max(c.o,c.c)]));
+  // Flat (no-activity) candles have o=h=l=c, which renders as a zero-height, invisible bar.
+  // Nudge just the drawn extent by a tiny epsilon so they still show as a thin flat tick —
+  // the underlying candle data (and tooltip) is untouched.
+  const allPrices=candles.flatMap(c=>[c.h,c.l]);
+  const priceRange=Math.max(...allPrices)-Math.min(...allPrices);
+  const eps=Math.max(priceRange*0.004,(candles[0].c||1)*0.001,0.01);
+  const wickData=candles.map(c=>c.h===c.l?[c.l-eps/2,c.h+eps/2]:[c.l,c.h]);
+  const bodyData=candles.map(c=>c.o===c.c?[c.o-eps/2,c.c+eps/2]:[Math.min(c.o,c.c),Math.max(c.o,c.c)]);
   const bodyColors=candles.map(c=>c.c>=c.o?'rgba(0,200,150,0.85)':'rgba(255,77,106,0.85)');
   const wickColors=candles.map(c=>c.c>=c.o?'rgba(0,200,150,0.4)':'rgba(255,77,106,0.4)');
 
@@ -2750,6 +2763,10 @@ async function relistCompany(ticker){
 // ═══════════════════════════════════════════════
 // Chart interval state
 const chartIntervals={};
+function buildChartTypeToggle(chartId,type,ticker){
+  return '<button style="font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;border:1px solid '+(type==='line'?'var(--blue)':'var(--border2)')+';background:'+(type==='line'?'var(--blue)':'transparent')+';color:'+(type==='line'?'white':'var(--text2)')+'" onclick="setChartType(&quot;'+chartId+'&quot;,&quot;line&quot;,&quot;'+ticker+'&quot;)">Line</button>'
+    +'<button style="font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;border:1px solid '+(type==='candle'?'var(--blue)':'var(--border2)')+';background:'+(type==='candle'?'var(--blue)':'transparent')+';color:'+(type==='candle'?'white':'var(--text2)')+'" onclick="setChartType(&quot;'+chartId+'&quot;,&quot;candle&quot;,&quot;'+ticker+'&quot;)">Candle</button>';
+}
 function setChartType(chartId,type,ticker){
   UI['chartType_'+chartId]=type;
   const co=getCo(ticker);
@@ -2757,9 +2774,11 @@ function setChartType(chartId,type,ticker){
   destroyChart(chartId);
   const interval=chartIntervals[chartId]||'max';
   chartIntervals[chartId]=interval;
-  // Update interval bar to reflect active state
+  // Update interval bar and the Line/Candle toggle to reflect active state
   const barEl=document.getElementById('ibar-'+chartId);
   if(barEl)barEl.innerHTML=buildIntervalButtons(chartId,co);
+  const toggleEl=document.getElementById('ctoggle-'+chartId);
+  if(toggleEl)toggleEl.innerHTML=buildChartTypeToggle(chartId,type,ticker);
   setTimeout(()=>{
     if(type==='candle')buildCandleChart(chartId,co);
     else buildChart(chartId,co);
@@ -3072,11 +3091,8 @@ function renderConfig(){return `<div class="config-page"><div class="config-card
 function renderLogin(){
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
   const companies=DB.users.filter(u=>u.role==='company'&&u.status==='approved');
-  const chairman=DB.users.find(u=>u.role==='chairman');
-  const president=DB.users.find(u=>u.role==='president');
-  const secretary=DB.users.find(u=>u.role==='secretary');
-  const treasurer=DB.users.find(u=>u.role==='treasurer');
-  const complianceOfficer=DB.users.find(u=>u.role==='compliance_officer');
+  const roleOrder={chairman:0,president:1,secretary:2,treasurer:3,compliance_officer:4};
+  const admins=DB.users.filter(u=>isAdmin(u)).sort((a,b)=>(roleOrder[a.role]??9)-(roleOrder[b.role]??9));
   const pending=DB.pending.length;
   const acctRow=(u,cls)=>`<div class="acct-item" onclick="UI.pendingLoginId='${u.id}';UI.loginView='password';render()"><div class="avatar ${cls}">${esc(u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase())}</div><div><div class="acct-name">${esc(u.name)} ${roleBadge(u.role)}${isAdmin(u)&&pending?` <span class="badge b-blue">${pending} pending</span>`:''}</div>${!isAdmin(u)?`<div class="acct-email">${esc(u.email)}</div>`:''}</div></div>`;
   if(UI.loginView==='password'){const u=getUser(UI.pendingLoginId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Sign in as ${esc(u?.name||'user')}</div>${!isAdmin(u)?`<div class="frow"><label class="flabel">Email</label><div style="padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;color:var(--text2);background:var(--bg3)">${u?.email||''}</div></div>`:``}<div class="frow"><label class="flabel">Password</label><div class="pw-wrap"><input type="password" id="login-pw" placeholder="Enter password" onkeydown="if(event.key==='Enter')loginWith(UI.pendingLoginId,get('login-pw')?.value)"><button type="button" class="pw-eye" onclick="togglePw('login-pw')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn btn-primary" onclick="loginWith(UI.pendingLoginId,get('login-pw')?.value)">Sign in</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div><button class="link-btn" onclick="UI.loginView='forgot-email';render()">Forgot password?</button></div></div>`;}
@@ -3085,14 +3101,18 @@ function renderLogin(){
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="forgot-pw1" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="forgot-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw2')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
   if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Classroom ID (optional)</label><input type="text" id="reg-classroom" placeholder="e.g. period-1 (ask your teacher)"></div>
 <div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
-  return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span> — JTED Stock Exchange</div><div class="login-sub">Sign in to your account</div><div class="acct-list">
-    ${chairman?acctRow(chairman,'av-ch'):''}
-    ${president?acctRow(president,'av-pr'):''}
-    ${secretary?acctRow(secretary,'av-sec'):''}
-    ${treasurer?acctRow(treasurer,'av-tre'):''}
-    ${complianceOfficer?acctRow(complianceOfficer,'av-co'):''}
-    ${companies.map(u=>acctRow(u,'av-c')).join('')}
-    ${students.map(u=>acctRow(u,'av-s')).join('')}
+  if(!['admin','company','student'].includes(UI.loginTab))UI.loginTab='student';
+  const tabCounts={admin:admins.length,company:companies.length,student:students.length};
+  const tabList=UI.loginTab==='admin'?admins:UI.loginTab==='company'?companies:students;
+  const tabEmpty=UI.loginTab==='admin'?'No administrator accounts':UI.loginTab==='company'?'No company accounts yet':'No student accounts yet';
+  return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span> — JTED Stock Exchange</div><div class="login-sub">Sign in to your account</div>
+  <div class="reg-tabs">
+    <button class="reg-tab" style="white-space:nowrap;font-size:12px;padding:8px 4px;${UI.loginTab==='admin'?'background:var(--bg3);color:var(--text);font-weight:500':''}" onclick="UI.loginTab='admin';render()">Administrators${tabCounts.admin?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.admin+'</span>':''}</button>
+    <button class="reg-tab" style="white-space:nowrap;font-size:12px;padding:8px 4px;${UI.loginTab==='company'?'background:var(--bg3);color:var(--text);font-weight:500':''}" onclick="UI.loginTab='company';render()">Companies${tabCounts.company?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.company+'</span>':''}</button>
+    <button class="reg-tab" style="white-space:nowrap;font-size:12px;padding:8px 4px;${UI.loginTab==='student'?'background:var(--bg3);color:var(--text);font-weight:500':''}" onclick="UI.loginTab='student';render()">Students${tabCounts.student?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.student+'</span>':''}</button>
+  </div>
+  <div class="acct-list">
+    ${tabList.length?tabList.map(u=>acctRow(u,avatarClass(u.role))).join(''):`<div class="empty">${tabEmpty}</div>`}
   </div><div style="display:flex;justify-content:flex-start;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)"><button class="btn btn-sm btn-primary" onclick="UI.loginView='register';render()">Register new account</button></div></div></div>`;
 }
 function switchRegTab(type){document.querySelectorAll('.reg-tab').forEach(t=>t.classList.remove('active'));const tab=get('reg-tab-'+type);if(tab)tab.classList.add('active');get('reg-student-fields').style.display=type==='student'?'':'none';get('reg-company-fields').style.display=type==='company'?'':'none';}
@@ -3290,10 +3310,7 @@ function renderCompanyPage(parentTicker){
       const chartType=UI['chartType_'+chartId]||'line';
       html+='<div><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
         +'<div style="font-size:12px;font-weight:500;font-family:var(--mono);color:var(--text2)">'+ticker+(meta?' Class '+meta.class:'')+'</div>'
-        +'<div style="display:flex;gap:2px">'
-        +'<button style="font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;border:1px solid '+(chartType==='line'?'var(--blue)':'var(--border2)')+';background:'+(chartType==='line'?'var(--blue)':'transparent')+';color:'+(chartType==='line'?'white':'var(--text2)')+'" onclick="setChartType(&quot;'+chartId+'&quot;,&quot;line&quot;,&quot;'+ticker+'&quot;)">Line</button>'
-        +'<button style="font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;border:1px solid '+(chartType==='candle'?'var(--blue)':'var(--border2)')+';background:'+(chartType==='candle'?'var(--blue)':'transparent')+';color:'+(chartType==='candle'?'white':'var(--text2)')+'" onclick="setChartType(&quot;'+chartId+'&quot;,&quot;candle&quot;,&quot;'+ticker+'&quot;)">Candle</button>'
-        +'</div></div>'
+        +'<div id="ctoggle-'+chartId+'" style="display:flex;gap:2px">'+buildChartTypeToggle(chartId,chartType,ticker)+'</div></div>'
         +buildChartIntervalBar(chartId,stock)
         +'<div style="position:relative;height:140px"><canvas id="'+chartId+'"></canvas></div></div>';
     });
@@ -4404,7 +4421,7 @@ function renderAdmin(){
   :UI.adminTab==='ipo'?renderAdminIPO(pIPO,rIPO)
   :UI.adminTab==='dilution'?renderAdminDilution(pDil,rDil)
   :UI.adminTab==='balances'?renderAdminBalances(students)
-  :UI.adminTab==='users'?renderAdminUsers(students,companies)
+  :UI.adminTab==='users'?renderAdminUsers(students,companies,DB.users.filter(u2=>['secretary','treasurer','compliance_officer'].includes(u2.role)&&u2.status==='approved'))
   :UI.adminTab==='dashboard'?renderAdminDashboard()
   :UI.adminTab==='flags'?renderAdminFlags()
   :UI.adminTab==='snapshots'?renderSnapshotTab()
@@ -4635,8 +4652,18 @@ async function adjustCash(uid2){
   pushBalances();
   toast(u.name+"'s balance updated to "+fmt(newCash));render();
 }
-function renderAdminUsers(students,companies){
-  return`<div class="card"><div class="section-title">Students — balance adjustment</div>
+function renderAdminUsers(students,companies,officers){
+  return`${officers&&officers.length?`<div class="card"><div class="section-title">Officers</div>
+    <div class="ibox ibox-blue" style="margin-bottom:14px">Secretary, Treasurer, and Compliance Officer accounts. Chairman and President can't be removed here.</div>
+    ${officers.map(u=>`<div class="app-row">
+      <div class="app-info">
+        <div class="app-name">${esc(u.name)} ${roleBadge(u.role)}</div>
+        <div class="app-meta">${esc(u.email)}</div>
+      </div>
+      <button class="btn btn-sm btn-danger" onclick="removeUser('${u.id}')">Remove</button>
+    </div>`).join('')}
+  </div>`:''}
+  <div class="card"><div class="section-title">Students — balance adjustment</div>
     <div class="ibox ibox-blue" style="margin-bottom:14px">Select an operation, enter an amount, and click Apply to update a student's cash balance. Subtract will not go below $0.</div>
     ${students.length?students.map(u=>`<div class="app-row">
       <div class="app-info">
