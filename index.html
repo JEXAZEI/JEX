@@ -1080,14 +1080,18 @@ async function createClassroom(){
   toast('Classroom "'+name+'" created');render();
 }
 async function deleteClassroom(id){
-  if(!confirm('Delete this classroom?'))return;
+  const affected=DB.users.filter(u=>u.classroom_id===id);
+  if(!confirm('Delete this classroom?'+(affected.length?' '+affected.length+' assigned user(s) will become unassigned.':'')))return;
   await sb.del('jex_classrooms','id=eq.'+id);
+  await Promise.all(affected.map(u=>sb.patch('jex_users','id=eq.'+u.id,{classroom_id:null})));
+  affected.forEach(u=>u.classroom_id=null);
   DB.classrooms=DB.classrooms.filter(c=>c.id!==id);
-  toast('Classroom deleted');render();
+  toast('Classroom deleted'+(affected.length?' — '+affected.length+' user(s) unassigned':''));render();
 }
 function getClassroomName(id){
+  if(!id)return null;
   const c=DB.classrooms.find(x=>x.id===id);
-  return c?c.name:id||'—';
+  return c?c.name:null;
 }
 function getClassroomForUser(u){
   return DB.classrooms.find(c=>c.id===u?.classroom_id)||null;
@@ -3970,7 +3974,7 @@ function renderLeaderboard(){
       <option value="">All classrooms</option>
       ${DB.classrooms.map(c=>`<option value="${c.id}" ${UI.lbClassroom===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
     </select>`:'';
-  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard</span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${u.name}${!UI.lbClassroom&&u.classroom_id?` <span class="badge b-gray" style="font-size:9px">${getClassroomName(u.classroom_id)}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=10000?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>`;
+  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard</span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${u.name}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${getClassroomName(u.classroom_id)}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=10000?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -4850,7 +4854,7 @@ function renderAdminSession(students){
 function renderAdminRegs(pS,pC,students,companies){
   return`<div class="card">
     ${pS.length?`<div class="section-title">Pending students</div>${pS.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-blue">student</span></div><div class="app-meta">${esc(r.email)} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><select id="classroom-${r.id}" style="width:110px;font-size:11px"><option value="">No classroom</option>${DB.classrooms.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:100px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
-    ${pC.length?`<div class="section-title">Pending companies</div>${pC.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-amber">company</span></div><div class="app-meta">${esc(r.email)} — ${esc(r.description||'')} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
+    ${pC.length?`<div class="section-title">Pending companies</div>${pC.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-amber">company</span></div><div class="app-meta">${esc(r.email)} — ${esc(r.description||'')} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><select id="classroom-${r.id}" style="width:110px;font-size:11px"><option value="">No classroom</option>${DB.classrooms.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
     ${!DB.pending.length?`<div class="empty" style="padding:16px">No pending registrations</div><hr class="divider">`:''}
     <div class="section-title" style="margin-top:4px">Approved accounts</div>
     ${[...students,...companies].length?`<table><thead><tr><th>Name</th><th>Role</th><th>Email</th><th class="r">Cash</th></tr></thead><tbody>${[...students,...companies].map(u=>`<tr><td>${esc(u.name)}</td><td>${roleBadge(u.role)}</td><td style="color:var(--text2)">${esc(u.email)}</td><td class="r" style="font-family:var(--mono)">${fmt(u.cash)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No approved accounts yet</div>'}
