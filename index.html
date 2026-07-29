@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -350,6 +351,21 @@ const sb = {
   async del(t,q){const r=await fetch(this.url(t,q),{method:'DELETE',headers:this.h});if(!r.ok)throw new Error(await r.text());}
 };
 const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='YOUR_SUPABASE_ANON_KEY';
+// ── Password hashing ─────────────────────────────────────
+// sb.get() strips password/sec_a off jex_users rows before they ever reach
+// DB.users, so auth checks must fetch the field for one user at a time
+// instead of reading it off the cached record.
+async function hashPw(pw){
+  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(String(pw)));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+const isHashed=v=>typeof v==='string'&&/^[0-9a-f]{64}$/i.test(v);
+async function fetchUserSecret(userId,field){
+  const r=await fetch(sb.url('jex_users','id=eq.'+encodeURIComponent(userId)+'&select='+field),{headers:{...sb.h,'Accept':'application/json'}});
+  if(!r.ok)throw new Error(await r.text());
+  const d=await r.json();
+  return d[0]?.[field];
+}
 
 // ═══════════════════════════════════════════════
 // STATE
@@ -514,7 +530,7 @@ async function loadAll(){
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
     activity,shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms]=await Promise.all([
+    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals]=await Promise.all([
     sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_news','order=created_at.desc&limit=50'),
     sb.get('jex_ipo_applications','order=created_at.asc'),
@@ -557,6 +573,7 @@ const fmt=n=>'$'+Number(n).toFixed(2);
 const fmtChg=n=>(n>=0?'+':'')+Number(n).toFixed(2)+'%';
 const norm=s=>(s||'').trim().toLowerCase();
 const validEmail=e=>e&&e.includes('@')&&e.includes('.');
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cu=()=>DB.users.find(u=>u.id===UI.userId)||null;
 const getUser=id=>DB.users.find(u=>u.id===id);
 const getCo=t=>DB.companies.find(c=>c.ticker===t);
@@ -854,8 +871,10 @@ async function reviewDivApproval(id,approve){
   await sb.patch('jex_dividend_approvals','id=eq.'+id,{status:approve?'approved':'rejected',reviewed_by:u.name});
   da.status=approve?'approved':'rejected';da.approved_by=u.name;
   if(approve){
-    // Execute the dividend now
-    await issueDividend(da.ticker,da.per_share,da.note||'Treasurer-approved dividend');
+    // Execute the dividend now, paid from the company's own cash regardless of who (Treasurer) is approving it
+    const co=getCo(da.ticker);
+    const payer=co&&getUser(co.owner_id);
+    if(payer)await issueDividend(da.ticker,da.per_share,da.note||'Treasurer-approved dividend',payer,true);
   } else {
     await pushNotification(da.requested_by,'div_approval','❌ Your dividend request for '+da.company_name+' was rejected by the Treasurer.',da.ticker);
     toast('Dividend rejected');
@@ -1182,7 +1201,7 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newMinutes,newDivApprovals]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals]=await Promise.all([
       sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_companies','order=created_at.asc'),
@@ -1203,6 +1222,8 @@ async function autoRefresh(){
     DB.companyMembers=newMembers;
     DB.founderAllocations=newAllocs;
     DB.flags=newFlags;
+    DB.classrooms=newClassrooms;
+    DB.stopLossOrders=newStopLoss;
     DB.minutes=newMinutes;
     DB.divApprovals=newDivApprovals;
     // Merge new trades (avoid duplicates)
@@ -1298,28 +1319,31 @@ async function approveReg(id,startCash){
 }
 async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');render();}
 async function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u)return toast('Wrong password');
-  const candidate=isHashed(u.password)?await hashPw(pw):pw; // support legacy plain-text during migration
-  if(u.password!==candidate)return toast('Wrong password');
+  const stored=await fetchUserSecret(uid2,'password');
+  const candidate=isHashed(stored)?await hashPw(pw):pw; // support legacy plain-text during migration
+  if(stored!==candidate)return toast('Wrong password');
   // Auto-migrate plain-text password to hash on successful login
-  if(!isHashed(u.password)){const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+uid2,{password:h});u.password=h;}UI.userId=uid2;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();}
+  if(!isHashed(stored)){const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+uid2,{password:h});}UI.userId=uid2;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();await loadAll();}
 function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.tradePage=0;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
 async function changeEmail(uid2,newEmail,pw){
   const u=getUser(uid2);if(!u)return;
   if(!newEmail||!newEmail.includes('@'))return toast('Enter a valid email address');
   if(!pw)return toast('Enter your current password');
-  const emH=isHashed(u.password)?await hashPw(pw):pw;
-  if(u.password!==emH)return toast('Incorrect password');
+  const storedEm=await fetchUserSecret(uid2,'password');
+  const emH=isHashed(storedEm)?await hashPw(pw):pw;
+  if(storedEm!==emH)return toast('Incorrect password');
   const norm_email=newEmail.trim().toLowerCase();
   if(DB.users.find(x=>x.id!==uid2&&x.email===norm_email))return toast('That email is already in use');
   await updateUser(uid2,{email:norm_email});
   toast('✓ Email updated to '+norm_email);render();
 }
 async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;
-  const curH=isHashed(u.password)?await hashPw(cur):cur;
-  if(u.password!==curH)return toast('Current password incorrect');
+  const storedPw=await fetchUserSecret(uid2,'password');
+  const curH=isHashed(storedPw)?await hashPw(cur):cur;
+  if(storedPw!==curH)return toast('Current password incorrect');
   if(!nw2||nw2.length<6)return toast('Minimum 6 characters required');if(nw2!==conf)return toast('Passwords do not match');
-  const h=await hashPw(nw2);await sb.patch('jex_users','id=eq.'+uid2,{password:h});u.password=h;toast('Password changed');render();}
-async function adminResetPw(uid2,pw){if(!pw||pw.length<4)return toast('Min 4 characters');const u=getUser(uid2);if(!u)return;const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+uid2,{password:h});u.password=h;toast(u.name+"'s password reset");render();}
+  const h=await hashPw(nw2);await sb.patch('jex_users','id=eq.'+uid2,{password:h});toast('Password changed');render();}
+async function adminResetPw(uid2,pw){if(!isAdmin(cu()))return toast('Admin access required');if(!pw||pw.length<4)return toast('Min 4 characters');const u=getUser(uid2);if(!u)return;const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+uid2,{password:h});toast(u.name+"'s password reset");render();}
 async function toggleEmailNotifications(enabled){
   const u=cu();if(!u)return;
   await updateUser(u.id,{email_notifications:enabled});
@@ -1334,10 +1358,11 @@ async function saveNotifEmail(){
   toast('✓ Notification email saved: '+email);render();
 }
 async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)return;
-  const sqH=isHashed(u.password)?await hashPw(curPw):curPw;
-  if(u.password!==sqH)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');await sb.patch('jex_users','id=eq.'+uid2,{sec_q:newQ,sec_a:norm(newA)});u.sec_q=newQ;u.sec_a=norm(newA);toast('Security question updated');render();}
+  const storedSq=await fetchUserSecret(uid2,'password');
+  const sqH=isHashed(storedSq)?await hashPw(curPw):curPw;
+  if(storedSq!==sqH)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');await sb.patch('jex_users','id=eq.'+uid2,{sec_q:newQ,sec_a:norm(newA)});u.sec_q=newQ;toast('Security question updated');render();}
 function forgotStep1(email){const u=DB.users.find(u=>u.email&&norm(u.email)===norm(email)&&u.status==='approved');if(!u)return toast('No account found with that email');UI.forgotUserId=u.id;UI.loginView='forgot-secq';render();}
-function forgotStep2(answer){const u=getUser(UI.forgotUserId);if(!u)return;if(norm(answer)!==u.sec_a)return toast('Incorrect answer — try again');UI.loginView='forgot-newpw';render();}
+async function forgotStep2(answer){const u=getUser(UI.forgotUserId);if(!u)return;const storedSecA=await fetchUserSecret(u.id,'sec_a');if(norm(answer)!==storedSecA)return toast('Incorrect answer — try again');UI.loginView='forgot-newpw';render();}
 async function forgotStep3(pw,conf){const u=getUser(UI.forgotUserId);if(!u)return;if(!pw||pw.length<4)return toast('Min 4 characters');if(pw!==conf)return toast('Passwords do not match');const fpH=await hashPw(pw);await sb.patch('jex_users','id=eq.'+u.id,{password:fpH});u.password=fpH;toast('Password reset');UI.loginView='select';UI.forgotUserId=null;render();}
 
 // ═══════════════════════════════════════════════
@@ -1538,6 +1563,7 @@ async function reviewFounderAllocation(id,approve){
 // STOCK PRICE ADJUSTMENT (Chairman)
 // ═══════════════════════════════════════════════
 async function adjustStockPrice(ticker,pct,reason){
+  if(!isAdmin(cu()))return toast('Admin access required');
   if(!ticker)return toast('Select a ticker');
   pct=parseFloat(pct);
   if(isNaN(pct)||pct===0)return toast('Enter a non-zero percentage');
@@ -1562,10 +1588,6 @@ async function adjustStockPrice(ticker,pct,reason){
 // ═══════════════════════════════════════════════
 // FOUNDERS & CO-FOUNDERS
 // ═══════════════════════════════════════════════
-function getCompanyFounders(ticker){
-  const co=getCo(ticker);if(!co)return[];
-  return DB.companyMembers.filter(m=>m.company_user_id===co.owner_id&&m.status==='accepted').map(m=>({student_id:m.student_id,student_name:getUser(m.student_id)?.name||'?',status:'active'}));
-}
 function isFounder(ticker,userId){
   const co=getCo(ticker);if(!co)return false;
   return DB.companyMembers.some(m=>m.company_user_id===co.owner_id&&m.student_id===userId&&m.status==='accepted');
@@ -1577,21 +1599,6 @@ function canManageCompany(co){
 }
 
 // addFounderAtRegistration removed — founders use jex_company_members
-
-async function inviteFounder(ticker,studentName){
-  if(!studentName||!studentName.trim())return toast('Enter a student name');
-  const co=getCo(ticker);if(!co)return;
-  const founders=getCompanyFounders(ticker);
-  if(founders.length>=3)return toast('Maximum 3 founders — remove one first');
-  const student=DB.users.find(u=>u.role==='student'&&u.status==='approved'&&u.name.toLowerCase()===studentName.trim().toLowerCase());
-  if(!student)return toast('Student not found: '+studentName.trim());
-  if((DB.companyMembers||[]).find(f=>f.company_ticker===ticker&&f.student_id===student.id))return toast(student.name+' is already a founder');
-  const rec={id:uid(),company_ticker:ticker,company_name:co.name,student_id:student.id,student_name:student.name,role:'co-founder',status:'active',invited_by:cu()?.name,ts:ts()};
-  // jex_founders table removed — using jex_company_members
-  await logActivity('founder',student.name+' added as co-founder of '+co.name,{ticker,userId:student.id,userName:student.name});
-  await pushNotification(student.id,'founder','🏢 You have been added as a co-founder of '+co.name+'!',ticker);
-  toast(student.name+' added as co-founder');render();
-}
 
 // removeFounder v1 removed
 
@@ -1685,42 +1692,6 @@ async function sendFounderInvite(ownerId,studentId){
 }
 
 // (respondToInvite uses jex_company_members)
-
-async function requestFounderShares(ticker,sharesReq){
-  const co=getCo(ticker);if(!co)return;
-  const u=cu();
-  sharesReq=parseInt(sharesReq);
-  if(isNaN(sharesReq)||sharesReq<=0)return toast('Enter a valid share count');
-  if(sharesReq>co.shares_avail)return toast('Only '+co.shares_avail+' shares available');
-  if(DB.founderShares.find(f=>f.ticker===ticker&&f.user_id===u.id&&f.status==='pending'))
-    return toast('You already have a pending founder share request');
-  const rec={id:uid(),ticker,company_name:co.name,user_id:u.id,user_name:u.name,shares_requested:sharesReq,status:'pending',ts:ts()};
-  await sb.post('jex_founder_allocations',rec);
-  DB.founderShares.push(rec);
-  toast('Founder share request submitted for '+sharesReq+' shares');render();
-}
-
-async function reviewFounderShares(id,approve){
-  const req=DB.founderShares.find(f=>f.id===id);if(!req)return;
-  await sb.patch('jex_founder_allocations','id=eq.'+id,{status:approve?'approved':'rejected'});
-  req.status=approve?'approved':'rejected';
-  if(approve){
-    const co=getCo(req.ticker);if(!co)return;
-    const u=getUser(req.user_id);if(!u)return;
-    if(req.shares_requested>co.shares_avail){toast('Not enough shares available');return;}
-    // Give shares to founder at no cost
-    const bH={...holdings(u)};bH[req.ticker]=(bH[req.ticker]||0)+req.shares_requested;
-    await updateUser(req.user_id,{holdings:bH});
-    await updateCo(req.ticker,{shares_avail:co.shares_avail-req.shares_requested});
-    await pushNotification(req.user_id,'founder_shares','✅ Your founder share request was approved: '+req.shares_requested+'×'+req.ticker,req.ticker);
-    await logActivity('founder_shares',req.user_name+' received '+req.shares_requested+' founder shares in '+req.ticker,{ticker:req.ticker,userId:req.user_id});
-    toast(req.user_name+' received '+req.shares_requested+' founder shares');
-  } else {
-    await pushNotification(req.user_id,'founder_shares','❌ Your founder share request for '+req.shares_requested+'×'+req.ticker+' was rejected',req.ticker);
-    toast('Founder share request rejected');
-  }
-  render();
-}
 
 // ═══════════════════════════════════════════════
 // PRICE ADJUSTMENT (Chairman)
@@ -2025,11 +1996,11 @@ async function checkCircuitBreakers(){
     const pctMove=Math.abs((co.price-openPrice)/openPrice*100);
     if(pctMove>=threshold){
       const reason='Circuit breaker: '+co.ticker+' moved '+Math.round(pctMove)+'% from session open (threshold: '+threshold+'%)';
-      await haltStock(co.ticker,reason);
+      await haltStock(co.ticker,reason,true);
       toast('⚡ Circuit breaker triggered on '+co.ticker+' — trading halted');
       // Auto-resume after 5 minutes
       setTimeout(async()=>{
-        if(isHalted(co.ticker))await resumeStock(co.ticker);
+        if(isHalted(co.ticker))await resumeStock(co.ticker,true);
       },5*60*1000);
     }
   }
@@ -2156,6 +2127,7 @@ function myNotifications(){
 // ═══════════════════════════════════════════════
 function isHalted(ticker){return !!DB.halts.find(h=>h.ticker===ticker);}
 async function resetExchange(){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const keepAdmins=await new Promise(resolve=>{
     if(confirm('⚠️ FULL RESET\n\nEverything will be deleted:\n• All students and company accounts\n• All listed companies and price history\n• All trades, orders, dividends\n• All votes, news, announcements\n• All notifications, flags, minutes\n• All activity logs, price adjustments\n• All limit orders, stop-loss orders\n• All founder allocations, share classes\n• All snapshots and NW history\n\nChairman, President, Secretary, Treasurer and Compliance Officer accounts will be KEPT.\n\nThis CANNOT be undone.'))resolve(true);
     else resolve(false);
@@ -2241,27 +2213,31 @@ async function resetExchange(){
     await loadAll();render();
   }
 }
-async function haltStock(ticker,reason){
+async function haltStock(ticker,reason,systemTriggered=false){
+  if(!systemTriggered&&!isAdmin(cu()))return toast('Admin access required');
   if(!ticker)return toast('Select a ticker');
   if(!reason||reason.trim().length<3)return toast('Enter a reason');
   if(isHalted(ticker))return toast(ticker+' is already halted');
   const u=cu();
-  const rec={ticker,reason:reason.trim(),halted_by:u.name,ts:ts()};
+  const rec={ticker,reason:reason.trim(),halted_by:systemTriggered?'System (Circuit Breaker)':u.name,ts:ts()};
   await sb.post('jex_halts',rec);
   DB.halts.push(rec);
-  await logActivity('halt',ticker+' trading halted — '+reason.trim(),{ticker,userId:u.id,userName:u.name});
+  await logActivity('halt',ticker+' trading halted — '+reason.trim(),{ticker,userId:u?.id,userName:systemTriggered?'System (Circuit Breaker)':u.name});
   // Notify all students who hold this stock
   await pushNotificationToHolders(ticker,'halt','⚠️ Trading halted on '+ticker+': '+reason.trim());
   await pushNotificationToAll('halt','⚠️ '+ticker+' trading has been halted: '+reason.trim());
   toast(ticker+' halted');render();
 }
-async function resumeStock(ticker){
+async function resumeStock(ticker,systemTriggered=false){
   const u=cu();
-  if(u.role==='compliance_officer')return toast('Only Chairman or President can resume a halted stock');
-  if(!confirm('Resume trading on '+ticker+'?'))return;
+  if(!systemTriggered){
+    if(!isAdmin(u))return toast('Admin access required');
+    if(u.role==='compliance_officer')return toast('Only Chairman or President can resume a halted stock');
+    if(!confirm('Resume trading on '+ticker+'?'))return;
+  }
   await sb.del('jex_halts','ticker=eq.'+ticker);
   DB.halts=DB.halts.filter(h=>h.ticker!==ticker);
-  await logActivity('resume',ticker+' trading resumed',{ticker,userId:u.id,userName:u.name});
+  await logActivity('resume',ticker+' trading resumed',{ticker,userId:u?.id,userName:systemTriggered?'System (Circuit Breaker)':u.name});
   await pushNotificationToAll('resume','✅ '+ticker+' trading has resumed');
   toast(ticker+' trading resumed');render();
 }
@@ -2584,8 +2560,8 @@ async function doBuyback(ticker,qty){
   await sb.post('jex_buybacks',bb);DB.buybacks.push(bb);
   toast('Bought back '+qty+' shares @ '+fmt(price));render();
 }
-async function issueDividend(ticker,perShare,note){
-  const co=getCo(ticker),owner=cu();if(!co||!owner)return;
+async function issueDividend(ticker,perShare,note,payerOverride,preApproved){
+  const co=getCo(ticker),owner=payerOverride||cu();if(!co||!owner)return;
   perShare=Math.round(parseFloat(perShare)*100)/100;
   if(isNaN(perShare)||perShare<=0)return toast('Enter a valid per-share amount');
   if(!note||note.trim().length<5)return toast('Please add a note');
@@ -2598,9 +2574,9 @@ async function issueDividend(ticker,perShare,note){
   if(!sh.length)return toast('No shareholders yet');
   const total=sh.reduce((s,u)=>s+allT.reduce((ts2,t)=>ts2+Math.round(((u.holdings&&u.holdings[t])||0)*perShare*100)/100,0),0);
   if(owner.cash<total)return toast('Insufficient funds (need '+fmt(total)+')');
-  // Check if Treasurer approval required
+  // Check if Treasurer approval required (already-approved payouts skip this and go straight to payout)
   const divApprovalThreshold=DB.session.dividend_approval_threshold||1000;
-  if(total>=divApprovalThreshold){
+  if(!preApproved&&total>=divApprovalThreshold){
     const treasurer=DB.users.find(u=>u.role==='treasurer');
     if(treasurer){
       if(!confirm('This dividend total ('+fmt(total)+') requires Treasurer approval. Submit for approval?'))return;
@@ -2612,7 +2588,7 @@ async function issueDividend(ticker,perShare,note){
       UI.companyTab='dividends';render();return;
     }
   }
-  if(!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(((s.holdings&&s.holdings[ticker])||0)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
+  if(!preApproved&&!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(((s.holdings&&s.holdings[ticker])||0)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
   await updateUser(owner.id,{cash:Math.round((owner.cash-total)*100)/100});
   const payouts=[];
   for(const s of sh){
@@ -2687,6 +2663,7 @@ async function reviewDilution(id,approve){
 }
 
 async function removeUser(uid2){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const u=getUser(uid2);if(!u)return;
   if(!confirm('Remove '+u.name+'? This cannot be undone.'))return;
   await sb.del('jex_users','id=eq.'+uid2);
@@ -2695,6 +2672,7 @@ async function removeUser(uid2){
   toast(u.name+' removed');render();
 }
 async function removeCompany(uid2){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const u=getUser(uid2);if(!u)return;
   const listedCo=DB.companies.find(c=>c.owner_id===uid2);
   if(!confirm('Remove '+u.name+'?'+(listedCo?'\n\nListed stock '+listedCo.ticker+' will also be delisted.':'')+'\n\nThis cannot be undone.'))return;
@@ -2706,6 +2684,7 @@ async function removeCompany(uid2){
   toast(u.name+' removed');render();
 }
 async function removeShareClass(ticker){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const meta=DB.shareClasses.find(c=>c.ticker===ticker);
   const co=DB.companies.find(c=>c.ticker===ticker);
   const isConversion=meta&&meta.ticker===meta.parent_ticker;
@@ -2733,6 +2712,7 @@ async function removeShareClass(ticker){
   render();
 }
 async function delistCompany(ticker,silent=false){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const co=DB.companies.find(c=>c.ticker===ticker);if(!co)return;
   if(!silent&&!confirm('Delist '+co.name+' ('+ticker+')? The company can reapply for IPO later.'))return;
   // Soft delist — keep the record so the company can reapply
@@ -2754,6 +2734,7 @@ async function delistCompany(ticker,silent=false){
   if(!silent){toast(co.name+' delisted — company can reapply for IPO');render();}
 }
 async function relistCompany(ticker){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const co=DB.companies.find(c=>c.ticker===ticker);if(!co)return;
   if(!confirm('Allow '+co.name+' to reapply for IPO? This resets their application status.'))return;
   await sb.patch('jex_companies','ticker=eq.'+ticker,{status:'unlisted',shares_avail:co.shares,price_history:[{p:co.price,t:'Re-IPO'}]});
@@ -3057,22 +3038,22 @@ function renderVoteCard(v,isOwner,isAdminUser){
   const canVote=!myBallot&&myPower>0&&v.status==='open'&&u?.role==='student';
   return '<div class="news-item" style="margin-bottom:12px">'
     +'<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">'
-    +'<div><div style="font-weight:500;font-size:14px;margin-bottom:2px">'+v.question+'</div>'
-    +'<div style="font-size:11px;color:var(--text2)">'+v.company_name+' · '+v.ts+(v.closes_at?' · closes '+v.closes_at:'')+'</div></div>'
+    +'<div><div style="font-weight:500;font-size:14px;margin-bottom:2px">'+esc(v.question)+'</div>'
+    +'<div style="font-size:11px;color:var(--text2)">'+esc(v.company_name)+' · '+v.ts+(v.closes_at?' · closes '+v.closes_at:'')+'</div></div>'
     +'<span class="badge '+(v.status==='open'?'b-green':'b-gray')+'">'+v.status+'</span></div>'
     // Results bars
     +'<div style="margin-bottom:10px">'
-    +'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>'+v.option_a+'</span><span style="font-family:var(--mono)">'+res.powerA+' votes ('+res.pctA+'%)</span></div>'
+    +'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>'+esc(v.option_a)+'</span><span style="font-family:var(--mono)">'+res.powerA+' votes ('+res.pctA+'%)</span></div>'
     +'<div style="height:8px;background:var(--bg3);border-radius:4px;overflow:hidden;margin-bottom:8px"><div style="height:100%;width:'+res.pctA+'%;background:var(--green);border-radius:4px;transition:width 0.3s"></div></div>'
-    +'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>'+v.option_b+'</span><span style="font-family:var(--mono)">'+res.powerB+' votes ('+res.pctB+'%)</span></div>'
+    +'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>'+esc(v.option_b)+'</span><span style="font-family:var(--mono)">'+res.powerB+' votes ('+res.pctB+'%)</span></div>'
     +'<div style="height:8px;background:var(--bg3);border-radius:4px;overflow:hidden"><div style="height:100%;width:'+res.pctB+'%;background:var(--red);border-radius:4px;transition:width 0.3s"></div></div>'
     +'<div style="font-size:11px;color:var(--text2);margin-top:4px">'+res.count+' voter'+(res.count!==1?'s':'')+' · '+res.total+' total votes</div></div>'
     // Voting buttons
     +(canVote?'<div style="display:flex;gap:8px;margin-bottom:8px">'
-      +'<button class="btn btn-sm btn-success" onclick="castVote(&quot;'+v.id+'&quot;,&quot;A&quot;)">Vote: '+v.option_a+'</button>'
-      +'<button class="btn btn-sm btn-danger" onclick="castVote(&quot;'+v.id+'&quot;,&quot;B&quot;)">Vote: '+v.option_b+'</button>'
+      +'<button class="btn btn-sm btn-success" onclick="castVote(&quot;'+v.id+'&quot;,&quot;A&quot;)">Vote: '+esc(v.option_a)+'</button>'
+      +'<button class="btn btn-sm btn-danger" onclick="castVote(&quot;'+v.id+'&quot;,&quot;B&quot;)">Vote: '+esc(v.option_b)+'</button>'
       +'<span style="font-size:11px;color:var(--text2);line-height:28px">Your voting power: <strong>'+myPower+'</strong></span></div>':'')
-    +(myBallot?'<div class="ibox ibox-green" style="padding:6px 10px;margin-bottom:0">You voted: <strong>'+(myBallot.choice==='A'?v.option_a:v.option_b)+'</strong> ('+myBallot.voting_power+' votes)</div>':'')
+    +(myBallot?'<div class="ibox ibox-green" style="padding:6px 10px;margin-bottom:0">You voted: <strong>'+esc(myBallot.choice==='A'?v.option_a:v.option_b)+'</strong> ('+myBallot.voting_power+' votes)</div>':'')
     // Admin/owner controls
     +((isOwner||isAdminUser)?'<div style="display:flex;gap:6px;margin-top:8px">'
       +(v.status==='open'?'<button class="btn btn-sm btn-warning" onclick="closeVote(&quot;'+v.id+'&quot;)">Close vote</button>':'')
@@ -3097,8 +3078,8 @@ function renderLogin(){
   const treasurer=DB.users.find(u=>u.role==='treasurer');
   const complianceOfficer=DB.users.find(u=>u.role==='compliance_officer');
   const pending=DB.pending.length;
-  const acctRow=(u,cls)=>`<div class="acct-item" onclick="UI.pendingLoginId='${u.id}';UI.loginView='password';render()"><div class="avatar ${cls}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><div><div class="acct-name">${u.name} ${roleBadge(u.role)}${isAdmin(u)&&pending?` <span class="badge b-blue">${pending} pending</span>`:''}</div>${!isAdmin(u)?`<div class="acct-email">${u.email}</div>`:''}</div></div>`;
-  if(UI.loginView==='password'){const u=getUser(UI.pendingLoginId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Sign in as ${u?.name||'user'}</div>${!isAdmin(u)?`<div class="frow"><label class="flabel">Email</label><div style="padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;color:var(--text2);background:var(--bg3)">${u?.email||''}</div></div>`:``}<div class="frow"><label class="flabel">Password</label><div class="pw-wrap"><input type="password" id="login-pw" placeholder="Enter password" onkeydown="if(event.key==='Enter')loginWith(UI.pendingLoginId,get('login-pw')?.value)"><button type="button" class="pw-eye" onclick="togglePw('login-pw')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn btn-primary" onclick="loginWith(UI.pendingLoginId,get('login-pw')?.value)">Sign in</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div><button class="link-btn" onclick="UI.loginView='forgot-email';render()">Forgot password?</button></div></div>`;}
+  const acctRow=(u,cls)=>`<div class="acct-item" onclick="UI.pendingLoginId='${u.id}';UI.loginView='password';render()"><div class="avatar ${cls}">${esc(u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase())}</div><div><div class="acct-name">${esc(u.name)} ${roleBadge(u.role)}${isAdmin(u)&&pending?` <span class="badge b-blue">${pending} pending</span>`:''}</div>${!isAdmin(u)?`<div class="acct-email">${esc(u.email)}</div>`:''}</div></div>`;
+  if(UI.loginView==='password'){const u=getUser(UI.pendingLoginId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Sign in as ${esc(u?.name||'user')}</div>${!isAdmin(u)?`<div class="frow"><label class="flabel">Email</label><div style="padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;color:var(--text2);background:var(--bg3)">${u?.email||''}</div></div>`:``}<div class="frow"><label class="flabel">Password</label><div class="pw-wrap"><input type="password" id="login-pw" placeholder="Enter password" onkeydown="if(event.key==='Enter')loginWith(UI.pendingLoginId,get('login-pw')?.value)"><button type="button" class="pw-eye" onclick="togglePw('login-pw')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn btn-primary" onclick="loginWith(UI.pendingLoginId,get('login-pw')?.value)">Sign in</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div><button class="link-btn" onclick="UI.loginView='forgot-email';render()">Forgot password?</button></div></div>`;}
   if(UI.loginView==='forgot-email'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 1 of 3</div><div class="frow"><label class="flabel">Your email address</label><input type="email" id="forgot-email" placeholder="you@school.edu" onkeydown="if(event.key==='Enter')forgotStep1(get('forgot-email')?.value)"></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep1(get('forgot-email')?.value)">Continue</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${u?.name}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="forgot-pw1" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="forgot-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw2')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
@@ -3147,7 +3128,7 @@ function renderBanner(){
   if(ann){
     const annColor=ann.level==='urgent'?'background:rgba(255,77,106,0.12);border-bottom:1px solid rgba(255,77,106,0.25);color:#ff4d6a':ann.level==='warning'?'background:rgba(240,165,0,0.1);border-bottom:1px solid rgba(240,165,0,0.2);color:var(--amber)':'background:rgba(55,138,221,0.08);border-bottom:1px solid rgba(55,138,221,0.2);color:#85B7EB';
     const delBtn=canControl?('<button class="btn btn-sm btn-danger" style="font-size:11px;padding:2px 8px" onclick="deleteAnnouncement(&#39;'+ann.id+'&#39;)">&#x2715;</button>'):'';
-    annHtml='<div style="'+annColor+';padding:8px 20px;font-size:13px;display:flex;align-items:center;justify-content:space-between"><span>📢 <strong>'+ann.title+'</strong>'+(ann.body?' — '+ann.body:'')+' <span style="font-size:11px;opacity:0.7;margin-left:8px">'+(ann.author_name||'')+' · '+(ann.ts||'')+'</span></span>'+delBtn+'</div>';
+    annHtml='<div style="'+annColor+';padding:8px 20px;font-size:13px;display:flex;align-items:center;justify-content:space-between"><span>📢 <strong>'+esc(ann.title)+'</strong>'+(ann.body?' — '+esc(ann.body):'')+' <span style="font-size:11px;opacity:0.7;margin-left:8px">'+esc(ann.author_name||'')+' · '+(ann.ts||'')+'</span></span>'+delBtn+'</div>';
   }
   let sessionBtns='';
   if(canControl){
@@ -3176,7 +3157,7 @@ function renderNewsFeed(){
   const u=cu();const canDelete=isAdmin(u);
   if(!items.length)return`<div class="card"><div class="empty">No company news yet. Companies can post updates from their News tab.</div></div>`;
   return items.map(n=>`<div class="news-item">
-    <div class="news-headline">${n.headline}</div>
+    <div class="news-headline">${esc(n.headline)}</div>
     ${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}
     <div class="news-meta" style="justify-content:space-between">
       <div style="display:flex;align-items:center;gap:10px">
@@ -3227,13 +3208,13 @@ function renderCompanyPage(parentTicker){
     ${co.logo?`<img src="${co.logo}" style="width:40px;height:40px;object-fit:cover;border-radius:8px;border:1px solid var(--border)">`:''}
     <div style="flex:1;min-width:0">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span style="font-size:18px;font-weight:500">${co.name}</span>
+        <span style="font-size:18px;font-weight:500">${esc(co.name)}</span>
         ${isHalted(parentTicker)?`<span class="badge b-red">⚠️ Trading halted${(()=>{const h=DB.halts.find(x=>x.ticker===parentTicker);return h?' — '+h.reason:'';})()}</span>`:''}
         ${baseMeta?'<span class="badge b-amber">Class '+baseMeta.class+' · '+baseMeta.votes_per_share+'v</span>':''}
         <span class="badge b-gray" style="font-family:var(--mono)">${parentTicker}</span>
         ${canTrade?'<button class="wstar '+(isWatched(parentTicker)?'on':'')+'" onclick="toggleWatchAndRefresh(&quot;'+parentTicker+'&quot;)">'+(isWatched(parentTicker)?'★':'☆')+'</button>':''}
       </div>
-      <div style="font-size:13px;color:var(--text2);margin-top:2px">${co.description||''}</div>
+      <div style="font-size:13px;color:var(--text2);margin-top:2px">${esc(co.description||'')}</div>
     </div>
     <div style="text-align:right">
       <div style="font-size:28px;font-weight:500;font-family:var(--mono)">${fmt(co.price)}</div>
@@ -3446,6 +3427,14 @@ function renderCompanyPage(parentTicker){
     }
   }
 
+  else if(tab==='news'){
+    html+=companyNews.length?'<div class="card"><div class="section-title">News</div>'+companyNews.map(n=>'<div class="news-item"><div class="news-headline">'+esc(n.headline)+'</div>'+(n.body?'<div class="news-body">'+esc(n.body)+'</div>':'')+'<div class="news-meta">'+(n.ts||'')+'</div></div>').join('')+'</div>':'<div class="card"><div class="empty">No news posted yet.</div></div>';
+  }
+
+  else if(tab==='votes'){
+    html+=companyVotes.length?companyVotes.map(v=>renderVoteCard(v,isOwner,isAdmin(u))).join(''):'<div class="card"><div class="empty">No votes posted yet.</div></div>';
+  }
+
   else if(tab==='shareholders'){
     html+='<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Shareholders <span style="font-size:11px;font-weight:400;color:var(--text2)">Loading fresh data...</span></div><div id="shareholder-table">';
     if(!shareholders.length){html+='<div class="empty">No shareholders yet.</div>';}
@@ -3553,7 +3542,7 @@ function renderMarket(){
     +((DB.minutes||[]).filter(m=>m.type==='minutes').length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.filter(m=>m.type==='minutes').slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${m.title}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}${DB.minutes.filter(m=>m.type==='minutes').length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.filter(m=>m.type==='minutes').length-3} older entries</div>`:''}</div>`:'')
       +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
       +'</div>':''}
-    ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.news.length} post${DB.news.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${n.headline}</div>${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${n.company_name}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${DB.news.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${DB.news.length} posts</div>`:''}</div>`:''}
+    ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.news.length} post${DB.news.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${esc(n.headline)}</div>${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${n.company_name}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${DB.news.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${DB.news.length} posts</div>`:''}</div>`:''}
     <div id="trade-panel"></div>`;
 }
 function buildSparklines(){
@@ -3806,7 +3795,15 @@ function renderSettings(){
     </div>
     ${SHEETS_URL?'<div style="font-size:12px;color:var(--text2);margin-top:8px">✓ Sync active — pushing to Sheets automatically</div>':''}
   </div>`:'';
-  return sheetsSection+`<div class="card"><div class="section-title">Account</div>
+  const emailjsSection=isChairman(u)?`<div class="card"><div class="section-title">Email notifications (EmailJS)</div>
+    <div class="ibox ibox-blue">Paste your EmailJS service/template/public key here to enable email alerts for students who opt in under Settings → Email notifications. Get these from your EmailJS account dashboard.</div>
+    <div class="frow"><label class="flabel">Service ID</label><input type="text" id="ejs-service" placeholder="service_xxxxxxx" value="${DB.session.emailjs_service_id||''}"></div>
+    <div class="frow"><label class="flabel">Template ID</label><input type="text" id="ejs-template" placeholder="template_xxxxxxx" value="${DB.session.emailjs_template_id||''}"></div>
+    <div class="frow"><label class="flabel">Public key</label><input type="text" id="ejs-pubkey" placeholder="e.g. AbCdEfGhIjKlMnOp" value="${DB.session.emailjs_public_key||''}"></div>
+    <button class="btn btn-primary" onclick="saveEmailJSConfig()">Save</button>
+    ${DB.session.emailjs_service_id&&DB.session.emailjs_template_id&&DB.session.emailjs_public_key?'<div style="font-size:12px;color:var(--text2);margin-top:8px">✓ Configured — email alerts will send for students with it enabled</div>':''}
+  </div>`:'';
+  return sheetsSection+emailjsSection+`<div class="card"><div class="section-title">Account</div>
     <div class="grid2" style="margin-bottom:12px">
       <div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${u.name}</div></div>
       <div class="mcard"><div class="mlabel">Email (login)</div><div class="mval" style="font-size:14px;margin-top:4px;word-break:break-all">${u.email}</div></div>
@@ -3835,7 +3832,7 @@ function renderSettings(){
         +'<div>'+(pushStatus==='granted'?'<button class="btn btn-sm" onclick="showBrowserPush(&quot;JEX&quot;,&quot;Test notification!&quot;)">Send test</button>':pushStatus==='denied'?'':pushStatus==='unsupported'?'':'<button class="btn btn-sm btn-primary" onclick="requestPushPermission().then(ok=>{ok?toast(&quot;✓ Notifications enabled&quot;):toast(&quot;Permission denied — check browser settings&quot;);render();})">Enable</button>')+'</div>'
         +'</div>';
       const emailRow='<div style="padding:12px 0">'
-        +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:${u.email_notifications?"10px":"0"}">'
+        +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:'+(u.email_notifications?'10px':'0')+'">'
         +'<div><div style="font-size:13px;font-weight:500;margin-bottom:2px">Email notifications</div>'
         +'<div style="font-size:12px;color:var(--text2)">'+(u.email_notifications?'Enabled — sending to '+(u.notification_email||u.email):'Get important alerts sent to your email')+'</div></div>'
         +'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" id="email-notif-toggle" '+(u.email_notifications?'checked':'')+'  onchange="toggleEmailNotifications(this.checked)"><span>'+(u.email_notifications?'On':'Off')+'</span></label>'
@@ -4272,7 +4269,7 @@ function renderCompanyNewsTab(co,myNews){
   </div>
   ${myNews.length?`<div class="card"><div class="section-title">Your posts</div>
     ${myNews.map(n=>`<div class="news-item">
-      <div class="news-headline">${n.headline}</div>
+      <div class="news-headline">${esc(n.headline)}</div>
       ${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}
       <div class="news-meta" style="justify-content:space-between">
         <div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${n.ts||''}</span></div>
@@ -4558,13 +4555,6 @@ function renderAdminSession(students){
     </div>
     ${DB.session.practice_mode?'<div style="font-size:12px;color:var(--text2)">Tip: take a Snapshot before enabling practice mode so you can restore easily.</div>':''}
     <div class="divider"></div>
-    <div class="section-title" style="font-size:13px;margin-bottom:10px">🎮 Practice mode</div>
-    <div class="ibox ibox-blue" style="margin-bottom:10px">In practice mode, trades are tagged as practice and excluded from leaderboard rankings. Save a Snapshot first so you can restore the exchange state afterward.</div>
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
-      <span style="font-size:13px">${DB.session.practice_mode?'<span style="color:var(--amber);font-weight:600">🎮 ON</span>':'Off'}</span>
-      <button class="btn btn-sm ${DB.session.practice_mode?'btn-warning':'btn-primary'}" onclick="togglePracticeMode()">${DB.session.practice_mode?'End practice mode':'Start practice mode'}</button>
-    </div>
-    <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:6px;color:var(--red)">⚠ Danger zone</div>
     <div class="ibox ibox-red" style="margin-bottom:10px">Resets JEX to a clean slate. Deletes all students, companies, trades, and data. Chairman, President, Secretary, Treasurer and Compliance Officer accounts are kept.</div>
     <button class="btn btn-danger" onclick="resetExchange()">🗑 Reset JEX (full wipe)</button>
@@ -4572,11 +4562,11 @@ function renderAdminSession(students){
 }
 function renderAdminRegs(pS,pC,students,companies){
   return`<div class="card">
-    ${pS.length?`<div class="section-title">Pending students</div>${pS.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${r.name} <span class="badge b-blue">student</span></div><div class="app-meta">${r.email} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><input type="text" id="classroom-${r.id}" placeholder="classroom" style="width:80px;font-size:11px"><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:100px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
-    ${pC.length?`<div class="section-title">Pending companies</div>${pC.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${r.name} <span class="badge b-amber">company</span></div><div class="app-meta">${r.email} — ${r.description||''} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
+    ${pS.length?`<div class="section-title">Pending students</div>${pS.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-blue">student</span></div><div class="app-meta">${esc(r.email)} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><input type="text" id="classroom-${r.id}" placeholder="classroom" style="width:80px;font-size:11px"><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:100px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
+    ${pC.length?`<div class="section-title">Pending companies</div>${pC.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-amber">company</span></div><div class="app-meta">${esc(r.email)} — ${esc(r.description||'')} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
     ${!DB.pending.length?`<div class="empty" style="padding:16px">No pending registrations</div><hr class="divider">`:''}
     <div class="section-title" style="margin-top:4px">Approved accounts</div>
-    ${[...students,...companies].length?`<table><thead><tr><th>Name</th><th>Role</th><th>Email</th><th class="r">Cash</th></tr></thead><tbody>${[...students,...companies].map(u=>`<tr><td>${u.name}</td><td>${roleBadge(u.role)}</td><td style="color:var(--text2)">${u.email}</td><td class="r" style="font-family:var(--mono)">${fmt(u.cash)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No approved accounts yet</div>'}
+    ${[...students,...companies].length?`<table><thead><tr><th>Name</th><th>Role</th><th>Email</th><th class="r">Cash</th></tr></thead><tbody>${[...students,...companies].map(u=>`<tr><td>${esc(u.name)}</td><td>${roleBadge(u.role)}</td><td style="color:var(--text2)">${esc(u.email)}</td><td class="r" style="font-family:var(--mono)">${fmt(u.cash)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No approved accounts yet</div>'}
   </div>`;
 }
 function renderAdminPasswords(students,companies){
@@ -4614,6 +4604,7 @@ function renderAdminBalances(students){
 }
 function downloadCSV(){const csv=window._jexCSV;if(!csv)return;const blob=new Blob([csv],{type:'text/csv'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='jex_balances.csv';a.click();URL.revokeObjectURL(url);}
 async function adjustCompanyCash(uid2){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const u=getUser(uid2);if(!u)return;
   const op=document.getElementById('co-cash-op-'+uid2)?.value;
   const amt=parseFloat(document.getElementById('co-cash-amt-'+uid2)?.value);
@@ -4628,6 +4619,7 @@ async function adjustCompanyCash(uid2){
   toast(u.name+"'s balance updated to "+fmt(newCash));render();
 }
 async function adjustCash(uid2){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const u=getUser(uid2);if(!u)return;
   const op=get('cash-op-'+uid2)?.value;
   const amt=parseFloat(get('cash-amt-'+uid2)?.value);
@@ -4915,7 +4907,7 @@ function renderAdminNews(){
   if(!items.length)return`<div class="card"><div class="empty">No company news posts yet.</div></div>`;
   return`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">All company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${items.length} post${items.length!==1?'s':''}</span></div>
     ${items.map(n=>`<div class="news-item">
-      <div class="news-headline">${n.headline}</div>
+      <div class="news-headline">${esc(n.headline)}</div>
       ${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}
       <div class="news-meta" style="justify-content:space-between">
         <div style="display:flex;align-items:center;gap:10px">
@@ -5455,9 +5447,9 @@ function renderTreasurerBudgetWarnings(){
     <div class="ibox ibox-blue">Dividends above ${fmt(divThreshold)} require Treasurer approval before they execute.</div>
     ${DB.divApprovals.filter(d=>d.status==='pending').length?DB.divApprovals.filter(d=>d.status==='pending').map(d=>`<div class="app-row">
       <div class="app-info">
-        <div class="app-name">${d.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div>
-        <div class="app-meta">${fmt(d.per_share)}/share · Total: <strong style="font-family:var(--mono)">${fmt(d.total)}</strong> · Requested by ${d.requested_by_name} · ${d.ts}</div>
-        ${d.note?`<div class="app-meta">${d.note}</div>`:''}
+        <div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div>
+        <div class="app-meta">${fmt(d.per_share)}/share · Total: <strong style="font-family:var(--mono)">${fmt(d.total)}</strong> · Requested by ${esc(d.requested_by_name)} · ${d.ts}</div>
+        ${d.note?`<div class="app-meta">${esc(d.note)}</div>`:''}
       </div>
       <div class="btn-row">
         <button class="btn btn-success btn-sm" onclick="reviewDivApproval('${d.id}',true)">Approve</button>
@@ -5583,11 +5575,11 @@ function generatePDFReport(){
   </tbody></table>
   <h2>Dividends Paid (${DB.dividends.length})</h2>
   <table><thead><tr><th>Time</th><th>Company</th><th>Per share</th><th>Total</th><th>Recipients</th><th>Note</th></tr></thead><tbody>
-  ${DB.dividends.m(d=>`<tr><td>${d.ts}</td><td>${d.company_name} (${d.ticker})</td><td>$${d.per_share.toFixed(2)}</td><td class="up">$${d.total.toFixed(2)}</td><td>${(d.payouts||[]).length}</td><td>${d.note}</td></tr>`).join('')}
+  ${DB.dividends.map(d=>`<tr><td>${d.ts}</td><td>${esc(d.company_name)} (${d.ticker})</td><td>$${d.per_share.toFixed(2)}</td><td class="up">$${d.total.toFixed(2)}</td><td>${(d.payouts||[]).length}</td><td>${esc(d.note||'')}</td></tr>`).join('')}
   </tbody></table>
   <h2>Company News (${DB.news.length})</h2>
   <table><thead><tr><th>Time</th><th>Company</th><th>Headline</th><th>Body</th></tr></thead><tbody>
-  ${DB.news.map(n=>`<tr><td>${n.ts}</td><td>${n.company_name} (${n.ticker})</td><td><strong>${n.headline}</strong></td><td>${n.body||'—'}</td></tr>`).join('')}
+  ${DB.news.map(n=>`<tr><td>${n.ts}</td><td>${n.company_name} (${n.ticker})</td><td><strong>${esc(n.headline)}</strong></td><td>${esc(n.body||'—')}</td></tr>`).join('')}
   </tbody></table>
   <div style="margin-top:30px;text-align:center;color:#999;font-size:10px">JEX — JTED Stock Exchange · Generated ${new Date().toLocaleString()}</div>
   </body></html>`);
