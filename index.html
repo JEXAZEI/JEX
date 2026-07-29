@@ -4463,7 +4463,7 @@ function renderAdmin(){
   :UI.adminTab==='ipo'?renderAdminIPO(pIPO,rIPO)
   :UI.adminTab==='dilution'?renderAdminDilution(pDil,rDil)
   :UI.adminTab==='balances'?renderAdminBalances(students)
-  :UI.adminTab==='users'?renderAdminUsers(students,companies,DB.users.filter(u2=>['secretary','treasurer','compliance_officer'].includes(u2.role)&&u2.status==='approved'))
+  :UI.adminTab==='users'?renderAdminUsers(students,companies,DB.users.filter(u2=>['secretary','treasurer','compliance_officer'].includes(u2.role)&&u2.status==='approved'),DB.users.filter(u2=>['chairman','president'].includes(u2.role)&&u2.status==='approved'))
   :UI.adminTab==='dashboard'?renderAdminDashboard()
   :UI.adminTab==='flags'?renderAdminFlags()
   :UI.adminTab==='snapshots'?renderSnapshotTab()
@@ -4714,9 +4714,21 @@ async function adjustCash(uid2){
   pushBalances();
   toast(u.name+"'s balance updated to "+fmt(newCash));render();
 }
-function renderAdminUsers(students,companies,officers){
-  return`${officers&&officers.length?`<div class="card"><div class="section-title">Officers</div>
-    <div class="ibox ibox-blue" style="margin-bottom:14px">Secretary, Treasurer, and Compliance Officer accounts. Chairman and President can't be removed here.</div>
+function renderAdminUsers(students,companies,officers,leadership){
+  const u=cu();
+  const isTrueChairman=u?.role==='chairman';
+  return`${leadership&&leadership.length?`<div class="card"><div class="section-title">Leadership</div>
+    <div class="ibox ibox-purple" style="margin-bottom:14px">Chairman and President accounts.${isTrueChairman?' You cannot remove your own account.':' Only the Chairman can remove Chairman/President accounts.'}</div>
+    ${leadership.map(x=>`<div class="app-row">
+      <div class="app-info">
+        <div class="app-name">${esc(x.name)} ${roleBadge(x.role)}${x.id===u?.id?' <span class="badge b-gray">you</span>':''}</div>
+        <div class="app-meta">${esc(x.email)}</div>
+      </div>
+      ${isTrueChairman&&x.id!==u?.id?`<button class="btn btn-sm btn-danger" onclick="removeUser('${x.id}')">Remove</button>`:''}
+    </div>`).join('')}
+  </div>`:''}
+  ${officers&&officers.length?`<div class="card"><div class="section-title">Officers</div>
+    <div class="ibox ibox-blue" style="margin-bottom:14px">Secretary, Treasurer, and Compliance Officer accounts.</div>
     ${officers.map(u=>`<div class="app-row">
       <div class="app-info">
         <div class="app-name">${esc(u.name)} ${roleBadge(u.role)}</div>
