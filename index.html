@@ -932,11 +932,15 @@ async function reviewDivApproval(id,approve){
 async function togglePracticeMode(){
   const now=!DB.session.practice_mode;
   if(now){
-    if(!confirm('Start practice mode? Consider saving a Snapshot first (Admin → Snapshots) so you can restore the exchange state when practice ends.'))return;
+    if(!confirm('Start practice mode? An automatic snapshot will be saved so the exchange can be restored exactly to this state when practice mode ends.'))return;
+    const snapId=await doSaveSnapshot('Auto-snapshot before practice mode');
+    await saveSession({practice_mode:now,practice_snapshot_id:snapId});
   } else {
-    if(!confirm('End practice mode? Practice trades will remain in history but are excluded from leaderboard rankings.'))return;
+    if(!confirm('End practice mode? The exchange will be automatically restored to its state from just before practice mode started, undoing all practice trades.'))return;
+    const snapId=DB.session.practice_snapshot_id;
+    await saveSession({practice_mode:now,practice_snapshot_id:null});
+    if(snapId)await doRestoreSnapshot(snapId);
   }
-  await saveSession({practice_mode:now});
   await pushNotificationToAll('session',now?'🎮 Practice mode started — trades do not count toward rankings.':'✅ Practice mode ended — real trading resumes.');
   toast(now?'Practice mode ON':'Practice mode OFF');render();
 }
@@ -966,9 +970,13 @@ async function saveCBPct(){
 // ═══════════════════════════════════════════════
 async function saveSnapshot(label){
   if(!label||label.trim().length<2)return toast('Enter a snapshot name');
+  await doSaveSnapshot(label.trim());
+  toast('✓ Snapshot saved: '+label.trim());render();
+}
+async function doSaveSnapshot(label){
   const snap={
     id:uid(),
-    label:label.trim(),
+    label,
     ts:ts(),
     created_by:cu()?.name||'Admin',
     data:{
@@ -981,10 +989,13 @@ async function saveSnapshot(label){
   const rec={id:snap.id,type:'snapshot',description:JSON.stringify({label:snap.label,created_by:snap.created_by,data:snap.data}),amount:null,ts:snap.ts};
   await sb.post('jex_activity',rec);
   DB.activity.unshift(rec);
-  toast('✓ Snapshot saved: '+label.trim());render();
+  return snap.id;
 }
 async function restoreSnapshot(activityId){
   if(!confirm('Restore this snapshot? All current holdings, prices, and cash will be overwritten.'))return;
+  await doRestoreSnapshot(activityId);
+}
+async function doRestoreSnapshot(activityId){
   const rec=DB.activity.find(a=>a.id===activityId);if(!rec)return toast('Snapshot not found');
   let snap;
   try{snap=JSON.parse(rec.description);}catch{return toast('Snapshot data is corrupted');}
@@ -4776,14 +4787,13 @@ function renderAdminSession(students){
     </div>
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">🎮 Practice mode</div>
-    <div class="ibox ibox-blue" style="margin-bottom:10px">In practice mode, all trades are marked as practice and excluded from the real leaderboard. When practice ends, use the Snapshots tab to restore the pre-practice state. Students can see they are in practice mode.</div>
+    <div class="ibox ibox-blue" style="margin-bottom:10px">Starting practice mode automatically saves a snapshot. Ending it automatically restores that snapshot, so cash, holdings, and prices go back to exactly where they were before practice started. Students can see they are in practice mode.</div>
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
       <div style="font-size:13px">${DB.session.practice_mode?'<span style="color:var(--amber);font-weight:500">🎮 Practice mode is ON</span>':'Practice mode is off'}</div>
       <button class="btn btn-sm ${DB.session.practice_mode?'btn-warning':'btn-primary'}" onclick="togglePracticeMode()">
         ${DB.session.practice_mode?'End practice mode':'Start practice mode'}
       </button>
     </div>
-    ${DB.session.practice_mode?'<div style="font-size:12px;color:var(--text2)">Tip: take a Snapshot before enabling practice mode so you can restore easily.</div>':''}
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:6px;color:var(--red)">⚠ Danger zone</div>
     <div class="ibox ibox-red" style="margin-bottom:10px">Resets JEX to a clean slate. Deletes all students, companies, trades, and data. Chairman, President, Secretary, Treasurer and Compliance Officer accounts are kept.</div>
