@@ -2068,11 +2068,12 @@ async function pushNotification(userId, type, message, ticker=null){
   try{
     const rec={id:uid(),user_id:userId,type,message,ticker,read:false,ts:ts()};
     await sb.post('jex_notifications',rec);
+    // Email doesn't require the recipient to be the active session — sendEmailNotification
+    // sends via the recipient's own address regardless of who's currently logged in.
+    const emailUser=getUser(userId);
+    if(emailUser)sendEmailNotification(emailUser,type,message,ticker);
     if(userId===UI.userId){
       DB.notifications.unshift(rec);
-      // Send email if user has it enabled
-      const emailUser=getUser(userId);
-      if(emailUser)sendEmailNotification(emailUser,type,message,ticker);
       // Fire browser push for current user
       const titles={
         dividend:'💰 Dividend received',halt:'⚠️ Trading halted',
