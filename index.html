@@ -2384,11 +2384,21 @@ async function checkLimitOrders(){
   const tickers=[...new Set(openOrders.map(o=>o.ticker))];
   for(const ticker of tickers){
     const book=getOrderBook(ticker);
-    // Match any crossed orders (bid >= ask)
-    if(book.bestBid&&book.bestAsk&&book.bestBid>=book.bestAsk){
-      const bid=book.bids[0],ask=book.asks[0];
+    // Match the best crossed orders that aren't the same user (self-trades stay resting rather
+    // than blocking every other order on the book behind them — see run_tests21 for the scenario)
+    let matched=null;
+    matchSearch:
+    for(const bid of book.bids){
+      for(const ask of book.asks){
+        if(bid.limit_price<ask.limit_price)break; // asks sorted ascending; no further crosses for this bid
+        if(bid.user_id===ask.user_id)continue;
+        matched={bid,ask};break matchSearch;
+      }
+    }
+    if(matched){
+      const bid=matched.bid,ask=matched.ask;
       const buyer=getUser(bid.user_id),seller=getUser(ask.user_id);
-      if(!buyer||!seller||buyer.id===seller.id)continue;
+      if(!buyer||!seller)continue;
       const fillQty=Math.min(bid.qty,ask.qty);
       const fillPrice=ask.limit_price; // ask price (earlier order wins)
       const co=getCo(ticker);if(!co)continue;
@@ -2415,6 +2425,7 @@ async function checkLimitOrders(){
     }
     // Also fill limit orders that are now within JEX pool price
     for(const o of openOrders.filter(ord=>ord.ticker===ticker)){
+      if(o.status!=='open')continue; // already filled above via a direct book match — don't fill it again
       const co=getCo(ticker);if(!co)continue;
       const u=getUser(o.user_id);if(!u)continue;
       const shouldFill=(o.side==='buy'&&co.price<=o.limit_price)||(o.side==='sell'&&co.price>=o.limit_price);
