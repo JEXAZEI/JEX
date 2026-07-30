@@ -5827,15 +5827,15 @@ function generatePDFReport(){
   </div>
   <h2>Leaderboard</h2>
   <table><thead><tr><th>Rank</th><th>Student</th><th>Cash</th><th>Portfolio</th><th>Short P&L</th><th>Dividends</th><th>Net worth</th><th>vs Start</th></tr></thead><tbody>
-  ${students.map((u,i)=>{const vs=u._nw-10000;return`<tr><td>${i===0?'<span class="badge badge-gold">🥇 #1</span>':'#'+(i+1)}</td><td><strong>${u.name}</strong></td><td>$${u.cash.toFixed(2)}</td><td>$${pv(u).toFixed(2)}</td><td class="${sPnl(u)>=0?'up':'dn'}">$${sPnl(u).toFixed(2)}</td><td>$${u._divs.toFixed(2)}</td><td><strong class="${vs>=0?'up':'dn'}">$${u._nw.toFixed(2)}</strong></td><td class="${vs>=0?'up':'dn'}">${vs>=0?'+':''}$${vs.toFixed(2)}</td></tr>`;}).join('')}
+  ${students.map((u,i)=>{const vs=u._nw-10000;return`<tr><td>${i===0?'<span class="badge badge-gold">🥇 #1</span>':'#'+(i+1)}</td><td><strong>${esc(u.name)}</strong></td><td>$${u.cash.toFixed(2)}</td><td>$${pv(u).toFixed(2)}</td><td class="${sPnl(u)>=0?'up':'dn'}">$${sPnl(u).toFixed(2)}</td><td>$${u._divs.toFixed(2)}</td><td><strong class="${vs>=0?'up':'dn'}">$${u._nw.toFixed(2)}</strong></td><td class="${vs>=0?'up':'dn'}">${vs>=0?'+':''}$${vs.toFixed(2)}</td></tr>`;}).join('')}
   </tbody></table>
   <h2>Listed Companies</h2>
   <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Shares</th><th>Avail.</th><th>Market cap</th></tr></thead><tbody>
-  ${DB.companies.map(c=>{const chg=priceChg(c);return`<tr><td><strong>${c.name}</strong></td><td>${c.ticker}</td><td>$${c.price.toFixed(2)}</td><td class="${chg>=0?'up':'dn'}">${chg>=0?'+':''}${chg.toFixed(2)}%</td><td>${c.shares.toLocaleString()}</td><td>${c.shares_avail.toLocaleString()}</td><td>$${(c.price*c.shares).toFixed(2)}</td></tr>`;}).join('')}
+  ${DB.companies.map(c=>{const chg=priceChg(c);return`<tr><td><strong>${esc(c.name)}</strong></td><td>${esc(c.ticker)}</td><td>$${c.price.toFixed(2)}</td><td class="${chg>=0?'up':'dn'}">${chg>=0?'+':''}${chg.toFixed(2)}%</td><td>${c.shares.toLocaleString()}</td><td>${c.shares_avail.toLocaleString()}</td><td>$${(c.price*c.shares).toFixed(2)}</td></tr>`;}).join('')}
   </tbody></table>
   <h2>All Trades (${DB.trades.length})</h2>
   <table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th><th>Buyer</th><th>Seller</th></tr></thead><tbody>
-  ${[...DB.trades].reverse().slice(0,200).map(t=>`<tr><td>${t.ts}</td><td>${t.ticker}</td><td>$${t.price.toFixed(2)}</td><td>${t.qty}</td><td>${t.type||'market'}</td><td>${['exchange','short'].includes(t.buyer_id)?'JEX':getUser(t.buyer_id)?.name||'?'}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':getUser(t.seller_id)?.name||'?'}</td></tr>`).join('')}
+  ${[...DB.trades].reverse().slice(0,200).map(t=>`<tr><td>${t.ts}</td><td>${esc(t.ticker)}</td><td>$${t.price.toFixed(2)}</td><td>${t.qty}</td><td>${t.type||'market'}</td><td>${['exchange','short'].includes(t.buyer_id)?'JEX':esc(getUser(t.buyer_id)?.name||'?')}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':esc(getUser(t.seller_id)?.name||'?')}</td></tr>`).join('')}
   ${DB.trades.length>200?`<tr><td colspan="7" style="text-align:center;color:#666">Showing 200 of ${DB.trades.length} trades</td></tr>`:''}
   </tbody></table>
   <h2>Dividends Paid (${DB.dividends.length})</h2>
@@ -5844,7 +5844,7 @@ function generatePDFReport(){
   </tbody></table>
   <h2>Company News (${DB.news.length})</h2>
   <table><thead><tr><th>Time</th><th>Company</th><th>Headline</th><th>Body</th></tr></thead><tbody>
-  ${DB.news.map(n=>`<tr><td>${n.ts}</td><td>${n.company_name} (${n.ticker})</td><td><strong>${esc(n.headline)}</strong></td><td>${esc(n.body||'—')}</td></tr>`).join('')}
+  ${DB.news.map(n=>`<tr><td>${n.ts}</td><td>${esc(n.company_name)} (${esc(n.ticker)})</td><td><strong>${esc(n.headline)}</strong></td><td>${esc(n.body||'—')}</td></tr>`).join('')}
   </tbody></table>
   <div style="margin-top:30px;text-align:center;color:#999;font-size:10px">JEX — JTED Stock Exchange · Generated ${new Date().toLocaleString()}</div>
   </body></html>`);
