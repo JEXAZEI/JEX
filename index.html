@@ -2580,11 +2580,12 @@ async function issueDividend(ticker,perShare,note,payerOverride,preApproved){
       UI.companyTab='dividends';render();return;
     }
   }
-  if(!preApproved&&!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(((s.holdings&&s.holdings[ticker])||0)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
+  const sharesAcrossClasses=s=>allT.reduce((sum,t)=>sum+((s.holdings&&s.holdings[t])||0),0);
+  if(!preApproved&&!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(sharesAcrossClasses(s)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
   await updateUser(owner.id,{cash:Math.round((owner.cash-total)*100)/100});
   const payouts=[];
   for(const s of sh){
-    const shares=(s.holdings&&s.holdings[ticker])||0;
+    const shares=sharesAcrossClasses(s);
     const payout=Math.round(shares*perShare*100)/100;
     await updateUser(s.id,{cash:Math.round((s.cash+payout)*100)/100});
     payouts.push({userId:s.id,name:s.name,shares,payout});
