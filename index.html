@@ -1427,18 +1427,13 @@ async function forgotStep3(pw,conf){const u=getUser(UI.forgotUserId);if(!u)retur
 // ═══════════════════════════════════════════════
 // NEWS
 // ═══════════════════════════════════════════════
-async function notifyShareholdersByTicker(ticker,type,msg){
-  try{const fr=await sb.get('jex_users','role=eq.student&status=eq.approved');
-  for(const s of fr)if((s.holdings&&s.holdings[ticker]||0)>0)await pushNotification(s.id,type,msg,ticker);}catch(e){}
-}
 async function postNews(ticker,headline,body){
   if(!headline||headline.trim().length<3)return toast('Enter a headline');
   const co=getCo(ticker);if(!co)return;
   const rec={id:uid(),ticker,company_name:co.name,headline:headline.trim(),body:(body||'').trim(),author_id:UI.userId,ts:ts()};
   await sb.post('jex_news',rec);
   DB.news.unshift(rec);
-  await pushNotificationToHolders(ticker,'news','📰 '+co.name+': '+headline.trim());
-  if(document.getElementById('news-notify')?.checked)await notifyShareholdersByTicker(ticker,'news','📰 '+co.name+': '+(headline||'').slice(0,60));
+  if(document.getElementById('news-notify')?.checked)await pushNotificationToHolders(ticker,'news','📰 '+co.name+': '+headline.trim());
   toast('News posted');UI.companyTab='news';render();
 }
 async function deleteNews(id){
