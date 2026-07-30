@@ -983,12 +983,6 @@ async function saveSnapshot(label){
   DB.activity.unshift(rec);
   toast('✓ Snapshot saved: '+label.trim());render();
 }
-async function listSnapshots(){
-  return DB.activity.filter(a=>a.type==='snapshot').map(a=>{
-    try{const d=JSON.parse(a.description);return{id:a.id,label:d.label,ts:a.ts,created_by:d.created_by};}
-    catch{return null;}
-  }).filter(Boolean);
-}
 async function restoreSnapshot(activityId){
   if(!confirm('Restore this snapshot? All current holdings, prices, and cash will be overwritten.'))return;
   const rec=DB.activity.find(a=>a.id===activityId);if(!rec)return toast('Snapshot not found');
@@ -1093,9 +1087,6 @@ function getClassroomName(id){
   const c=DB.classrooms.find(x=>x.id===id);
   return c?c.name:null;
 }
-function getClassroomForUser(u){
-  return DB.classrooms.find(c=>c.id===u?.classroom_id)||null;
-}
 async function reassignClassroom(){
   const rawId=get('reassign-uid')?.value;
   const cid=get('reassign-cid-select')?.value||null;
@@ -1105,21 +1096,6 @@ async function reassignClassroom(){
   toast('Reassigned to classroom: '+(cid||'unassigned'));
   render();
 }
-// Filter data by classroom if set
-function classroomUsers(){
-  if(!UI.classroomFilter)return DB.users;
-  return DB.users.filter(u=>u.classroom_id===UI.classroomFilter||isAdmin(u));
-}
-function classroomCompanies(){
-  if(!UI.classroomFilter)return DB.companies;
-  // Match on company's own classroom_id, OR fall back to owner's classroom_id
-  return DB.companies.filter(c=>{
-    if(c.classroom_id)return c.classroom_id===UI.classroomFilter;
-    const owner=getUser(c.owner_id);
-    return !owner||owner.classroom_id===UI.classroomFilter;
-  });
-}
-
 async function saveSheetsUrl(url){
   url=(url||'').trim();
   SHEETS_URL=url||null;
@@ -1498,12 +1474,6 @@ async function deleteAnnouncement(id){
 // ═══════════════════════════════════════════════
 // COMPANY MEMBERSHIP (CO-FOUNDERS)
 // ═══════════════════════════════════════════════
-function getCompanyOwners(companyUserId){
-  // Returns all student IDs who can manage this company (lead + accepted co-founders)
-  const accepted=DB.companyMembers.filter(m=>m.company_user_id===companyUserId&&m.status==='accepted').map(m=>m.student_id);
-  return [companyUserId,...accepted];
-}
-// canManageCompany — see below
 function getMyCompany(userId){
   // Find company where user is lead owner or accepted co-founder
   const asLead=DB.companies.find(c=>c.owner_id===userId);
@@ -1512,7 +1482,6 @@ function getMyCompany(userId){
   if(asMember)return DB.companies.find(c=>c.owner_id===asMember.company_user_id);
   return null;
 }
-function isLeadFounder(companyUserId,userId){return companyUserId===userId;}
 
 function doInviteFounder(companyTicker){
   const studentId=document.getElementById('invite-student')?.value;
@@ -1674,41 +1643,6 @@ function canManageCompany(co){
 
 // removeFounder v1 removed
 
-async function requestFounderAlloc(ticker,shares,reason){
-  const u=cu();if(!u)return;
-  const co=getCo(ticker);if(!co)return;
-  shares=parseInt(shares);
-  if(isNaN(shares)||shares<=0)return toast('Enter a valid share count');
-  if(!reason||reason.trim().length<5)return toast('Please add a reason');
-  if(shares>co.shares_avail)return toast('Only '+co.shares_avail+' shares available');
-  if(DB.founderAllocations.find(a=>a.company_ticker===ticker&&a.student_id===u.id&&a.status==='pending'))return toast('You already have a pending allocation request');
-  const rec={id:uid(),company_ticker:ticker,company_name:co.name,student_id:u.id,student_name:u.name,shares,reason:reason.trim(),status:'pending',ts:ts()};
-  await sb.post('jex_founder_allocations',rec);DB.founderAllocations.push(rec);
-  toast('Share allocation request submitted — awaiting Chairman approval');render();
-}
-
-async function reviewFounderAlloc(id,approve){
-  const a=DB.founderAllocations.find(x=>x.id===id);if(!a)return;
-  await sb.patch('jex_founder_allocations','id=eq.'+id,{status:approve?'approved':'rejected'});
-  a.status=approve?'approved':'rejected';
-  if(approve){
-    const co=getCo(a.company_ticker);const student=getUser(a.student_id);
-    if(co&&student&&co.shares_avail>=a.shares){
-      // Transfer shares from pool to student
-      const h={...holdings(student)};h[a.company_ticker]=(h[a.company_ticker]||0)+a.shares;
-      await updateUser(a.student_id,{holdings:h});
-      await updateCo(a.company_ticker,{shares_avail:co.shares_avail-a.shares});
-      await logActivity('founder_alloc',a.student_name+' received '+a.shares+' founder shares in '+a.company_name,{ticker:a.company_ticker,userId:a.student_id,userName:a.student_name,amount:a.shares});
-      await pushNotification(a.student_id,'founder','✅ Your founder share allocation of '+a.shares+' shares in '+a.company_name+' was approved!',a.company_ticker);
-      toast(a.student_name+' allocated '+a.shares+' shares in '+a.company_name);
-    } else toast('Could not allocate — insufficient available shares');
-  } else {
-    await pushNotification(a.student_id,'founder','❌ Your founder share allocation request for '+a.company_name+' was rejected.',a.company_ticker);
-    toast('Allocation rejected');
-  }
-  render();
-}
-
 // ═══════════════════════════════════════════════
 // PRICE ADJUSTMENTS (Chairman tool)
 // ═══════════════════════════════════════════════
@@ -1717,18 +1651,6 @@ async function reviewFounderAlloc(id,approve){
 // ═══════════════════════════════════════════════
 // CO-FOUNDER SYSTEM
 // ═══════════════════════════════════════════════
-function getCompanyMembers(co){
-  const members=[{userId:co.owner_id,name:getUser(co.owner_id)?.name||'Owner',role:'Owner'}];
-  DB.companyMembers.filter(m=>m.company_user_id===co.owner_id&&m.status==='accepted').forEach(m=>{
-    const s=getUser(m.student_id);
-    if(s)members.push({userId:s.id,name:s.name,role:'Founder'});
-  });
-  return members;
-}
-function isCompanyMember(co,userId){
-  if(co.owner_id===userId)return true;
-  return DB.companyMembers.some(m=>m.company_user_id===co.owner_id&&m.student_id===userId&&m.status==='accepted');
-}
 
 async function removeFounder(memberId,name){
   if(!confirm('Remove '+name+' as a founder? They will lose access to manage this company.'))return;
@@ -2018,11 +1940,6 @@ async function snapshotNW(userId){
   const rec={id:uid(),user_id:userId,nw:_nw,cash:Math.round(u.cash*100)/100,portfolio:Math.round(_pv*100)/100,ts:ts()};
   try{await sb.post('jex_nw_history',rec);DB.nwHistory.push(rec);}catch(e){}
 }
-async function snapshotAllNW(){
-  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
-  for(const u of students)await snapshotNW(u.id);
-}
-
 // ═══════════════════════════════════════════════
 // PRICE ALERTS
 // ═══════════════════════════════════════════════
@@ -4366,9 +4283,6 @@ function renderFoundersTab(co,u){
   return html;
 }
 
-function requestFounderAllocForm(ticker){
-  requestFounderAllocation(ticker,get('alloc-student')?.value,get('alloc-shares')?.value,get('alloc-reason')?.value);
-}
 function renderClassesTab(co){
   const myClasses=DB.shareClasses.filter(c=>c.parent_ticker===co.ticker&&c.ticker!==co.ticker);
   const myApps=DB.classApps.filter(a=>a.parent_ticker===co.ticker).reverse();
@@ -4650,7 +4564,6 @@ function submitDilutionFor(ticker){
   const reason=document.getElementById('dil-reason-'+ticker)?.value;
   submitDilution(ticker,newShares,reason);
 }
-function updateDilPrev(ticker){const co=getCo(ticker);if(!co)return;const ns=parseInt(get('dil-shares')?.value)||0;const p=get('dil-prev');if(p)p.innerHTML=dilPreview(co,ns);}
 
 // ═══════════════════════════════════════════════
 // RENDER: ADMIN
@@ -4801,14 +4714,21 @@ function renderAdminSession(students){
     <div class="ibox ibox-blue" style="margin-bottom:12px">Classrooms are just a way of organizing which students and companies belong together — they don't restrict trading times. Cross-classroom trading is always allowed and display only.</div>
 
     ${DB.classrooms.length?`<div style="margin-bottom:12px">
-      ${DB.classrooms.map(cls=>`<div style="display:flex;align-items:center;gap:8px;padding:8px;background:var(--bg3);border-radius:var(--radius);margin-bottom:6px">
-        <div style="flex:1">
-          <div style="font-weight:500">${esc(cls.name)}</div>
-          <div style="font-size:11px;color:var(--text2)">${DB.users.filter(u=>u.classroom_id===cls.id&&u.role==='student').length} students · ${DB.users.filter(u=>u.classroom_id===cls.id&&u.role==='company').length} companies</div>
-        </div>
-        <button class="btn btn-sm" style="color:var(--text2)" onclick="UI.classroomFilter=UI.classroomFilter===&quot;${cls.id}&quot;?null:&quot;${cls.id}&quot;;render()">${UI.classroomFilter===cls.id?'Showing':'Filter'}</button>
-        <button class="btn btn-sm btn-danger" onclick="deleteClassroom('${cls.id}')">✕</button>
-      </div>`).join('')}
+      ${DB.classrooms.map(cls=>{
+        const isShowing=UI.classroomFilter===cls.id;
+        const members=DB.users.filter(u=>u.classroom_id===cls.id&&!isAdmin(u));
+        return`<div style="padding:8px;background:var(--bg3);border-radius:var(--radius);margin-bottom:6px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="flex:1">
+              <div style="font-weight:500">${esc(cls.name)}</div>
+              <div style="font-size:11px;color:var(--text2)">${DB.users.filter(u=>u.classroom_id===cls.id&&u.role==='student').length} students · ${DB.users.filter(u=>u.classroom_id===cls.id&&u.role==='company').length} companies</div>
+            </div>
+            <button class="btn btn-sm" style="color:var(--text2)" onclick="UI.classroomFilter=UI.classroomFilter===&quot;${cls.id}&quot;?null:&quot;${cls.id}&quot;;render()">${isShowing?'Hide':'View members'}</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteClassroom('${cls.id}')">✕</button>
+          </div>
+          ${isShowing?`<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">${members.length?members.map(u=>`<div style="font-size:12px;color:var(--text2);padding:3px 0">${esc(u.name)} <span style="opacity:0.7">[${u.role}]</span></div>`).join(''):'<div style="font-size:12px;color:var(--text2)">No members yet</div>'}</div>`:''}
+        </div>`;
+      }).join('')}
     </div>`:'<div style="font-size:12px;color:var(--text2);margin-bottom:12px">No classrooms yet</div>'}
 
     <div class="section-title" style="font-size:12px;margin-bottom:8px">Add classroom</div>
@@ -4834,7 +4754,6 @@ function renderAdminSession(students){
       </div>
       <div><button class="btn btn-primary btn-sm" onclick="reassignClassroom()">Assign</button></div>
     </div>
-    ${UI.classroomFilter?`<div style="margin-top:10px"><button class="btn btn-sm" onclick="UI.classroomFilter=null;render()">✕ Clear classroom filter</button></div>`:''}
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">🎮 Practice mode</div>
     <div class="ibox ibox-blue" style="margin-bottom:10px">In practice mode, all trades are marked as practice and excluded from the real leaderboard. When practice ends, use the Snapshots tab to restore the pre-practice state. Students can see they are in practice mode.</div>
@@ -5236,7 +5155,7 @@ function renderAdminNews(){
 function renderAdminListed(){
   return`<div class="card"><div class="section-title">Listed companies</div>
     <table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th>Change</th><th>Shares</th><th>Owner</th><th></th></tr></thead>
-    <tbody>${DB.companies.map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${c.name}${c.classroom_id?` <span class="badge b-gray" style="font-size:10px">${c.classroom_id}</span>`:''} ${c.status==='delisted'?'<span class="badge b-red" style="font-size:10px">delisted</span>':''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${owner?owner.name:'—'}</td><td>${c.status==='delisted'?
+    <tbody>${DB.companies.map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${c.name}${getClassroomName(c.classroom_id)?` <span class="badge b-gray" style="font-size:10px">${getClassroomName(c.classroom_id)}</span>`:''} ${c.status==='delisted'?'<span class="badge b-red" style="font-size:10px">delisted</span>':''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${owner?owner.name:'—'}</td><td>${c.status==='delisted'?
     `<button class="btn btn-sm btn-primary" onclick="relistCompany('${c.ticker}')">Re-list</button>`:
     `<button class="btn btn-sm btn-danger" onclick="delistCompany('${c.ticker}')">Delist</button>`
   }</td></tr>`;}).join('')||`<tr><td colspan="7"><div class="empty">No listed companies</div></td></tr>`}
