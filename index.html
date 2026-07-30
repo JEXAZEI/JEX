@@ -1731,7 +1731,8 @@ async function resolveFlag(flagId,action,note){
   await logActivity('flag_resolve',u.name+' '+(action==='resolved'?'resolved':'dismissed')+' flag on '+f.target_name+(note?' — '+note:''),{userId:u.id,userName:u.name});
   toast('Flag '+(action==='resolved'?'resolved':'dismissed'));render();
 }
-function flagForm(targetId,targetName,targetType){
+function flagForm(targetId,targetType){
+  const targetName=targetType==='company'?(DB.companies.find(c=>c.owner_id===targetId)?.name||'Unknown'):(getUser(targetId)?.name||'Unknown');
   const reason=prompt('Reason for flagging '+targetName+':');
   if(reason===null)return;
   if(!reason||reason.trim().length<5)return toast('Enter a reason (at least 5 characters)');
@@ -3297,7 +3298,7 @@ function renderLogin(){
   const acctRow=(u,cls)=>`<div class="acct-item" onclick="UI.pendingLoginId='${u.id}';UI.loginView='password';render()"><div class="avatar ${cls}">${esc(u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase())}</div><div><div class="acct-name">${esc(u.name)} ${roleBadge(u.role)}${isAdmin(u)&&pending?` <span class="badge b-blue">${pending} pending</span>`:''}</div>${!isAdmin(u)?`<div class="acct-email">${esc(u.email)}</div>`:''}</div></div>`;
   if(UI.loginView==='password'){const u=getUser(UI.pendingLoginId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Sign in as ${esc(u?.name||'user')}</div>${!isAdmin(u)?`<div class="frow"><label class="flabel">Email</label><div style="padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;color:var(--text2);background:var(--bg3)">${u?.email||''}</div></div>`:``}<div class="frow"><label class="flabel">Password</label><div class="pw-wrap"><input type="password" id="login-pw" placeholder="Enter password" onkeydown="if(event.key==='Enter')loginWith(UI.pendingLoginId,get('login-pw')?.value)"><button type="button" class="pw-eye" onclick="togglePw('login-pw')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn btn-primary" onclick="loginWith(UI.pendingLoginId,get('login-pw')?.value)">Sign in</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div><button class="link-btn" onclick="UI.loginView='forgot-email';render()">Forgot password?</button></div></div>`;}
   if(UI.loginView==='forgot-email'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 1 of 3</div><div class="frow"><label class="flabel">Your email address</label><input type="email" id="forgot-email" placeholder="you@school.edu" onkeydown="if(event.key==='Enter')forgotStep1(get('forgot-email')?.value)"></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep1(get('forgot-email')?.value)">Continue</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
-  if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${u?.name}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
+  if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${esc(u?.name)}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="forgot-pw1" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="forgot-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw2')" tabindex="-1">👁</button></div></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
   if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div>
 <div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in. Your classroom will be assigned by your teacher after approval.</div><div class="frow" style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" id="reg-agree-tos" aria-label="I agree to the Terms of Service and Bylaws" style="width:auto;margin-top:2px"><span style="font-size:12px;color:var(--text2)">I agree to the <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a> and <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a>.</span></div><div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
@@ -3865,7 +3866,7 @@ function openPanel(ticker){
   const mode=UI.panelMode,fin=c.financials&&c.financials[0];
   panel.innerHTML=`<div class="card" style="border-color:var(--blue)">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-      <div><span style="font-weight:500;font-size:15px">${c.name}</span> <span class="badge b-gray" style="font-family:var(--mono)">${ticker}</span>
+      <div><span style="font-weight:500;font-size:15px">${esc(c.name)}</span> <span class="badge b-gray" style="font-family:var(--mono)">${esc(ticker)}</span>
         <button class="wstar ${isWatched(ticker)?'on':''}" onclick="toggleWatch('${ticker}').then(()=>openPanel('${ticker}'))" style="margin-left:6px">${isWatched(ticker)?'★':'☆'}</button></div>
       <button class="btn btn-sm" onclick="closePanel()">close</button>
     </div>
@@ -4032,8 +4033,8 @@ function renderSettings(){
   </div>`:'';
   return sheetsSection+emailjsSection+`<div class="card"><div class="section-title">Account</div>
     <div class="grid2" style="margin-bottom:12px">
-      <div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${u.name}</div></div>
-      <div class="mcard"><div class="mlabel">Email (login)</div><div class="mval" style="font-size:14px;margin-top:4px;word-break:break-all">${u.email}</div></div>
+      <div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${esc(u.name)}</div></div>
+      <div class="mcard"><div class="mlabel">Email (login)</div><div class="mval" style="font-size:14px;margin-top:4px;word-break:break-all">${esc(u.email)}</div></div>
     </div>
     <div class="section-title" style="font-size:13px;margin-bottom:8px">Change email address</div>
     <div class="frow"><label class="flabel">New email address</label><input type="email" id="new-email" placeholder="${u.email}" autocomplete="email"></div>
@@ -4086,11 +4087,11 @@ function renderAppStatus(app){
   const co=app.status==='approved'?DB.companies.find(c=>c.ticker===app.ticker):null;
   const sm={pending:'b-amber',approved:'b-green',rejected:'b-red'};
   const notif=app.status==='approved'
-    ?'<div class="ibox ibox-green" style="margin-bottom:14px">🎉 <strong>Congratulations! Your IPO has been approved.</strong> Your company <strong>'+app.name+'</strong> is now listed on JEX as <span style="font-family:var(--mono)">'+app.ticker+'</span>. Go to <strong>My stock</strong> to manage it.</div>'
+    ?'<div class="ibox ibox-green" style="margin-bottom:14px">🎉 <strong>Congratulations! Your IPO has been approved.</strong> Your company <strong>'+esc(app.name)+'</strong> is now listed on JEX as <span style="font-family:var(--mono)">'+esc(app.ticker)+'</span>. Go to <strong>My stock</strong> to manage it.</div>'
     :app.status==='rejected'
     ?'<div class="ibox ibox-red" style="margin-bottom:14px">❌ <strong>Your IPO application was rejected.</strong> You can submit a new application with a different ticker or details.</div>'
     :'<div class="ibox ibox-amber" style="margin-bottom:14px">⏳ <strong>Your application is under review.</strong> The Chairman will approve or reject it shortly.</div>';
-  return`<div class="card"><div class="section-title">${app.name} (${app.ticker})</div>
+  return`<div class="card"><div class="section-title">${esc(app.name)} (${esc(app.ticker)})</div>
     ${notif}
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px"><span class="badge ${sm[app.status]||'b-gray'}">${app.status}</span><span style="font-size:12px;color:var(--text2)">Submitted ${app.ts}</span></div>
     <div class="grid2"><div class="mcard"><div class="mlabel">IPO price</div><div class="mval" style="font-family:var(--mono)">${fmt(app.price)}</div></div><div class="mcard"><div class="mlabel">Shares issued</div><div class="mval">${app.shares.toLocaleString()}</div></div></div>
@@ -4711,7 +4712,7 @@ function renderAdminSession(students){
     ${DB.halts.length?`<div style="margin-bottom:10px">${DB.halts.map(h=>`<div class="app-row" style="margin-bottom:6px"><div class="app-info"><div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">${h.ticker}</span> <span class="badge b-red">Halted</span></div><div class="app-meta">${h.reason} — by ${h.halted_by} at ${h.ts}</div></div><button class="btn btn-sm btn-success" onclick="resumeStock('${h.ticker}')">Resume</button></div>`).join('')}</div>`:'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">No stocks currently halted.</div>'}
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Halt a stock</label>
-        <select id="halt-ticker"><option value="">— Select ticker —</option>${DB.companies.map(c=>`<option value="${c.ticker}">${c.ticker} — ${c.name}</option>`).join('')}</select>
+        <select id="halt-ticker"><option value="">— Select ticker —</option>${DB.companies.map(c=>`<option value="${esc(c.ticker)}">${esc(c.ticker)} — ${esc(c.name)}</option>`).join('')}</select>
       </div>
       <div class="frow" style="flex:2"><label class="flabel">Reason</label><input type="text" id="halt-reason" placeholder="e.g. Suspected market manipulation"></div>
       <div style="padding-bottom:12px"><button class="btn btn-danger" onclick="haltStock(get('halt-ticker')?.value,get('halt-reason')?.value)">Halt</button></div>
@@ -4816,17 +4817,17 @@ function renderAdminPasswords(students,companies){
   const resetableUsers=[...students,...companies,...officers];
   return`<div class="card"><div class="section-title">Manual password reset</div>
     <p style="font-size:13px;color:var(--text2);margin-bottom:14px">Use only if a user has forgotten both their password and security answer. Chairman and President cannot reset each other's passwords.</p>
-    <div class="frow"><label class="flabel">Select user</label><select id="admin-reset-uid" onchange="renderAdminResetForm()"><option value="">— Select a user —</option>${resetableUsers.map(x=>`<option value="${x.id}">${x.name} (${x.email}) — ${x.role}</option>`).join('')}</select></div>
+    <div class="frow"><label class="flabel">Select user</label><select id="admin-reset-uid" onchange="renderAdminResetForm()"><option value="">— Select a user —</option>${resetableUsers.map(x=>`<option value="${x.id}">${esc(x.name)} (${esc(x.email)}) — ${esc(x.role)}</option>`).join('')}</select></div>
     <div id="admin-reset-form"></div>
   </div>`;
 }
 function renderAdminResetForm(){
   const uid2=get('admin-reset-uid')?.value;const form=get('admin-reset-form');if(!form)return;
   if(!uid2){form.innerHTML='';return;}const u=getUser(uid2);if(!u){form.innerHTML='';return;}
-  form.innerHTML=`<div style="font-size:13px;margin-bottom:10px;padding:10px;background:var(--bg3);border-radius:var(--radius)">Resetting: <strong>${u.name}</strong><br><span style="font-size:12px;color:var(--text2)">Security question: ${u.sec_q||'—'}</span></div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="admin-reset-pw" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('admin-reset-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="adminResetPw('${u.id}',get('admin-reset-pw')?.value)">Reset password</button>`;
+  form.innerHTML=`<div style="font-size:13px;margin-bottom:10px;padding:10px;background:var(--bg3);border-radius:var(--radius)">Resetting: <strong>${esc(u.name)}</strong><br><span style="font-size:12px;color:var(--text2)">Security question: ${esc(u.sec_q||'—')}</span></div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="admin-reset-pw" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('admin-reset-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="adminResetPw('${u.id}',get('admin-reset-pw')?.value)">Reset password</button>`;
 }
 function renderAdminIPO(pIPO,rIPO){
-  return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${a.name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${a.description||'no desc'}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewIPO('${a.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewIPO('${a.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${a.name} <span class="badge b-gray" style="font-family:var(--mono)">${a.ticker}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}`;
+  return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${esc(a.description||'no desc')}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewIPO('${a.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewIPO('${a.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}`;
 }
 function renderAdminDilution(pDil,rDil){
   return`<div class="card"><div class="section-title">Pending dilution requests</div>${pDil.length?pDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${d.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span> <span class="badge b-coral">+${d.pct_increase}%</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares — "${d.reason}"</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewDilution('${d.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewDilution('${d.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending dilution requests</div>'}${rDil.length?`<hr class="divider">${rDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${d.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares</div></div><span class="badge ${d.status==='approved'?'b-green':'b-red'}">${d.status}</span></div>`).join('')}`:''}`;
@@ -4837,9 +4838,9 @@ function renderAdminBalances(students){
   const csv=[['Rank','Name','Email','Cash','Portfolio','Short P&L','Dividends','Net worth','vs Start'],...rows.map((r,i)=>[i+1,r.name,r.email,r.cash.toFixed(2),r.portfolio.toFixed(2),r.shortPnl.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),(r.nw-10000).toFixed(2)])].map(r=>r.map(csvEscape).join(',')).join('\n');
   window._jexCSV=csv;
   return`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><span style="font-size:12px;color:var(--text2)">Live student balances</span><div style="display:flex;gap:8px"><button class="btn btn-sm" style="background:var(--purple);color:white;border-color:var(--purple)" onclick="generatePDFReport()">📄 Full PDF report</button><button class="btn btn-sm btn-success" onclick="downloadCSV()">Download CSV</button><button class="btn btn-sm btn-primary" onclick="const p=get('csv-panel');p.style.display=p.style.display==='none'?'block':'none'">Show CSV to copy</button></div></div>
-  <div class="grid4" style="margin-bottom:14px"><div class="mcard"><div class="mlabel">Students</div><div class="mval">${rows.length}</div></div><div class="mcard"><div class="mlabel">Avg net worth</div><div class="mval ${rows.length&&rows.reduce((s,r)=>s+r.nw,0)/rows.length>=10000?'green':''}" style="font-family:var(--mono)">${rows.length?fmt(rows.reduce((s,r)=>s+r.nw,0)/rows.length):'—'}</div></div><div class="mcard"><div class="mlabel">Leader</div><div class="mval" style="font-size:15px;margin-top:4px">${rows[0]?.name||'—'}</div></div><div class="mcard"><div class="mlabel">Total dividends paid</div><div class="mval green" style="font-family:var(--mono)">${fmt(rows.reduce((s,r)=>s+r.divs,0))}</div></div></div>
+  <div class="grid4" style="margin-bottom:14px"><div class="mcard"><div class="mlabel">Students</div><div class="mval">${rows.length}</div></div><div class="mcard"><div class="mlabel">Avg net worth</div><div class="mval ${rows.length&&rows.reduce((s,r)=>s+r.nw,0)/rows.length>=10000?'green':''}" style="font-family:var(--mono)">${rows.length?fmt(rows.reduce((s,r)=>s+r.nw,0)/rows.length):'—'}</div></div><div class="mcard"><div class="mlabel">Leader</div><div class="mval" style="font-size:15px;margin-top:4px">${esc(rows[0]?.name||'—')}</div></div><div class="mcard"><div class="mlabel">Total dividends paid</div><div class="mval green" style="font-family:var(--mono)">${fmt(rows.reduce((s,r)=>s+r.divs,0))}</div></div></div>
   <div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th style="padding-left:14px">Rank</th><th>Student</th><th>Email</th><th class="r">Cash</th><th class="r">Portfolio</th><th class="r">Short P&L</th><th class="r">Dividends</th><th class="r">Net worth</th><th class="r">vs Start</th></tr></thead>
-  <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-10000,vc=vs>=0?'price-up':'price-down';return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${i===0?'var(--amber)':i===1?'var(--text2)':i===2?'#993C1D':'var(--text3)'}">#${i+1}</td><td style="font-weight:500">${r.name}</td><td style="color:var(--text2);font-size:12px">${r.email}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r ${r.shortPnl>=0?'price-up':'price-down'}" style="font-family:var(--mono)">${r.shortPnl>=0?'+':''}${fmt(r.shortPnl)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="9"><div class="empty">No approved students yet</div></td></tr>`}
+  <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-10000,vc=vs>=0?'price-up':'price-down';return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${i===0?'var(--amber)':i===1?'var(--text2)':i===2?'#993C1D':'var(--text3)'}">#${i+1}</td><td style="font-weight:500">${esc(r.name)}</td><td style="color:var(--text2);font-size:12px">${esc(r.email)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r ${r.shortPnl>=0?'price-up':'price-down'}" style="font-family:var(--mono)">${r.shortPnl>=0?'+':''}${fmt(r.shortPnl)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="9"><div class="empty">No approved students yet</div></td></tr>`}
   </tbody></table></div>
   <div id="csv-panel" style="display:none;margin-top:12px"><div class="ibox ibox-teal">Click inside the box, press <strong>Ctrl+A</strong> (Cmd+A) to select all, then <strong>Ctrl+C</strong> to copy.</div><textarea readonly onclick="this.select()" style="width:100%;font-family:var(--mono);font-size:12px;padding:10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);resize:vertical;min-height:160px;line-height:1.5">${csv}</textarea></div>`;
 }
@@ -4903,8 +4904,8 @@ function renderAdminUsers(students,companies,officers,leadership){
     <div class="ibox ibox-blue" style="margin-bottom:14px">Select an operation, enter an amount, and click Apply to update a student's cash balance. Subtract will not go below $0.</div>
     ${students.length?students.map(u=>`<div class="app-row">
       <div class="app-info">
-        <div class="app-name">${u.name}</div>
-        <div class="app-meta">${u.email} &nbsp;|&nbsp; Cash: <strong style="font-family:var(--mono);color:var(--green)">${fmt(u.cash)}</strong> &nbsp;|&nbsp; Net worth: <strong style="font-family:var(--mono)">${fmt(nw(u))}</strong></div>
+        <div class="app-name">${esc(u.name)}</div>
+        <div class="app-meta">${esc(u.email)} &nbsp;|&nbsp; Cash: <strong style="font-family:var(--mono);color:var(--green)">${fmt(u.cash)}</strong> &nbsp;|&nbsp; Net worth: <strong style="font-family:var(--mono)">${fmt(nw(u))}</strong></div>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         <select id="cash-op-${u.id}" style="width:90px;font-size:12px;padding:5px 8px">
@@ -4922,8 +4923,8 @@ function renderAdminUsers(students,companies,officers,leadership){
     <div class="ibox ibox-blue">Adjust a company account&#39;s cash balance directly.</div>
     ${companies.map(u=>`<div class="app-row">
       <div class="app-info">
-        <div class="app-name">${u.name}</div>
-        <div class="app-meta">${u.email} &nbsp;|&nbsp; Cash: <strong style="font-family:var(--mono);color:var(--green)">${fmt(u.cash)}</strong></div>
+        <div class="app-name">${esc(u.name)}</div>
+        <div class="app-meta">${esc(u.email)} &nbsp;|&nbsp; Cash: <strong style="font-family:var(--mono);color:var(--green)">${fmt(u.cash)}</strong></div>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         <select id="co-cash-op-${u.id}" style="width:90px;font-size:12px;padding:5px 8px">
@@ -5011,7 +5012,7 @@ function renderAdminFlags(){
         <div><label class="flabel">Target</label>
           <select id="flag-target">
             <option value="">— Select —</option>
-            ${students.map(s=>`<option value="${s.id}|${s.name}|student">${s.name}</option>`).join('')}
+            ${students.map(s=>`<option value="${s.id}|${esc(s.name)}|student">${esc(s.name)}</option>`).join('')}
           </select>
         </div>
       </div>
@@ -5081,8 +5082,8 @@ function updateFlagTargets(){
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
   const companies=DB.companies.filter(c=>c.status==='listed');
   sel.innerHTML='<option value="">— Select —</option>'
-    +(type==='student'?students.map(s=>`<option value="${s.id}|${s.name}|student">${s.name}</option>`).join('')
-    :companies.map(c=>`<option value="${c.owner_id}|${c.name}|company">${c.name} (${c.ticker})</option>`).join(''));
+    +(type==='student'?students.map(s=>`<option value="${s.id}|${esc(s.name)}|student">${esc(s.name)}</option>`).join('')
+    :companies.map(c=>`<option value="${c.owner_id}|${esc(c.name)}|company">${esc(c.name)} (${esc(c.ticker)})</option>`).join(''));
 }
 function resolveFlagForm(flagId,action){
   const note=document.getElementById('res-note-'+flagId)?.value;
@@ -5186,7 +5187,7 @@ function renderAdminNews(){
 function renderAdminListed(){
   return`<div class="card"><div class="section-title">Listed companies</div>
     <table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th>Change</th><th>Shares</th><th>Owner</th><th></th></tr></thead>
-    <tbody>${DB.companies.map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${c.name}${getClassroomName(c.classroom_id)?` <span class="badge b-gray" style="font-size:10px">${getClassroomName(c.classroom_id)}</span>`:''} ${c.status==='delisted'?'<span class="badge b-red" style="font-size:10px">delisted</span>':''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${owner?owner.name:'—'}</td><td>${c.status==='delisted'?
+    <tbody>${DB.companies.map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${esc(c.name)}${getClassroomName(c.classroom_id)?` <span class="badge b-gray" style="font-size:10px">${esc(getClassroomName(c.classroom_id))}</span>`:''} ${c.status==='delisted'?'<span class="badge b-red" style="font-size:10px">delisted</span>':''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${esc(c.ticker)}')" title="Click to copy">${esc(c.ticker)}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${esc(owner?owner.name:'—')}</td><td>${c.status==='delisted'?
     `<button class="btn btn-sm btn-primary" onclick="relistCompany('${c.ticker}')">Re-list</button>`:
     `<button class="btn btn-sm btn-danger" onclick="delistCompany('${c.ticker}')">Delist</button>`
   }</td></tr>`;}).join('')||`<tr><td colspan="7"><div class="empty">No listed companies</div></td></tr>`}
@@ -5195,7 +5196,7 @@ function renderAdminListed(){
     <div class="ibox ibox-amber">Apply a percentage boost or drop to any stock. Notifies all holders. Use positive % to boost, negative % to drop (e.g. -10 = drop 10%).</div>
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Stock</label>
-        <select id="adj-ticker"><option value="">— Select —</option>${DB.companies.map(c=>`<option value="${c.ticker}">${c.ticker} — ${c.name} (${fmt(c.price)})</option>`).join('')}</select>
+        <select id="adj-ticker"><option value="">— Select —</option>${DB.companies.map(c=>`<option value="${esc(c.ticker)}">${esc(c.ticker)} — ${esc(c.name)} (${fmt(c.price)})</option>`).join('')}</select>
       </div>
       <div class="frow" style="flex:1"><label class="flabel">Adjustment %</label>
         <input type="number" id="adj-pct" placeholder="e.g. 15 or -10" step="0.1"></div>
@@ -5331,19 +5332,19 @@ function renderExchangeStats(){
   <div class="grid3" style="margin-bottom:14px">
     <div class="card" style="margin-bottom:0"><div class="section-title">📈 Top gainers</div>
       ${gainers.slice(0,3).map(m=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
-        <div><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${m.ticker}')">${m.ticker}</span> <span style="font-size:12px;color:var(--text2)">${m.name}</span></div>
+        <div><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${esc(m.ticker)}')">${esc(m.ticker)}</span> <span style="font-size:12px;color:var(--text2)">${esc(m.name)}</span></div>
         <span class="price-up" style="font-family:var(--mono)">+${m.chg.toFixed(1)}%</span>
       </div>`).join('')||'<div class="empty" style="padding:12px">No gainers yet</div>'}
     </div>
     <div class="card" style="margin-bottom:0"><div class="section-title">📉 Top losers</div>
       ${losers.slice(0,3).map(m=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
-        <div><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${m.ticker}')">${m.ticker}</span> <span style="font-size:12px;color:var(--text2)">${m.name}</span></div>
+        <div><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${esc(m.ticker)}')">${esc(m.ticker)}</span> <span style="font-size:12px;color:var(--text2)">${esc(m.name)}</span></div>
         <span class="price-down" style="font-family:var(--mono)">${m.chg.toFixed(1)}%</span>
       </div>`).join('')||'<div class="empty" style="padding:12px">No losers yet</div>'}
     </div>
     <div class="card" style="margin-bottom:0"><div class="section-title">🔥 Most active</div>
       ${mostActive.slice(0,3).map(m=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
-        <div><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${m.ticker}')">${m.ticker}</span> <span style="font-size:12px;color:var(--text2)">${m.name}</span></div>
+        <div><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${esc(m.ticker)}')">${esc(m.ticker)}</span> <span style="font-size:12px;color:var(--text2)">${esc(m.name)}</span></div>
         <span style="font-size:12px;color:var(--text2)">${m.trades} trades</span>
       </div>`).join('')||'<div class="empty" style="padding:12px">No trades yet today</div>'}
     </div>
@@ -5352,7 +5353,7 @@ function renderExchangeStats(){
     <div class="card" style="margin-bottom:0"><div class="section-title">🏆 Leaderboard snapshot</div>
       ${ranked.slice(0,5).map((r,i)=>`<div class="lb-row" style="padding:8px 12px">
         <div class="lb-rank ${i===0?'r-gold':i===1?'r-silver':i===2?'r-bronze':''}">#${i+1}</div>
-        <div class="lb-name" style="font-size:13px">${r.name}</div>
+        <div class="lb-name" style="font-size:13px">${esc(r.name)}</div>
         <div class="lb-val" style="font-size:13px">${fmt(r.nw)}</div>
       </div>`).join('')||'<div class="empty" style="padding:12px">No students yet</div>'}
     </div>
@@ -5381,7 +5382,7 @@ function exportStudentPDF(){
   const myDivs=DB.dividends.filter(d=>(d.payouts||[]).some(p=>p.userId===u.id));
   const _nw=nw(u),_pv=pv(u),_spnl=sPnl(u),_divs=divRec(u);
   const win=window.open('','_blank');
-  win.document.write(`<!DOCTYPE html><html><head><title>JEX Portfolio — ${u.name}</title>
+  win.document.write(`<!DOCTYPE html><html><head><title>JEX Portfolio — ${esc(u.name)}</title>
   <style>body{font-family:system-ui,sans-serif;padding:32px;color:#1a2233;max-width:800px;margin:0 auto}
   h1{color:#f0a500;font-size:24px;margin-bottom:4px}
   h2{font-size:16px;margin:24px 0 8px;border-bottom:2px solid #f0a500;padding-bottom:4px}
@@ -5397,7 +5398,7 @@ function exportStudentPDF(){
   footer{margin-top:32px;font-size:11px;color:#8896a8;text-align:center}
   @media print{button{display:none}}</style></head><body>
   <h1>JEX — Portfolio Report</h1>
-  <p style="color:#4a5a72;margin-bottom:24px">${u.name} &nbsp;|&nbsp; ${u.email} &nbsp;|&nbsp; Generated ${new Date().toLocaleString()}</p>
+  <p style="color:#4a5a72;margin-bottom:24px">${esc(u.name)} &nbsp;|&nbsp; ${esc(u.email)} &nbsp;|&nbsp; Generated ${new Date().toLocaleString()}</p>
   <h2>Summary</h2>
   <div class="grid">
     <div class="card"><div class="label">Cash</div><div class="val mono">${fmt(u.cash)}</div></div>
@@ -5420,7 +5421,7 @@ function exportStudentPDF(){
   </tbody></table>`:'<p style="color:#8896a8">No trades yet</p>'}
   <h2>Dividends received</h2>
   ${myDivs.length?`<table><thead><tr><th>Time</th><th>Company</th><th>Per share</th><th>Payout</th></tr></thead><tbody>
-  ${myDivs.map(d=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);return`<tr><td>${d.ts}</td><td>${d.company_name}</td><td class="mono">${fmt(d.per_share)}</td><td class="mono green">${p?fmt(p.payout):'—'}</td></tr>`;}).join('')}
+  ${myDivs.map(d=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);return`<tr><td>${d.ts}</td><td>${esc(d.company_name)}</td><td class="mono">${fmt(d.per_share)}</td><td class="mono green">${p?fmt(p.payout):'—'}</td></tr>`;}).join('')}
   </tbody></table>`:'<p style="color:#8896a8">No dividends received</p>'}
   <footer>JEX — JTED Stock Exchange &nbsp;|&nbsp; This report was generated automatically</footer>
   <script>window.print();<\/script></body></html>`);
@@ -5570,7 +5571,7 @@ function renderAdminShareholderRegistry(){
     <div class="ibox ibox-blue">All students, their holdings, and voting power across every listed company. Read-only.</div>
     <div style="overflow-x:auto"><table><thead><tr>
       <th>Student</th>
-      ${allTickers.map(t=>`<th class="r">${t}</th>`).join('')}
+      ${allTickers.map(t=>`<th class="r">${esc(t)}</th>`).join('')}
       <th class="r">Total value</th><th class="r">Total votes</th>
     </tr></thead><tbody>
     ${students.map(u=>{
@@ -5579,7 +5580,7 @@ function renderAdminShareholderRegistry(){
       const hasHoldings=allTickers.some(t=>(u.holdings&&u.holdings[t]||0)>0);
       if(!hasHoldings&&totalVal===0)return'';
       return`<tr>
-        <td style="font-weight:500">${u.name}</td>
+        <td style="font-weight:500">${esc(u.name)}</td>
         ${allTickers.map(t=>`<td class="r" style="font-family:var(--mono)">${(u.holdings&&u.holdings[t])||0||'—'}</td>`).join('')}
         <td class="r" style="font-family:var(--mono);color:var(--green)">${fmt(totalVal)}</td>
         <td class="r" style="color:var(--amber)">${totalVotes||'—'}</td>
@@ -5702,10 +5703,10 @@ function renderTreasurerBudgetWarnings(){
     ${warnings.length?`<div class="ibox ibox-amber">These companies have less than ${fmt(threshold)} in cash. Consider alerting the Chairman.</div>
     ${warnings.map(w=>`<div class="app-row">
       <div class="app-info">
-        <div class="app-name">${w.co.name} <span class="badge b-gray" style="font-family:var(--mono)">${w.co.ticker}</span></div>
+        <div class="app-name">${esc(w.co.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(w.co.ticker)}</span></div>
         <div class="app-meta">Cash: <strong style="color:var(--red);font-family:var(--mono)">${fmt(w.cash)}</strong> · Price: ${fmt(w.co.price)} · Market cap: ${fmt(w.co.price*w.co.shares)}</div>
       </div>
-      <button class="btn btn-sm btn-warning" onclick="flagForm('${w.co.owner_id}','${w.co.name}','company')">🚩 Flag</button>
+      <button class="btn btn-sm btn-warning" onclick="flagForm('${w.co.owner_id}','company')">🚩 Flag</button>
     </div>`).join('')}`:'<div class="empty" style="color:var(--green)">✓ All companies are above the warning threshold</div>'}
   </div>
   <div class="card"><div class="section-title">Pending dividend approvals ${DB.divApprovals.filter(d=>d.status==='pending').length?`<span class="badge b-amber">${DB.divApprovals.filter(d=>d.status==='pending').length}</span>`:''}</div>
