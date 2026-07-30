@@ -164,10 +164,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 .login-signup{text-align:center;font-size:13px;color:var(--text2);margin-top:18px;padding-top:16px;border-top:1px solid var(--border)}
 .signup-link{color:var(--blue);font-weight:600;cursor:pointer}
 .signup-link:hover{text-decoration:underline}
-.acct-list{border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:8px}
-.acct-item{display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;border-bottom:1px solid var(--border);transition:background 0.15s}
-.acct-item:last-child{border-bottom:none}.acct-item:hover{background:var(--bg3)}
-.acct-name{font-size:13px;font-weight:500}.acct-email{font-size:11px;color:var(--text2)}
+.login-heading{font-size:19px;font-weight:700;margin-bottom:16px}
+.login-error{color:var(--red);font-size:12.5px;font-weight:500;margin:-4px 0 12px}
+.login-card .flabel{text-transform:uppercase;font-size:11px;letter-spacing:0.5px;font-weight:600;color:var(--text2)}
 .success-box{background:rgba(0,200,150,0.07);border:1px solid rgba(0,200,150,0.2);border-radius:var(--radius);padding:10px 12px;font-size:12px;color:var(--green);margin-bottom:12px}
 .config-page{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;background:var(--bg)}
 .config-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:28px;width:100%;max-width:520px}
@@ -300,9 +299,6 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
   .login-card{padding:24px 20px;border-radius:16px}
   .login-logo{font-size:26px;margin-bottom:6px}
   .login-tagline{margin-bottom:18px}
-  .acct-item{padding:10px 12px;gap:10px}
-  .acct-name{font-size:13px}
-  .acct-email{font-size:11px}
   .avatar{width:34px;height:34px;font-size:12px}
 
   /* ── Notifications ── */
@@ -548,7 +544,7 @@ setInterval(checkInactivity,60000); // check every minute
 document.addEventListener('mousemove',resetActivityTimer,{passive:true});
 document.addEventListener('keydown',resetActivityTimer,{passive:true});
 document.addEventListener('touchstart',resetActivityTimer,{passive:true});
-let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',pendingLoginId:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null,lbClassroom:null};
+let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',loginUsername:'',loginError:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null,lbClassroom:null};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
@@ -1386,12 +1382,24 @@ async function approveReg(id,startCash){
   toast(r.name+' approved with '+fmt(startCash));render();
 }
 async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');render();}
-async function loginWith(uid2,pw){const u=DB.users.find(u=>u.id===uid2);if(!u)return toast('Wrong password');
-  const stored=await fetchUserSecret(uid2,'password');
+function switchLoginTab(role){UI.loginTab=role;UI.loginError=null;render();}
+async function loginByForm(){
+  const username=(get('login-username')?.value||'').trim();
+  const pw=get('login-password')?.value||'';
+  UI.loginUsername=username;
+  if(!username||!pw){UI.loginError='Enter your username and password';return render();}
+  const pool=UI.loginTab==='admin'?DB.users.filter(isAdmin):DB.users.filter(u=>u.role===UI.loginTab&&u.status==='approved');
+  const u=pool.find(u=>u.email&&norm(u.email)===norm(username));
+  if(!u){UI.loginError='Invalid username or password';return render();}
+  const stored=await fetchUserSecret(u.id,'password');
   const candidate=isHashed(stored)?await hashPw(pw):pw; // support legacy plain-text during migration
-  if(stored!==candidate)return toast('Wrong password');
+  if(stored!==candidate){UI.loginError='Invalid username or password';return render();}
   // Auto-migrate plain-text password to hash on successful login
-  if(!isHashed(stored)){const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+uid2,{password:h});}UI.userId=uid2;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.pendingLoginId=null;try{localStorage.setItem(SESSION_KEY,uid2);}catch(e){}subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();await loadAll();}
+  if(!isHashed(stored)){const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+u.id,{password:h});}
+  UI.userId=u.id;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.loginError=null;UI.loginUsername='';
+  try{localStorage.setItem(SESSION_KEY,u.id);}catch(e){}
+  subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();await loadAll();
+}
 function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.tradePage=0;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
 async function changeEmail(uid2,newEmail,pw){
   const u=getUser(uid2);if(!u)return;
@@ -3299,8 +3307,6 @@ function renderLogin(){
   const roleOrder={chairman:0,president:1,secretary:2,treasurer:3,compliance_officer:4};
   const admins=DB.users.filter(u=>isAdmin(u)).sort((a,b)=>(roleOrder[a.role]??9)-(roleOrder[b.role]??9));
   const pending=DB.pending.length;
-  const acctRow=(u,cls)=>`<div class="acct-item" onclick="UI.pendingLoginId='${u.id}';UI.loginView='password';render()"><div class="avatar ${cls}">${esc(u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase())}</div><div><div class="acct-name">${esc(u.name)} ${roleBadge(u.role)}${isAdmin(u)&&pending?` <span class="badge b-blue">${pending} pending</span>`:''}</div>${!isAdmin(u)?`<div class="acct-email">${esc(u.email)}</div>`:''}</div></div>`;
-  if(UI.loginView==='password'){const u=getUser(UI.pendingLoginId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Sign in as ${esc(u?.name||'user')}</div>${!isAdmin(u)?`<div class="frow"><label class="flabel">Email</label><div style="padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;color:var(--text2);background:var(--bg3)">${u?.email||''}</div></div>`:``}<div class="frow"><label class="flabel">Password</label><div class="pw-wrap"><input type="password" id="login-pw" placeholder="Enter password" onkeydown="if(event.key==='Enter')loginWith(UI.pendingLoginId,get('login-pw')?.value)"><button type="button" class="pw-eye" onclick="togglePw('login-pw')" tabindex="-1">👁</button></div></div><div class="login-actions"><button class="btn btn-primary" onclick="loginWith(UI.pendingLoginId,get('login-pw')?.value)">Sign in</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div><div class="login-forgot"><button class="link-btn" onclick="UI.loginView='forgot-email';render()">Forgot password?</button></div></div></div>`;}
   if(UI.loginView==='forgot-email'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 1 of 3</div><div class="frow"><label class="flabel">Your email address</label><input type="email" id="forgot-email" placeholder="you@school.edu" onkeydown="if(event.key==='Enter')forgotStep1(get('forgot-email')?.value)"></div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep1(get('forgot-email')?.value)">Continue</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${esc(u?.name)}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="forgot-pw1" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="forgot-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw2')" tabindex="-1">👁</button></div></div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
@@ -3308,17 +3314,19 @@ function renderLogin(){
 <div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in. Your classroom will be assigned by your teacher after approval.</div><div class="frow" style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" id="reg-agree-tos" aria-label="I agree to the Terms of Service and Bylaws" style="width:auto;margin-top:2px"><span style="font-size:12px;color:var(--text2)">I agree to the <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a> and <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a>.</span></div><div class="login-actions"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(!['admin','company','student'].includes(UI.loginTab))UI.loginTab='student';
   const tabCounts={admin:admins.length,company:companies.length,student:students.length};
-  const tabList=UI.loginTab==='admin'?admins:UI.loginTab==='company'?companies:students;
-  const tabEmpty=UI.loginTab==='admin'?'No administrator accounts':UI.loginTab==='company'?'No company accounts yet':'No student accounts yet';
-  return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-tagline">JTED Stock Exchange</div><div class="login-sub">Sign in to your account</div>
+  return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-tagline">JTED Stock Exchange</div>
   <div class="reg-tabs">
-    <button class="reg-tab ${UI.loginTab==='admin'?'active':''}" onclick="UI.loginTab='admin';render()">Administrators${tabCounts.admin?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.admin+'</span>':''}</button>
-    <button class="reg-tab ${UI.loginTab==='company'?'active':''}" onclick="UI.loginTab='company';render()">Companies${tabCounts.company?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.company+'</span>':''}</button>
-    <button class="reg-tab ${UI.loginTab==='student'?'active':''}" onclick="UI.loginTab='student';render()">Students${tabCounts.student?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.student+'</span>':''}</button>
+    <button class="reg-tab ${UI.loginTab==='admin'?'active':''}" onclick="switchLoginTab('admin')">Administrators${tabCounts.admin?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.admin+'</span>':''}${pending?'<span class="badge b-blue" style="margin-left:4px">'+pending+' pending</span>':''}</button>
+    <button class="reg-tab ${UI.loginTab==='company'?'active':''}" onclick="switchLoginTab('company')">Companies${tabCounts.company?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.company+'</span>':''}</button>
+    <button class="reg-tab ${UI.loginTab==='student'?'active':''}" onclick="switchLoginTab('student')">Students${tabCounts.student?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.student+'</span>':''}</button>
   </div>
-  <div class="acct-list">
-    ${tabList.length?tabList.map(u=>acctRow(u,avatarClass(u.role))).join(''):`<div class="empty">${tabEmpty}</div>`}
-  </div><div class="login-signup">Don't have an account? <a class="signup-link" onclick="UI.loginView='register';render()">Sign up</a></div></div></div>`;
+  <div class="login-heading">Log in</div>
+  <div class="frow"><label class="flabel">Username</label><input type="text" id="login-username" placeholder="you@school.edu" value="${esc(UI.loginUsername)}" autocomplete="username" onkeydown="if(event.key==='Enter')loginByForm()"></div>
+  <div class="frow"><label class="flabel">Password</label><div class="pw-wrap"><input type="password" id="login-password" placeholder="Enter password" autocomplete="current-password" onkeydown="if(event.key==='Enter')loginByForm()"><button type="button" class="pw-eye" onclick="togglePw('login-password')" tabindex="-1">👁</button></div></div>
+  ${UI.loginError?`<div class="login-error">${esc(UI.loginError)}</div>`:''}
+  <div class="login-actions"><button class="btn btn-primary" onclick="loginByForm()">Log in</button></div>
+  <div class="login-forgot"><button class="link-btn" onclick="UI.loginView='forgot-email';render()">Forgot password?</button></div>
+  <div class="login-signup">Don't have an account? <a class="signup-link" onclick="UI.loginView='register';render()">Sign up</a></div></div></div>`;
 }
 function switchRegTab(type){document.querySelectorAll('.reg-tab').forEach(t=>t.classList.remove('active'));const tab=get('reg-tab-'+type);if(tab)tab.classList.add('active');get('reg-student-fields').style.display=type==='student'?'':'none';get('reg-company-fields').style.display=type==='company'?'':'none';}
 function doRegister(){
