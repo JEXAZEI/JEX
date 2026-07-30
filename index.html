@@ -2620,6 +2620,7 @@ async function submitIPO(name,ticker,price,shares,desc){
 }
 async function reviewIPO(id,approve){
   const app=DB.ipoApps.find(a=>a.id===id);if(!app)return;
+  if(approve&&DB.companies.find(c=>c.ticker===app.ticker))return toast('Ticker "'+app.ticker+'" is already listed — reject this application or have the applicant resubmit with a different ticker.');
   await sb.patch('jex_ipo_applications','id=eq.'+id,{status:approve?'approved':'rejected'});
   app.status=approve?'approved':'rejected';
   if(approve){
@@ -2937,9 +2938,10 @@ async function submitClassApplication(parentTicker,classType,votesPerShare,share
 // ── Chairman: approve / reject class application ─────────
 async function reviewClassApp(id,approve){
   const app=DB.classApps.find(a=>a.id===id);if(!app)return;
+  const isConversion=app.reason&&app.reason.startsWith('[CONVERT]');
+  if(approve&&!isConversion&&DB.companies.find(c=>c.ticker===app.proposed_ticker))return toast('Ticker "'+app.proposed_ticker+'" is already listed — reject this application instead.');
   await sb.patch('jex_class_applications','id=eq.'+id,{status:approve?'approved':'rejected'});
   app.status=approve?'approved':'rejected';
-  const isConversion=app.reason&&app.reason.startsWith('[CONVERT]');
   if(approve){
     if(isConversion){
       // Convert existing stock — just add metadata, don't create new company entry
