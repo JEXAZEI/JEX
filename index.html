@@ -2248,6 +2248,7 @@ function getOrderBook(ticker){
 async function placeLimitOrder(ticker,side,qty,limitPrice){
   if(!requireOpen(ticker))return;
   const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(side==='buy'&&!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
   qty=parseInt(qty);limitPrice=parseFloat(limitPrice);
   if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(isNaN(limitPrice)||limitPrice<=0)return toast('Enter a valid limit price');
@@ -2474,6 +2475,7 @@ async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
 
 async function placeBuy(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
   if(!checkRateLimit(u.id))return;
   if(u.role==='company'&&co.owner_id===u.id)return toast("You can't buy your own company's stock — use Buyback instead.");
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
@@ -2510,6 +2512,7 @@ async function placeSell(ticker,qty){
 }
 async function placeShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const price=co.price,coll=Math.round(price*qty*1.5*100)/100;
   if(u.cash<coll)return toast('Need '+fmt(coll)+' collateral');
