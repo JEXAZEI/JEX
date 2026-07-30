@@ -5598,7 +5598,8 @@ function renderTreasurerCashFlow(){
   const totalCapitalRaised=DB.trades.filter(t=>t.seller_id==='exchange').reduce((s,t)=>s+(t.price*t.qty),0);
   const totalDividendsPaid=DB.dividends.reduce((s,d)=>s+d.total,0);
   const totalBuybacks=DB.buybacks.reduce((s,b)=>s+b.total,0);
-  const totalCompanyCash=DB.companies.filter(c=>c.status==='listed').reduce((s,c)=>{const owner=getUser(c.owner_id);return s+(owner?owner.cash:0);},0);
+  const uniqueOwnerIds=[...new Set(DB.companies.filter(c=>c.status==='listed').map(c=>c.owner_id))];
+  const totalCompanyCash=uniqueOwnerIds.reduce((s,oid)=>{const owner=getUser(oid);return s+(owner?owner.cash:0);},0);
   const totalStudentCash=DB.users.filter(u=>u.role==='student'&&u.status==='approved').reduce((s,u)=>s+u.cash,0);
   const totalMarketCap=DB.companies.filter(c=>c.status==='listed').reduce((s,c)=>s+c.price*c.shares,0);
   return`<div class="grid3" style="margin-bottom:14px">
@@ -5661,7 +5662,8 @@ function renderTreasurerPriceLog(){
 function renderTreasurerBudgetWarnings(){
   const threshold=DB.session.budget_warning_threshold||500;
   const divThreshold=DB.session.dividend_approval_threshold||1000;
-  const listed=DB.companies.filter(c=>c.status==='listed');
+  const seenOwners=new Set();
+  const listed=DB.companies.filter(c=>c.status==='listed'&&!seenOwners.has(c.owner_id)&&seenOwners.add(c.owner_id));
   const warnings=listed.map(co=>{const owner=getUser(co.owner_id);return{co,owner,cash:owner?owner.cash:0};}).filter(w=>w.cash<threshold).sort((a,b)=>a.cash-b.cash);
   const u=cu();
     const canEditThresholds=isChairman(u);
