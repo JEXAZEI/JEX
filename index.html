@@ -1620,8 +1620,9 @@ async function adjustStockPrice(ticker,pct,reason){
   const rec={id:uid(),ticker,company_name:co.name,pct,old_price:oldPrice,new_price:newPrice,reason:(reason||'').trim(),applied_by:u.name,ts:ts()};
   try{await sb.post('jex_price_adjustments',rec);if(!DB.priceAdjustments)DB.priceAdjustments=[];DB.priceAdjustments.unshift(rec);}catch(e){}
   const msg=(pct>=0?'📈':'📉')+' '+co.name+' ('+ticker+') price '+(pct>=0?'boosted by +':'cut by ')+Math.abs(pct)+'%'+(reason?' — '+reason.trim():'');
+  const holderIds=DB.users.filter(hu=>hu.role==='student'&&(holdings(hu)[ticker]||0)>0).map(hu=>hu.id);
   await pushNotificationToHolders(ticker,'price_adj',msg);
-  await pushNotificationToAll('price_adj',msg);
+  await pushNotificationToAll('price_adj',msg,holderIds);
   await logActivity('price_adj',msg,{ticker,userId:u.id,userName:u.name,amount:newPrice-oldPrice});
   toast(ticker+' '+(pct>=0?'boosted':'cut')+' by '+Math.abs(pct)+'% → '+fmt(newPrice));render();
 }
@@ -2093,8 +2094,8 @@ async function pushNotificationToHolders(ticker,type,message){
   const holders=DB.users.filter(u=>u.role==='student'&&(holdings(u)[ticker]||0)>0);
   for(const u of holders) await pushNotification(u.id,type,message,ticker);
 }
-async function pushNotificationToAll(type,message){
-  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+async function pushNotificationToAll(type,message,excludeIds=[]){
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved'&&!excludeIds.includes(u.id));
   for(const u of students) await pushNotification(u.id,type,message);
 }
 async function markAllRead(){
@@ -2214,8 +2215,9 @@ async function haltStock(ticker,reason,systemTriggered=false){
   DB.halts.push(rec);
   await logActivity('halt',ticker+' trading halted — '+reason.trim(),{ticker,userId:u?.id,userName:systemTriggered?'System (Circuit Breaker)':u.name});
   // Notify all students who hold this stock
+  const haltedHolderIds=DB.users.filter(hu=>hu.role==='student'&&(holdings(hu)[ticker]||0)>0).map(hu=>hu.id);
   await pushNotificationToHolders(ticker,'halt','⚠️ Trading halted on '+ticker+': '+reason.trim());
-  await pushNotificationToAll('halt','⚠️ '+ticker+' trading has been halted: '+reason.trim());
+  await pushNotificationToAll('halt','⚠️ '+ticker+' trading has been halted: '+reason.trim(),haltedHolderIds);
   toast(ticker+' halted');render();
 }
 async function resumeStock(ticker,systemTriggered=false){
