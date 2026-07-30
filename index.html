@@ -550,7 +550,7 @@ let charts={},sessionTimer=null;
 async function loadAll(){
   // ── Phase 1: critical data needed to render login ──────
   const [users,session,companies,announcements,halts]=await Promise.all([
-    sb.get('jex_users','order=created_at.asc&select=id,name,email,password,role,status,cash,holdings,shorts,watchlist,description,app_status,sec_q,sec_a,created_at,classroom_id,email_notifications,notification_email'),
+    sb.get('jex_users','order=created_at.asc&select=id,name,username,email,password,role,status,cash,holdings,shorts,watchlist,description,app_status,sec_q,sec_a,created_at,classroom_id,email_notifications,notification_email'),
     sb.get('jex_session','id=eq.1'),
     sb.get('jex_companies','order=created_at.asc'),
     sb.get('jex_announcements','order=created_at.desc'),
@@ -613,6 +613,8 @@ const fmt=n=>'$'+Number(n).toFixed(2);
 const fmtChg=n=>(n>=0?'+':'')+Number(n).toFixed(2)+'%';
 const norm=s=>(s||'').trim().toLowerCase();
 const validEmail=e=>e&&e.includes('@')&&e.includes('.');
+const normalizeUsername=v=>{v=(v||'').trim();if(v.startsWith('@'))v=v.slice(1);return v;};
+const validUsername=v=>/^[a-zA-Z0-9_.]{3,20}$/.test(v);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cu=()=>DB.users.find(u=>u.id===UI.userId)||null;
 const getUser=id=>DB.users.find(u=>u.id===id);
@@ -1341,20 +1343,25 @@ document.addEventListener('keydown',function(e){
 const SECURITY_QUESTIONS=['What is the name of your first pet?','What city were you born in?','What is your mother\'s maiden name?','What was the name of your first school?','What is your favourite book?','What was the make of your first car?','What is your oldest sibling\'s middle name?','What street did you grow up on?'];
 function secQSelect(prefix){return `<select id="${prefix}-secq"><option value="">— Select a question —</option>${SECURITY_QUESTIONS.map(q=>`<option value="${q}">${q}</option>`).join('')}</select>`;}
 
-async function registerStudent(name,email,pw,secQ,secA){
+async function registerStudent(name,username,email,pw,secQ,secA){
   if(!name||name.trim().length<2)return toast('Enter a valid name');
+  const un=normalizeUsername(username);
+  if(!validUsername(un))return toast('Username must be 3-20 characters: letters, numbers, underscore, or period');
   if(!validEmail(email))return toast('Enter a valid email');
   if(!pw||pw.length<4)return toast('Password must be at least 4 characters');
   if(!secQ)return toast('Select a security question');
   if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
-  const pwHash=await hashPw(pw);const rec={id:uid(),name:n,email:norm(email),password:pwHash,role:'student',sec_q:secQ,sec_a:norm(secA),ts:ts()};
+  if(DB.users.find(u=>norm(u.username)===norm(un))||DB.pending.find(r=>norm(r.username)===norm(un)))return toast('Username already taken');
+  const pwHash=await hashPw(pw);const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHash,role:'student',sec_q:secQ,sec_a:norm(secA),ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';render();
 }
-async function registerCompany(name,email,pw,desc,secQ,secA){
+async function registerCompany(name,username,email,pw,desc,secQ,secA){
   if(!name||name.trim().length<2)return toast('Enter a valid company name');
+  const un=normalizeUsername(username);
+  if(!validUsername(un))return toast('Username must be 3-20 characters: letters, numbers, underscore, or period');
   if(!validEmail(email))return toast('Enter a valid email');
   if(!pw||pw.length<4)return toast('Password must be at least 4 characters');
   if(!desc||desc.trim().length<5)return toast('Please add a description');
@@ -1362,7 +1369,8 @@ async function registerCompany(name,email,pw,desc,secQ,secA){
   if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
-  const pwHashCo=await hashPw(pw);const rec={id:uid(),name:n,email:norm(email),password:pwHashCo,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),ts:ts()};
+  if(DB.users.find(u=>norm(u.username)===norm(un))||DB.pending.find(r=>norm(r.username)===norm(un)))return toast('Username already taken');
+  const pwHashCo=await hashPw(pw);const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHashCo,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';render();
 }
@@ -1370,7 +1378,7 @@ async function approveReg(id,startCash){
   const r=DB.pending.find(x=>x.id===id);if(!r)return;
   const classroomId=document.getElementById('classroom-'+id)?.value||null;
   startCash=parseFloat(startCash)||DB.session.starting_cash||10000;
-  const u={id:r.id,name:r.name,email:r.email,password:r.password,role:r.role,status:'approved',
+  const u={id:r.id,name:r.name,username:r.username||null,email:r.email,password:r.password,role:r.role,status:'approved',
     cash:startCash,sec_q:r.sec_q,sec_a:r.sec_a,
     description:r.description||null,app_status:r.role==='company'?'none':null,
     holdings:{},shorts:{},watchlist:[],classroom_id:classroomId||null,
@@ -1389,7 +1397,8 @@ async function loginByForm(){
   UI.loginUsername=username;
   if(!username||!pw){UI.loginError='Enter your username and password';return render();}
   const pool=UI.loginTab==='admin'?DB.users.filter(isAdmin):DB.users.filter(u=>u.role===UI.loginTab&&u.status==='approved');
-  const u=pool.find(u=>u.email&&norm(u.email)===norm(username));
+  const idInput=norm(normalizeUsername(username));
+  const u=pool.find(u=>(u.email&&norm(u.email)===idInput)||(u.username&&norm(u.username)===idInput));
   if(!u){UI.loginError='Invalid username or password';return render();}
   const stored=await fetchUserSecret(u.id,'password');
   const candidate=isHashed(stored)?await hashPw(pw):pw; // support legacy plain-text during migration
@@ -3310,8 +3319,8 @@ function renderLogin(){
   if(UI.loginView==='forgot-email'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 1 of 3</div><div class="frow"><label class="flabel">Your email address</label><input type="email" id="forgot-email" placeholder="you@school.edu" onkeydown="if(event.key==='Enter')forgotStep1(get('forgot-email')?.value)"></div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep1(get('forgot-email')?.value)">Continue</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${esc(u?.name)}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="forgot-pw1" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="forgot-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw2')" tabindex="-1">👁</button></div></div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
-  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div>
-<div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in. Your classroom will be assigned by your teacher after approval.</div><div class="frow" style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" id="reg-agree-tos" aria-label="I agree to the Terms of Service and Bylaws" style="width:auto;margin-top:2px"><span style="font-size:12px;color:var(--text2)">I agree to the <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a> and <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a>.</span></div><div class="login-actions"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
+  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-username" placeholder="e.g. arielk" autocomplete="username"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div>
+<div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-co-username" placeholder="e.g. acmecorp" autocomplete="username"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in. Your classroom will be assigned by your teacher after approval.</div><div class="frow" style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" id="reg-agree-tos" aria-label="I agree to the Terms of Service and Bylaws" style="width:auto;margin-top:2px"><span style="font-size:12px;color:var(--text2)">I agree to the <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a> and <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a>.</span></div><div class="login-actions"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(!['admin','company','student'].includes(UI.loginTab))UI.loginTab='student';
   const tabCounts={admin:admins.length,company:companies.length,student:students.length};
   return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-tagline">JTED Stock Exchange</div>
@@ -3321,7 +3330,7 @@ function renderLogin(){
     <button class="reg-tab ${UI.loginTab==='student'?'active':''}" onclick="switchLoginTab('student')">Students${tabCounts.student?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.student+'</span>':''}</button>
   </div>
   <div class="login-heading">Log in</div>
-  <div class="frow"><label class="flabel">Username</label><input type="text" id="login-username" placeholder="you@school.edu" value="${esc(UI.loginUsername)}" autocomplete="username" onkeydown="if(event.key==='Enter')loginByForm()"></div>
+  <div class="frow"><label class="flabel">Username or Email</label><input type="text" id="login-username" placeholder="username or you@school.edu" value="${esc(UI.loginUsername)}" autocomplete="username" onkeydown="if(event.key==='Enter')loginByForm()"></div>
   <div class="frow"><label class="flabel">Password</label><div class="pw-wrap"><input type="password" id="login-password" placeholder="Enter password" autocomplete="current-password" onkeydown="if(event.key==='Enter')loginByForm()"><button type="button" class="pw-eye" onclick="togglePw('login-password')" tabindex="-1">👁</button></div></div>
   ${UI.loginError?`<div class="login-error">${esc(UI.loginError)}</div>`:''}
   <div class="login-actions"><button class="btn btn-primary" onclick="loginByForm()">Log in</button></div>
@@ -3332,8 +3341,8 @@ function switchRegTab(type){document.querySelectorAll('.reg-tab').forEach(t=>t.c
 function doRegister(){
   if(!get('reg-agree-tos')?.checked)return toast('You must agree to the Terms of Service to register');
   const active=document.querySelector('.reg-tab.active');const type=active?.id==='reg-tab-company'?'company':'student';
-  if(type==='student')registerStudent(get('reg-name')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value);
-  else registerCompany(get('reg-co-name')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value);
+  if(type==='student')registerStudent(get('reg-name')?.value,get('reg-username')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value);
+  else registerCompany(get('reg-co-name')?.value,get('reg-co-username')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value);
 }
 
 // ═══════════════════════════════════════════════
