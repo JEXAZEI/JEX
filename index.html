@@ -1903,6 +1903,15 @@ function checkShortSqueezes(){
     if(shortPct<0.15)return; // not enough short interest
     const priceChgPct=priceChg(co)/100;
     if(priceChgPct>0.1){ // price up 10%+ with high short interest
+      // NOTE: this dedup key is per-browser (localStorage), not shared across
+      // clients, so several simultaneously-open sessions can each independently
+      // send one copy of this alert. Low severity (a notification-only duplicate,
+      // no money/shares involved) — left as-is rather than shipping a fix that
+      // depends on an unverified new production column, given today's incidents
+      // already came from that exact mistake. A real fix needs a dedicated
+      // per-company column (e.g. squeeze_alert_date) claimed the same atomic way
+      // as the stop-loss/price-alert/limit-order fixes, added deliberately with
+      // the production schema verified first.
       const key='squeeze_'+co.ticker+'_'+new Date().toDateString();
       if(localStorage.getItem(key))return; // already notified today
       localStorage.setItem(key,'1');
@@ -2026,6 +2035,13 @@ async function checkCircuitBreakers(){
     if(!openPrice)continue;
     const pctMove=Math.abs((co.price-openPrice)/openPrice*100);
     if(pctMove>=threshold){
+      // Every logged-in client runs this same check independently; a stale local
+      // isHalted() alone isn't enough to stop two clients from both halting the
+      // same ticker at once (harmless functionally — resumeStock deletes by
+      // ticker, not id — but it does double the halt notification/activity log).
+      // Refetch fresh right before acting to close most of that window.
+      const freshHalts=await sb.get('jex_halts','ticker=eq.'+co.ticker);
+      if(freshHalts.length){DB.halts.push(...freshHalts.filter(h=>!DB.halts.some(x=>x.ticker===h.ticker)));continue;}
       const reason='Circuit breaker: '+co.ticker+' moved '+Math.round(pctMove)+'% from session open (threshold: '+threshold+'%)';
       await haltStock(co.ticker,reason,true);
       toast('⚡ Circuit breaker triggered on '+co.ticker+' — trading halted');
