@@ -1759,7 +1759,8 @@ async function flagAccount(targetId,targetName,targetType,reason){
 async function resolveFlag(flagId,action,note){
   const f=DB.flags.find(x=>x.id===flagId);if(!f)return;
   const u=cu();
-  await sb.patch('jex_flags','id=eq.'+flagId,{status:action,resolution_note:(note||'').trim(),resolved_by:u.name});
+  const claimed=await sb.patch('jex_flags','id=eq.'+flagId+'&status=eq.open',{status:action,resolution_note:(note||'').trim(),resolved_by:u.name});
+  if(!claimed.length)return toast('This flag was already resolved');
   f.status=action;f.resolution_note=(note||'').trim();f.resolved_by=u.name;
   await logActivity('flag_resolve',u.name+' '+(action==='resolved'?'resolved':'dismissed')+' flag on '+f.target_name+(note?' — '+note:''),{userId:u.id,userName:u.name});
   toast('Flag '+(action==='resolved'?'resolved':'dismissed'));render();
