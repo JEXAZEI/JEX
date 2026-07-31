@@ -923,7 +923,11 @@ async function saveDivThresholdFrom(id='div-threshold'){
 async function reviewDivApproval(id,approve){
   const da=DB.divApprovals.find(x=>x.id===id);if(!da)return;
   const u=cu();
-  await sb.patch('jex_dividend_approvals','id=eq.'+id,{status:approve?'approved':'rejected',reviewed_by:u.name});
+  // Atomically claim this approval before executing the payout — without this, a
+  // double-click or two admins reviewing the same request at once could both pass
+  // the (missing) status check and pay the dividend twice.
+  const claimed=await sb.patch('jex_dividend_approvals','id=eq.'+id+'&status=eq.pending',{status:approve?'approved':'rejected',reviewed_by:u.name});
+  if(!claimed.length)return toast('This request was already reviewed');
   da.status=approve?'approved':'rejected';da.approved_by=u.name;
   if(approve){
     // Execute the dividend now, paid from the company's own cash regardless of who (Treasurer) is approving it
