@@ -2655,6 +2655,21 @@ async function coverShort(ticker,qty){
   toast('Covered '+qty+' × '+ticker+' | P&L: '+(pnl>=0?'+':'')+fmt(pnl));if(UI.companyPage)render();else openPanel(ticker);
 }
 async function toggleWatch(ticker){const u=cu();if(!u)return;const wl=[...watchlist(u)];const i=wl.indexOf(ticker);if(i>=0){wl.splice(i,1);toast(ticker+' removed from watchlist');}else{wl.push(ticker);toast(ticker+' added to watchlist');}await updateUser(u.id,{watchlist:wl});render();}
+async function postFinancials(ticker,period,revenue,profit,summary){
+  const co=getCo(ticker);if(!co)return;
+  const u=cu();if(!u||u.id!==co.owner_id)return toast('Only the company owner can post financials');
+  if(!period||!period.trim())return toast('Enter a period, e.g. Q1 2026');
+  revenue=parseFloat(revenue);profit=parseFloat(profit);
+  if(isNaN(revenue)||revenue<0)return toast('Enter a valid revenue amount');
+  if(isNaN(profit))return toast('Enter a valid profit amount (can be negative for a loss)');
+  if(!summary||summary.trim().length<10)return toast('Add a short summary (at least 10 characters)');
+  const entry={id:uid(),period:period.trim(),revenue,profit,summary:summary.trim(),ts:ts()};
+  const newFinancials=[entry,...(co.financials||[])];
+  await updateCo(ticker,{financials:newFinancials});
+  await pushNotificationToHolders(ticker,'financials','📊 '+co.name+' ('+ticker+') posted financial results for '+entry.period+': Revenue '+fmt(revenue)+', Profit '+fmt(profit));
+  await logActivity('financials',co.name+' posted financials for '+entry.period+' — Rev '+fmt(revenue)+', Profit '+fmt(profit),{ticker,amount:revenue});
+  toast('Financial report posted');render();
+}
 async function doBuyback(ticker,qty){
   if(!requireOpen(ticker))return;const owner=cu(),co=getCo(ticker);if(!owner||!co)return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter valid quantity');
@@ -3554,6 +3569,7 @@ function renderCompanyPage(parentTicker){
     <button class="tab ${tab==='news'?'active':''}" onclick="UI.companyPageTab='news';render()">News ${companyNews.length?'<span class="badge b-amber" style="margin-left:4px">'+companyNews.length+'</span>':''}</button>
     <button class="tab ${tab==='votes'?'active':''}" onclick="UI.companyPageTab='votes';render()">Votes ${companyVotes.filter(v=>v.status==='open').length?'<span class="badge b-green" style="margin-left:4px">'+companyVotes.filter(v=>v.status==='open').length+'</span>':''}</button>
     <button class="tab ${tab==='shareholders'?'active':''}" onclick="UI.companyPageTab='shareholders';render()">Shareholders</button>
+    <button class="tab ${tab==='financials'?'active':''}" onclick="UI.companyPageTab='financials';render()">Financials ${co.financials&&co.financials.length?'<span class="badge b-gray" style="margin-left:4px">'+co.financials.length+'</span>':''}</button>
     <button class="tab ${tab==='dividends'?'active':''}" onclick="UI.companyPageTab='dividends';render()">Dividends</button>
     ${canTrade?`<button class="tab ${tab==='alerts'?'active':''}" onclick="UI.companyPageTab='alerts';render()">🎯 Alerts ${DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&!a.triggered).length?'<span class="badge b-blue" style="margin-left:4px">'+DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&!a.triggered).length+'</span>':''}</button>`:''}
     <button class="tab ${tab==='trades'?'active':''}" onclick="UI.companyPageTab='trades';render()">Trade history</button>
@@ -3585,6 +3601,12 @@ function renderCompanyPage(parentTicker){
       +'<div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">'+(owner?fmt(owner.cash):'—')+'</div><div style="font-size:10px;color:var(--text2);margin-top:2px">After dividends & buybacks</div></div>'
       +'<div class="mcard"><div class="mlabel">Available shares</div><div class="mval">'+allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares_avail:0);},0).toLocaleString()+'</div></div>'
       +'</div>'
+
+    // Latest financials, if the company has posted any
+    if(co.financials&&co.financials.length){
+      const lf=co.financials[0];
+      html+='<div class="card" style="cursor:pointer" onclick="UI.companyPageTab=&quot;financials&quot;;render()"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div class="section-title" style="margin-bottom:0">Latest financials — '+esc(lf.period)+'</div><span style="font-size:12px;color:var(--blue)">View all →</span></div><div class="grid3"><div class="mcard"><div class="mlabel">Revenue</div><div class="mval" style="font-family:var(--mono)">'+fmt(lf.revenue)+'</div></div><div class="mcard"><div class="mlabel">Profit</div><div class="mval" style="font-family:var(--mono);color:'+(lf.profit>=0?'var(--green)':'var(--red)')+'">'+fmt(lf.profit)+'</div></div><div class="mcard"><div class="mlabel">Margin</div><div class="mval" style="font-family:var(--mono)">'+(lf.revenue>0?Math.round(lf.profit/lf.revenue*100)+'%':'—')+'</div></div></div></div>';
+    }
 
     // All share classes
     html+='<div class="card"><div class="section-title">Share classes</div>';
@@ -3819,6 +3841,10 @@ function renderCompanyPage(parentTicker){
         +companyDivs.map(d=>'<tr><td style="color:var(--text2)">'+d.ts+'</td><td style="font-family:var(--mono)">'+fmt(d.per_share)+'</td><td style="color:var(--green);font-family:var(--mono)">'+fmt(d.total)+'</td><td>'+(d.payouts||[]).length+'</td><td style="font-size:12px;color:var(--text2)">'+d.note+'</td></tr>').join('')
         +'</tbody></table></div>';
     }
+  }
+
+  else if(tab==='financials'){
+    html+=renderFinancialsHistory(co.financials);
   }
 
   else if(tab==='trades'){
@@ -4224,6 +4250,7 @@ function renderMyStock(){
     <button class="tab ${UI.companyTab==='votes'?'active':''}" onclick="UI.companyTab='votes';render()">Votes ${myVotes.length?'<span class="badge b-purple" style="margin-left:4px">'+myVotes.length+'</span>':''}</button>
     <button class="tab ${UI.companyTab==='news'?'active':''}" onclick="UI.companyTab='news';render()">News ${myNews.length?'<span class="badge b-amber" style="margin-left:4px">'+myNews.length+'</span>':''}</button>
 
+    <button class="tab ${UI.companyTab==='financials'?'active':''}" onclick="UI.companyTab='financials';render()">Financials</button>
     <button class="tab ${UI.companyTab==='dividends'?'active':''}" onclick="UI.companyTab='dividends';render()">Dividends</button>
     <button class="tab ${UI.companyTab==='buyback'?'active':''}" onclick="UI.companyTab='buyback';render()">Buyback</button>
     <button class="tab ${UI.companyTab==='dilution'?'active':''}" onclick="UI.companyTab='dilution';render()">Dilution ${DB.dilApps.filter(d=>getCompanyTickers(co.ticker).includes(d.ticker)&&d.status==='pending').length?'<span class="badge b-amber" style="margin-left:4px">'+DB.dilApps.filter(d=>getCompanyTickers(co.ticker).includes(d.ticker)&&d.status==='pending').length+'</span>':''}</button>
@@ -4233,7 +4260,7 @@ function renderMyStock(){
   :UI.companyTab==='classes'?renderClassesTab(co)
   :UI.companyTab==='votes'?renderCompanyVotesTab(co)
   :UI.companyTab==='news'?renderCompanyNewsTab(co,myNews)
-
+  :UI.companyTab==='financials'?renderFinancialsMgmtTab(co,co.financials)
   :UI.companyTab==='dividends'?renderDivTab(co,myDivs)
   :UI.companyTab==='buyback'?renderBBTab(co,myBBs)
   :renderDilTab(co)}`;
@@ -4645,6 +4672,13 @@ function updateDivPrev(ticker){const co=getCo(ticker);if(!co)return;const ps=par
   const sh=freshSh;
   const total=sh.reduce((s,u)=>s+allT.reduce((ts,t)=>ts+Math.round(((u.holdings&&u.holdings[t])||0)*ps*100)/100,0),0);
   const owner=cu(),ok=owner.cash>=total;p.innerHTML=`<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px"><div><div style="color:var(--text2);margin-bottom:2px">Shareholders</div><div style="font-weight:500">${sh.length}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Total</div><div style="color:var(--green);font-family:var(--mono)">${fmt(total)}</div></div><div><div style="color:var(--text2);margin-bottom:2px">After</div><div style="font-family:var(--mono);color:${ok?'var(--text)':'var(--red)'}">${fmt(owner.cash-total)}</div></div></div>${!ok?`<div style="color:var(--red);font-weight:500">Insufficient funds</div>`:''}</div>`;}
+function renderFinancialsHistory(financials){
+  if(!financials||!financials.length)return'<div class="card"><div class="empty">No financial reports posted yet.</div></div>';
+  return financials.map(f=>`<div class="card" style="margin-bottom:10px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div class="section-title" style="margin-bottom:0">${esc(f.period)}</div><span style="font-size:11px;color:var(--text2)">${f.ts}</span></div><div class="grid3" style="margin-bottom:8px"><div class="mcard"><div class="mlabel">Revenue</div><div class="mval" style="font-family:var(--mono)">${fmt(f.revenue)}</div></div><div class="mcard"><div class="mlabel">Profit</div><div class="mval" style="font-family:var(--mono);color:${f.profit>=0?'var(--green)':'var(--red)'}">${fmt(f.profit)}</div></div><div class="mcard"><div class="mlabel">Margin</div><div class="mval" style="font-family:var(--mono)">${f.revenue>0?Math.round(f.profit/f.revenue*100)+'%':'—'}</div></div></div><div style="font-size:13px;color:var(--text2)">${esc(f.summary)}</div></div>`).join('');
+}
+function renderFinancialsMgmtTab(co,myFinancials){
+  return`<div class="card"><div class="section-title">Post financial results</div><div class="ibox ibox-blue" style="margin-bottom:12px">Give investors something to evaluate before an IPO, dilution round, or just to build confidence in the stock. Posted reports notify all current shareholders.</div><div class="frow"><label class="flabel">Period</label><input type="text" id="fin-period" placeholder="e.g. Q1 2026"></div><div class="row"><div class="frow" style="flex:1"><label class="flabel">Revenue ($)</label><input type="number" id="fin-revenue" placeholder="10000" min="0" step="0.01"></div><div class="frow" style="flex:1"><label class="flabel">Profit ($, negative for a loss)</label><input type="number" id="fin-profit" placeholder="2500" step="0.01"></div></div><div class="frow"><label class="flabel">Summary for investors</label><textarea id="fin-summary" rows="3" placeholder="e.g. Revenue grew 20% quarter over quarter driven by..."></textarea></div><button class="btn btn-primary" onclick="postFinancials('${co.ticker}',get('fin-period')?.value,get('fin-revenue')?.value,get('fin-profit')?.value,get('fin-summary')?.value)">Post report</button></div><div class="section-title" style="margin:16px 0 8px">History</div>${renderFinancialsHistory(myFinancials)}`;
+}
 function renderBBTab(co,myBBs){
   const sold=co.shares-co.shares_avail,owner=cu();
   return`<div class="card"><div class="section-title">Share buyback</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${sold.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div></div>${sold>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Shares to buy back</label><input type="number" id="bb-qty" placeholder="50" min="1" max="${sold}" oninput="updateBBPrev('${co.ticker}')"></div><div style="padding-bottom:12px"><button class="btn btn-primary" onclick="doBuyback('${co.ticker}',get('bb-qty')?.value)">Buy back</button></div></div><div id="bb-prev"></div>`:'<div class="empty">No shares in circulation.</div>'}</div>${myBBs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${myBBs.map(b=>`<tr><td style="color:var(--text2)">${b.ts}</td><td>${b.qty}</td><td style="font-family:var(--mono)">${fmt(b.price)}</td><td style="font-weight:500;font-family:var(--mono)">${fmt(b.total)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
