@@ -941,6 +941,7 @@ async function reviewDivApproval(id,approve){
   render();
 }
 async function togglePracticeMode(){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const now=!DB.session.practice_mode;
   if(now){
     if(!confirm('Start practice mode? An automatic snapshot will be saved so the exchange can be restored exactly to this state when practice mode ends.'))return;
@@ -980,6 +981,7 @@ async function saveCBPct(){
 // SNAPSHOT / RESTORE
 // ═══════════════════════════════════════════════
 async function saveSnapshot(label){
+  if(!isAdmin(cu()))return toast('Admin access required');
   if(!label||label.trim().length<2)return toast('Enter a snapshot name');
   await doSaveSnapshot(label.trim());
   toast('✓ Snapshot saved: '+label.trim());render();
@@ -1003,10 +1005,12 @@ async function doSaveSnapshot(label){
   return snap.id;
 }
 async function restoreSnapshot(activityId){
+  if(!isAdmin(cu()))return toast('Admin access required');
   if(!confirm('Restore this snapshot? All current holdings, prices, and cash will be overwritten.'))return;
   await doRestoreSnapshot(activityId);
 }
 async function doRestoreSnapshot(activityId){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const rec=DB.activity.find(a=>a.id===activityId);if(!rec)return toast('Snapshot not found');
   let snap;
   try{snap=JSON.parse(rec.description);}catch{return toast('Snapshot data is corrupted');}
@@ -1088,6 +1092,7 @@ async function generateSessionRecap(u){
 }
 // ── Classroom management ──────────────────────────────
 async function createClassroom(){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const name=(document.getElementById('cls-name')?.value||'').trim();
   if(!name)return toast('Enter a classroom name');
   const rec={id:uid(),name,ts:ts()};
@@ -1096,6 +1101,7 @@ async function createClassroom(){
   toast('Classroom "'+name+'" created');render();
 }
 async function deleteClassroom(id){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const affected=DB.users.filter(u=>u.classroom_id===id);
   if(!confirm('Delete this classroom?'+(affected.length?' '+affected.length+' assigned user(s) will become unassigned.':'')))return;
   await sb.del('jex_classrooms','id=eq.'+id);
@@ -1110,6 +1116,7 @@ function getClassroomName(id){
   return c?c.name:null;
 }
 async function reassignClassroom(){
+  if(!isAdmin(cu()))return toast('Admin access required');
   const rawId=get('reassign-uid')?.value;
   const cid=get('reassign-cid-select')?.value||null;
   if(!rawId)return toast('Select a user or company');
@@ -1465,6 +1472,7 @@ async function forgotStep3(pw,conf){const u=getUser(UI.forgotUserId);if(!u)retur
 async function postNews(ticker,headline,body){
   if(!headline||headline.trim().length<3)return toast('Enter a headline');
   const co=getCo(ticker);if(!co)return;
+  if(!canManageCompany(co))return toast('Only this company\'s owner or founders can post news for it');
   const rec={id:uid(),ticker,company_name:co.name,headline:headline.trim(),body:(body||'').trim(),author_id:UI.userId,ts:ts()};
   await sb.post('jex_news',rec);
   DB.news.unshift(rec);
@@ -1472,6 +1480,9 @@ async function postNews(ticker,headline,body){
   toast('News posted');UI.companyTab='news';render();
 }
 async function deleteNews(id){
+  const n0=DB.news.find(x=>x.id===id);if(!n0)return;
+  const targetCo=getCo(n0.ticker);
+  if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can delete its news');
   if(!confirm('Delete this news post?'))return;
   await sb.del('jex_news','id=eq.'+id);
   DB.news=DB.news.filter(n=>n.id!==id);
@@ -1544,8 +1555,9 @@ function doRequestFounderAlloc(){
 }
 // (merged into sendFounderInvite)
 async function respondToInvite(memberId,accept){
-  if(!confirm(accept?'Accept this founder invitation?':'Decline this founder invitation?'))return;
   const m=DB.companyMembers.find(x=>x.id===memberId);if(!m)return;
+  if(m.student_id!==cu()?.id)return toast('This invitation is not addressed to you');
+  if(!confirm(accept?'Accept this founder invitation?':'Decline this founder invitation?'))return;
 
   // Update jex_company_members status
   await sb.patch('jex_company_members','id=eq.'+memberId,{status:accept?'accepted':'declined'});
@@ -1580,6 +1592,7 @@ async function requestFounderAllocation(ticker,studentId,shares,reason){
   if(!ticker)return toast('Select a share class');
   if(!studentId)return toast('Select a founder');
   const stock=getCo(ticker);if(!stock)return toast('Share class "'+ticker+'" not found — is the company listed?');
+  if(!canManageCompany(stock))return toast('Only this company\'s owner or founders can request an allocation for it');
   const student=getUser(studentId);if(!student)return toast('Student not found');
   shares=parseInt(shares);
   if(isNaN(shares)||shares<=0)return toast('Enter a valid share count');
@@ -1698,8 +1711,10 @@ function canManageCompany(co){
 // ═══════════════════════════════════════════════
 
 async function removeFounder(memberId,name){
-  if(!confirm('Remove '+name+' as a founder? They will lose access to manage this company.'))return;
   const m=DB.companyMembers.find(x=>x.id===memberId);if(!m)return;
+  const targetCo=DB.companies.find(c=>c.owner_id===m.company_user_id);
+  if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can remove a founder');
+  if(!confirm('Remove '+name+' as a founder? They will lose access to manage this company.'))return;
   await sb.patch('jex_company_members','id=eq.'+memberId,{status:'removed'});
   m.status='removed';
   const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
@@ -1714,6 +1729,7 @@ async function sendFounderInvite(ownerId,studentId){
   // ownerId = co.owner_id (the company user's id)
   const co=DB.companies.find(c=>c.owner_id===ownerId);
   if(!co)return toast('Company not found');
+  if(!canManageCompany(co))return toast('Only this company\'s owner or founders can invite a founder');
   const student=getUser(studentId);if(!student)return toast('Student not found');
   const existing=DB.companyMembers.filter(m=>m.company_user_id===ownerId&&m.status!=='declined');
   if(existing.length>=3)return toast('Maximum 3 founders reached');
@@ -1958,6 +1974,8 @@ function doPlaceStopLoss(ticker){
   placeStopLoss(ticker,document.getElementById('sl-price-'+ticker)?.value);
 }
 async function cancelStopLoss(id){
+  const s0=DB.stopLossOrders.find(x=>x.id===id);
+  if(!s0||s0.user_id!==cu()?.id)return toast('You can only cancel your own stop-loss orders');
   await sb.patch('jex_stop_loss','id=eq.'+id,{status:'cancelled'});
   const s=DB.stopLossOrders.find(x=>x.id===id);if(s)s.status='cancelled';
   toast('Stop-loss cancelled');render();
@@ -2015,6 +2033,8 @@ async function addPriceAlert(ticker,targetPrice,direction){
   toast('Alert set: '+ticker+' '+direction+' '+fmt(targetPrice));render();
 }
 async function deletePriceAlert(id){
+  const a0=DB.priceAlerts.find(x=>x.id===id);
+  if(!a0||a0.user_id!==cu()?.id)return toast('You can only remove your own price alerts');
   await sb.del('jex_price_alerts','id=eq.'+id);
   DB.priceAlerts=DB.priceAlerts.filter(a=>a.id!==id);
   toast('Alert removed');render();
@@ -2775,6 +2795,7 @@ async function submitDilution(ticker,newShares,reason){
   if(!newShares||parseInt(newShares)<=0)return toast('Enter valid share count');
   if(!reason||reason.trim().length<10)return toast('Reason too short');
   const co=getCo(ticker);if(!co)return;
+  if(!canManageCompany(co))return toast('Only this company\'s owner or founders can request dilution for it');
   if(DB.dilApps.find(d=>d.ticker===ticker&&d.status==='pending'))return toast('Already pending');
   newShares=parseInt(newShares);
   const app={id:uid(),ticker,company_name:co.name,current_shares:co.shares,new_shares:newShares,pct_increase:Math.round((newShares/co.shares)*100),reason:reason.trim(),status:'pending',user_id:UI.userId,ts:ts()};
@@ -3051,6 +3072,7 @@ function getVotingPower(userId,parentTicker){
 async function submitClassApplication(parentTicker,classType,votesPerShare,shares,price,restricted,whitelistIds,reason){
   const co=getCo(parentTicker);if(!co)return;
   const u=cu();
+  if(!canManageCompany(co))return toast('Only this company\'s owner or founders can apply for a new share class');
   if(!classType)return toast('Select a class type');
   votesPerShare=parseInt(votesPerShare);
   if(isNaN(votesPerShare)||votesPerShare<0)return toast('Enter valid votes per share');
@@ -3118,6 +3140,7 @@ async function postVote(parentTicker,question,optA,optB,closesAt){
   if(!optA||!optB)return toast('Enter both options');
   const co=getCo(parentTicker);if(!co)return;
   const u=cu();
+  if(!canManageCompany(co))return toast('Only this company\'s owner or founders can post a vote');
   const v={id:uid(),parent_ticker:parentTicker,company_name:co.name,
     question:question.trim(),option_a:optA.trim(),option_b:optB.trim(),
     status:'open',created_by:u.id,ts:ts(),closes_at:closesAt||null};
@@ -3137,6 +3160,9 @@ async function castVote(voteId,choice){
   toast('Vote cast — '+power+' vote'+(power!==1?'s':'')+' counted');render();
 }
 async function closeVote(voteId){
+  const targetV=DB.votes.find(x=>x.id===voteId);if(!targetV)return;
+  const targetCo=getCo(targetV.parent_ticker);
+  if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can close its vote');
   if(!confirm('Close this vote?'))return;
   await sb.patch('jex_votes','id=eq.'+voteId,{status:'closed'});
   const v=DB.votes.find(x=>x.id===voteId);if(v){
@@ -3155,6 +3181,9 @@ function postVoteForm(parentTicker){
     document.getElementById('vote-closes')?.value);
 }
 async function deleteVote(voteId){
+  const targetV=DB.votes.find(x=>x.id===voteId);if(!targetV)return;
+  const targetCo=getCo(targetV.parent_ticker);
+  if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can delete its vote');
   if(!confirm('Delete this vote and all ballots?'))return;
   await sb.del('jex_votes','id=eq.'+voteId);
   await sb.del('jex_vote_ballots','vote_id=eq.'+voteId);
@@ -4269,6 +4298,7 @@ function renderMyStock(){
 async function convertBaseClass(parentTicker,classType,votesPerShare,restricted,whitelistIds,reason){
   const co=getCo(parentTicker);if(!co)return;
   const u=cu();
+  if(!canManageCompany(co))return toast('Only this company\'s owner or founders can convert its share class');
   if(!classType)return toast('Select a class type');
   votesPerShare=parseInt(votesPerShare);
   if(isNaN(votesPerShare)||votesPerShare<0)return toast('Enter valid votes per share');
