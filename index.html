@@ -371,6 +371,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 <body>
 <div id="app"><div class="loading-screen"><div class="spinner"></div><div style="color:var(--text2);font-size:13px">Connecting to JEX...</div></div></div>
 <div id="legal-modal-root"></div>
+<div id="bug-modal-root"></div>
 <div class="toast" id="toast"></div>
 <script>
 // ═══════════════════════════════════════════════
@@ -411,7 +412,7 @@ async function fetchUserSecret(userId,field){
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
-  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],
+  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
     weekly_schedule:{sun:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},mon:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},tue:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},wed:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},thu:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},fri:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},sat:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}}},
     weekly_active:false,weekly_override:false}};
@@ -570,7 +571,7 @@ async function loadAll(){
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
     activity,shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals]=await Promise.all([
+    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports]=await Promise.all([
     sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_news','order=created_at.desc&limit=50'),
     sb.get('jex_ipo_applications','order=created_at.asc'),
@@ -595,12 +596,13 @@ async function loadAll(){
     sb.get('jex_stop_loss','status=eq.active&order=created_at.asc'),
     sb.get('jex_minutes','order=created_at.desc&limit=50'),
     sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
+    sb.get('jex_bug_reports','order=created_at.desc&limit=100'),
   ]);
   Object.assign(DB,{pending,news,ipoApps,dilApps,
     trades,dividends,buybacks,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms});
+    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports});
   render(); // re-render with full data
 }
 
@@ -1280,7 +1282,7 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports]=await Promise.all([
       sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_companies','order=created_at.asc'),
@@ -1293,6 +1295,7 @@ async function autoRefresh(){
     sb.get('jex_stop_loss','status=eq.active&order=created_at.asc'),
       sb.get('jex_minutes','order=created_at.desc&limit=50'),
       sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
+      sb.get('jex_bug_reports','order=created_at.desc&limit=100'),
     ]);
     const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
@@ -1305,6 +1308,7 @@ async function autoRefresh(){
     DB.stopLossOrders=newStopLoss;
     DB.minutes=newMinutes;
     DB.divApprovals=newDivApprovals;
+    DB.bugReports=newBugReports;
     // Merge new trades (avoid duplicates)
     const existingIds=new Set(DB.trades.map(t=>t.id));
     newTrades.forEach(t=>{if(!existingIds.has(t.id))DB.trades.unshift(t);});
@@ -2135,7 +2139,7 @@ function sendEmailNotification(user, type, message, ticker){
   if(!user||!user.email_notifications)return;
   const addr=user.notification_email||user.email;
   if(!addr)return;
-  const important=['dividend','halt','stop_loss','ipo','session','limit_fill','founder_alloc'];
+  const important=['dividend','halt','stop_loss','ipo','session','limit_fill','founder_alloc','bug_report'];
   if(!important.includes(type))return;
   const sid=DB.session.emailjs_service_id;
   const tid=DB.session.emailjs_template_id;
@@ -2172,7 +2176,7 @@ async function pushNotification(userId, type, message, ticker=null){
         after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
         ipo:'🏢 IPO update',session:'🕐 Session update',
         price_alert:'🔔 Price alert',resume:'✅ Trading resumed',
-        founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised'
+        founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised',bug_report:'🐛 Bug report'
       };
       showBrowserPush(titles[type]||'Notification',message);
     }
@@ -2235,6 +2239,7 @@ async function resetExchange(){
       sb.del('jex_minutes','id=neq.x'),
       sb.del('jex_flags','id=neq.x'),
       sb.del('jex_pending','id=neq.x'),
+      sb.del('jex_bug_reports','id=neq.x'),
     ]);
     // Step 2: Wipe IPO/dilution/share class related tables
     await Promise.all([
@@ -2276,7 +2281,7 @@ async function resetExchange(){
     DB.companies=[];DB.trades=[];DB.dividends=[];DB.buybacks=[];
     DB.limitOrders=[];DB.stopLossOrders=[];DB.notifications=[];
     DB.halts=[];DB.activity=[];DB.news=[];DB.announcements=[];
-    DB.minutes=[];DB.flags=[];DB.pending=[];DB.ipoApps=[];
+    DB.minutes=[];DB.flags=[];DB.pending=[];DB.ipoApps=[];DB.bugReports=[];
     DB.dilApps=[];DB.shareClasses=[];DB.classApps=[];
     DB.founderAllocations=[];DB.companyMembers=[];
     DB.priceAdjustments=[];DB.priceAlerts=[];
@@ -3430,6 +3435,82 @@ function renderLegalFooter(){
 }
 
 // ═══════════════════════════════════════════════
+// BUG REPORTS
+// ═══════════════════════════════════════════════
+function openBugReportModal(){
+  const root=document.getElementById('bug-modal-root');if(!root)return;
+  root.innerHTML=renderBugReportModalHTML();
+}
+function closeBugReportModal(){const root=document.getElementById('bug-modal-root');if(root)root.innerHTML='';}
+function renderBugReportModalHTML(){
+  return `<div class="legal-overlay" onclick="if(event.target===this)closeBugReportModal()">
+    <div class="legal-box" style="max-width:480px;max-height:none">
+      <div class="legal-header">
+        <div style="font-weight:600;font-size:14px">🐛 Report a bug</div>
+        <button class="legal-close" onclick="closeBugReportModal()">✕</button>
+      </div>
+      <div class="legal-body">
+        <div class="ibox ibox-blue" style="margin-bottom:12px">This goes straight to the Chairman and President. Describe what happened and, if you can, attach a screenshot.</div>
+        <div class="frow"><label class="flabel">What went wrong?</label>
+          <textarea id="bug-desc" rows="4" placeholder="e.g. When I tried to place a limit order on ACME, the price field reset to 0 and the button did nothing..."></textarea>
+        </div>
+        <div class="frow"><label class="flabel">Screenshot (optional, image files up to 5MB)</label>
+          <input type="file" id="bug-screenshot" accept="image/*">
+        </div>
+        <button class="btn btn-primary" id="bug-submit-btn" onclick="submitBugReport()" style="width:100%">Send report</button>
+      </div>
+    </div>
+  </div>`;
+}
+async function uploadBugScreenshot(file){
+  const ext=(file.name.split('.').pop()||'png').toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,8)||'png';
+  const path=uid()+'.'+ext;
+  const r=await fetch(SUPABASE_URL+'/storage/v1/object/bug-screenshots/'+path,{
+    method:'POST',
+    headers:{'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY,'Content-Type':file.type||'application/octet-stream'},
+    body:file
+  });
+  if(!r.ok)throw new Error(await r.text());
+  return SUPABASE_URL+'/storage/v1/object/public/bug-screenshots/'+path;
+}
+async function submitBugReport(){
+  const u=cu();if(!u)return;
+  const desc=(get('bug-desc')?.value||'').trim();
+  if(desc.length<10)return toast('Please describe the bug in at least 10 characters');
+  const fileInput=get('bug-screenshot');
+  const file=fileInput&&fileInput.files&&fileInput.files[0];
+  if(file&&file.size>5*1024*1024)return toast('Screenshot must be under 5MB');
+  if(file&&!file.type.startsWith('image/'))return toast('Screenshot must be an image file');
+  const btn=get('bug-submit-btn');if(btn){btn.disabled=true;btn.textContent='Sending…';}
+  try{
+    let screenshotUrl=null;
+    if(file)screenshotUrl=await uploadBugScreenshot(file);
+    const rec={id:uid(),user_id:u.id,user_name:u.name,description:desc,screenshot_url:screenshotUrl,status:'open',page_url:window.location.href,ts:ts()};
+    await sb.post('jex_bug_reports',rec);
+    DB.bugReports.unshift(rec);
+    const admins=DB.users.filter(u2=>u2.role==='chairman'||u2.role==='president');
+    for(const a of admins){
+      await pushNotification(a.id,'bug_report','🐛 Bug report from '+u.name+': '+desc.slice(0,80),null);
+    }
+    await logActivity('bug_report','🐛 '+u.name+' reported a bug: '+desc.slice(0,80),{userId:u.id,userName:u.name});
+    closeBugReportModal();
+    toast('🐛 Bug report sent to the Chairman and President');
+    render();
+  }catch(e){
+    toast('Failed to send bug report: '+(e.message||e));
+    if(btn){btn.disabled=false;btn.textContent='Send report';}
+  }
+}
+async function resolveBugReport(reportId){
+  const r=DB.bugReports.find(x=>x.id===reportId);if(!r)return;
+  const u=cu();
+  const claimed=await sb.patch('jex_bug_reports','id=eq.'+reportId+'&status=eq.open',{status:'resolved',resolved_by:u.name});
+  if(!claimed.length)return toast('This report was already resolved');
+  r.status='resolved';r.resolved_by=u.name;
+  toast('Bug report marked resolved');render();
+}
+
+// ═══════════════════════════════════════════════
 // RENDER: LOGIN
 // ═══════════════════════════════════════════════
 function renderLogin(){
@@ -3478,7 +3559,7 @@ function renderTopbar(){
     🔔${unread?`<span style="position:absolute;top:-4px;right:-4px;background:var(--red);color:white;font-size:10px;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:600">${unread}</span>`:''}
   </button>`:'';
   const rtConnected=_realtimeChannels.length>0;
-  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span><span style="font-size:10px;margin-left:8px;color:${rtConnected?'var(--green)':'var(--text3)'}" title="${rtConnected?'Real-time connected':'Polling mode'}">${rtConnected?'●':'○'}</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><span>${u.name}</span>${roleBadge(u.role)}${bellBtn}<button class="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">${isLight?'🌙':'☀️'}</button><button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
+  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span><span style="font-size:10px;margin-left:8px;color:${rtConnected?'var(--green)':'var(--text3)'}" title="${rtConnected?'Real-time connected':'Polling mode'}">${rtConnected?'●':'○'}</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><span>${u.name}</span>${roleBadge(u.role)}${bellBtn}<button class="logout-btn" onclick="openBugReportModal()" title="Report a bug">🐛</button><button class="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">${isLight?'🌙':'☀️'}</button><button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
 }
 function toggleTheme(){
   document.body.classList.toggle('light-mode');
@@ -4778,7 +4859,8 @@ function renderAdmin(){
   const sectreTabs=u.role==='secretary'?secretaryTabs:[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
   const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags']];
   const openFlags=(DB.flags||[]).filter(f=>f.status==='open').length;
-  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['snapshots','Snapshots']];
+  const openBugReports=(DB.bugReports||[]).filter(b=>b.status==='open').length;
+  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['bug_reports',openBugReports?'Bug reports <span class="badge b-red">'+openBugReports+'</span>':'Bug reports'],['snapshots','Snapshots']];
   const treasurerTabs=[['balances','Balances'],['cashflow','Cash flow'],['dividends_audit','Dividend audit'],['price_adj_log','Price adjustments'],['budget_warnings','Budget warnings'],['activity','Activity log']];
   const tabs=(chair||isPresident(u))?chairmanTabs:u.role==='compliance_officer'?complianceTabs:u.role==='treasurer'?treasurerTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
@@ -4794,6 +4876,7 @@ function renderAdmin(){
   :UI.adminTab==='users'?renderAdminUsers(students,companies,DB.users.filter(u2=>['secretary','treasurer','compliance_officer'].includes(u2.role)&&u2.status==='approved'),DB.users.filter(u2=>['chairman','president'].includes(u2.role)&&u2.status==='approved'))
   :UI.adminTab==='dashboard'?renderAdminDashboard()
   :UI.adminTab==='flags'?renderAdminFlags()
+  :UI.adminTab==='bug_reports'?renderAdminBugReports()
   :UI.adminTab==='snapshots'?renderSnapshotTab()
   :UI.adminTab==='minutes'?renderAdminMinutes()
   :UI.adminTab==='notices'?renderAdminOfficialNotices()
@@ -5226,6 +5309,42 @@ function renderAdminFlags(){
         <td style="font-size:12px;color:var(--text2)">${f.resolved_by||'—'}</td>
         <td style="font-size:12px;color:var(--text2)">${f.resolution_note||'—'}</td>
         <td style="font-size:12px;color:var(--text2)">${f.ts||''}</td>
+      </tr>`).join('')}</tbody></table>
+    </div>`;
+  }
+  return html;
+}
+function renderAdminBugReports(){
+  const openReports=(DB.bugReports||[]).filter(b=>b.status==='open');
+  const closedReports=(DB.bugReports||[]).filter(b=>b.status!=='open');
+  let html=`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+    Open bug reports ${openReports.length?`<span class="badge b-red">${openReports.length}</span>`:''}
+  </div>`;
+  if(!openReports.length){
+    html+='<div class="empty">No open bug reports</div>';
+  } else {
+    openReports.forEach(b=>{
+      html+=`<div style="padding:12px;border:1px solid var(--red);border-radius:var(--radius);margin-bottom:10px;background:rgba(255,77,106,0.04)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span style="font-size:16px">🐛</span>
+          <strong>${esc(b.user_name)}</strong>
+          <span style="font-size:11px;color:var(--text2);margin-left:auto">${esc(b.ts)}</span>
+        </div>
+        <div style="font-size:13px;color:var(--text2);margin-bottom:10px;white-space:pre-wrap">${esc(b.description)}</div>
+        ${b.screenshot_url?`<div style="margin-bottom:10px"><a href="${esc(b.screenshot_url)}" target="_blank" rel="noopener"><img src="${esc(b.screenshot_url)}" style="max-width:100%;max-height:260px;border-radius:var(--radius);border:1px solid var(--border)"></a></div>`:''}
+        <button class="btn btn-sm btn-success" onclick="resolveBugReport('${b.id}')">✓ Mark resolved</button>
+      </div>`;
+    });
+  }
+  html+='</div>';
+  if(closedReports.length){
+    html+=`<div class="card"><div class="section-title">Resolved bug reports</div>
+      <table><thead><tr><th>Reporter</th><th>Description</th><th>Resolved by</th><th>Time</th></tr></thead>
+      <tbody>${closedReports.map(b=>`<tr>
+        <td style="font-weight:500">${esc(b.user_name)}</td>
+        <td style="font-size:12px;color:var(--text2);max-width:300px">${esc(b.description)}</td>
+        <td style="font-size:12px;color:var(--text2)">${esc(b.resolved_by)||'—'}</td>
+        <td style="font-size:12px;color:var(--text2)">${esc(b.ts)||''}</td>
       </tr>`).join('')}</tbody></table>
     </div>`;
   }
