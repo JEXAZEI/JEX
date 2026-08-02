@@ -3766,6 +3766,7 @@ function renderCompanyPage(parentTicker){
     <button class="tab ${tab==='news'?'active':''}" onclick="UI.companyPageTab='news';render()">News ${companyNews.length?'<span class="badge b-amber" style="margin-left:4px">'+companyNews.length+'</span>':''}</button>
     <button class="tab ${tab==='votes'?'active':''}" onclick="UI.companyPageTab='votes';render()">Votes ${companyVotes.filter(v=>v.status==='open').length?'<span class="badge b-green" style="margin-left:4px">'+companyVotes.filter(v=>v.status==='open').length+'</span>':''}</button>
     <button class="tab ${tab==='shareholders'?'active':''}" onclick="UI.companyPageTab='shareholders';render()">Shareholders</button>
+    <button class="tab ${tab==='team'?'active':''}" onclick="UI.companyPageTab='team';render()">Team</button>
     <button class="tab ${tab==='financials'?'active':''}" onclick="UI.companyPageTab='financials';render()">Financials ${co.financials&&co.financials.length?'<span class="badge b-gray" style="margin-left:4px">'+co.financials.length+'</span>':''}</button>
     <button class="tab ${tab==='dividends'?'active':''}" onclick="UI.companyPageTab='dividends';render()">Dividends</button>
     ${canTrade?`<button class="tab ${tab==='alerts'?'active':''}" onclick="UI.companyPageTab='alerts';render()">🎯 Alerts ${DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&!a.triggered).length?'<span class="badge b-blue" style="margin-left:4px">'+DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&!a.triggered).length+'</span>':''}</button>`:''}
@@ -4022,6 +4023,10 @@ function renderCompanyPage(parentTicker){
         +freshSh.map(sh=>{const total=Object.values(sh.shares).reduce((s,q)=>s+q,0);const vp=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);return '<tr><td style="font-weight:500">'+sh.name+'</td>'+allTickers.map(t=>'<td class="r" style="font-family:var(--mono)">'+(sh.shares[t]||0)+'</td>').join('')+'<td class="r" style="font-weight:500">'+total+'</td><td class="r" style="color:var(--amber)">'+vp+'</td></tr>';}).join('')+'</tbody></table>';
     }).catch(()=>{});
     html+='</div></div>';
+  }
+
+  else if(tab==='team'){
+    html+=renderCompanyTeamTab(co);
   }
 
   if(tab==='alerts'&&(u.role==='student'||u.role==='company')){
@@ -4569,6 +4574,21 @@ function renderStockOverview(co,u){
       +'</div>';
   });
   html+='</div></div>';
+  return html;
+}
+function renderCompanyTeamTab(co){
+  const owner=getUser(co.owner_id);
+  const founders=DB.companyMembers.filter(m=>m.company_user_id===co.owner_id&&m.status==='accepted').map(m=>getUser(m.student_id)).filter(Boolean);
+  let html='<div class="card"><div class="section-title">Team</div>';
+  html+='<div class="ibox ibox-blue" style="margin-bottom:12px">Contact the people behind this company directly.</div>';
+  const rows=[];
+  if(owner)rows.push({name:owner.name,email:owner.email,role:'Owner'});
+  founders.forEach(f=>rows.push({name:f.name,email:f.email,role:'Founder'}));
+  if(!rows.length){html+='<div class="empty">No team information available</div>';}
+  else{
+    html+=rows.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-blue">${r.role}</span></div><div class="app-meta">${r.email?`<a href="mailto:${esc(r.email)}" class="legal-link">${esc(r.email)}</a>`:'No email on file'}</div></div></div>`).join('');
+  }
+  html+='</div>';
   return html;
 }
 function renderFoundersTab(co,u){
