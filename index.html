@@ -545,7 +545,8 @@ setInterval(checkInactivity,60000); // check every minute
 document.addEventListener('mousemove',resetActivityTimer,{passive:true});
 document.addEventListener('keydown',resetActivityTimer,{passive:true});
 document.addEventListener('touchstart',resetActivityTimer,{passive:true});
-let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',loginUsername:'',loginError:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null,lbClassroom:null};
+let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',loginUsername:'',loginError:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null,lbClassroom:null,
+  regVerify:{reg:{status:'idle',email:'',resendAt:0},'reg-co':{status:'idle',email:'',resendAt:0}}};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
@@ -1358,7 +1359,74 @@ document.addEventListener('keydown',function(e){
 const SECURITY_QUESTIONS=['What is the name of your first pet?','What city were you born in?','What is your mother\'s maiden name?','What was the name of your first school?','What is your favourite book?','What was the make of your first car?','What is your oldest sibling\'s middle name?','What street did you grow up on?'];
 function secQSelect(prefix){return `<select id="${prefix}-secq"><option value="">— Select a question —</option>${SECURITY_QUESTIONS.map(q=>`<option value="${q}">${q}</option>`).join('')}</select>`;}
 
-async function registerStudent(name,username,email,pw,secQ,secA){
+// ── Email verification (registration) ────────────────────
+const emailjsReady=()=>!!(DB.session.emailjs_service_id&&DB.session.emailjs_template_id&&DB.session.emailjs_public_key&&typeof emailjs!=='undefined');
+function genVerifyCode(){return String(Math.floor(100000+Math.random()*900000));}
+function openRegisterView(){UI.regVerify={reg:{status:'idle',email:'',resendAt:0},'reg-co':{status:'idle',email:'',resendAt:0}};UI.loginView='register';render();}
+function onRegEmailChanged(prefix){
+  const state=UI.regVerify[prefix];
+  const email=norm((get(prefix+'-email')?.value||'').trim());
+  if(state&&state.status!=='idle'&&state.email!==email){
+    UI.regVerify[prefix]={status:'idle',email:'',resendAt:0};
+    renderRegEmailVerify(prefix);
+  }
+}
+async function sendRegVerificationCode(prefix){
+  const email=norm((get(prefix+'-email')?.value||'').trim());
+  if(!validEmail(email))return toast('Enter a valid email first');
+  if(!emailjsReady())return toast('Email verification is not available right now');
+  const name=(get(prefix==='reg'?'reg-name':'reg-co-name')?.value||'').trim()||'there';
+  const code=genVerifyCode();
+  try{
+    await sb.post('jex_email_verifications',{id:uid(),email,code,used:false,expires_at:Date.now()+15*60000,created_at:new Date().toISOString()});
+    emailjs.init({publicKey:DB.session.emailjs_public_key});
+    await emailjs.send(DB.session.emailjs_service_id,DB.session.emailjs_template_id,{
+      to_email:email,to_name:name,
+      subject:'Your JEX verification code',
+      message:'Your JEX email verification code is '+code+'. It expires in 15 minutes.',
+      ticker:'',app_url:window.location.origin+window.location.pathname
+    });
+  }catch(e){return toast('Failed to send verification code: '+(e.message||e));}
+  UI.regVerify[prefix]={status:'sent',email,resendAt:Date.now()+30000};
+  renderRegEmailVerify(prefix);
+  toast('Verification code sent to '+email);
+}
+async function confirmRegVerificationCode(prefix){
+  const state=UI.regVerify[prefix];
+  if(!state||state.status!=='sent')return;
+  const code=(get(prefix+'-verify-code')?.value||'').trim();
+  if(!/^\d{6}$/.test(code))return toast('Enter the 6-digit code from your email');
+  let rows;
+  try{
+    rows=await sb.get('jex_email_verifications','email=eq.'+encodeURIComponent(state.email)+'&code=eq.'+code+'&used=eq.false&order=created_at.desc&limit=1');
+  }catch(e){return toast('Verification failed, please try again');}
+  const row=rows&&rows[0];
+  if(!row)return toast('Incorrect or expired code');
+  if(Date.now()>row.expires_at)return toast('This code has expired — send a new one');
+  await sb.patch('jex_email_verifications','id=eq.'+row.id,{used:true});
+  UI.regVerify[prefix]={status:'verified',email:state.email,resendAt:0};
+  renderRegEmailVerify(prefix);
+  toast('Email verified');
+}
+function renderRegEmailVerify(prefix){
+  const box=get(prefix+'-email-verify');if(!box)return;
+  box.innerHTML=renderRegEmailVerifyHTML(prefix);
+}
+function renderRegEmailVerifyHTML(prefix){
+  if(!emailjsReady())return '';
+  const state=UI.regVerify[prefix]||{status:'idle'};
+  if(state.status==='verified')return '<div class="ibox ibox-green" style="margin:-6px 0 12px;font-size:12px">✓ Email verified</div>';
+  if(state.status==='sent'){
+    const canResend=Date.now()>=state.resendAt;
+    return '<div class="frow" style="margin-top:-6px"><label class="flabel">Enter the 6-digit code we emailed you</label>'
+      +'<div style="display:flex;gap:8px"><input type="text" id="'+prefix+'-verify-code" placeholder="123456" maxlength="6" inputmode="numeric" style="flex:1"><button type="button" class="btn btn-sm" onclick="confirmRegVerificationCode(&#39;'+prefix+'&#39;)">Verify</button></div>'
+      +'<div style="font-size:11px;margin-top:6px">'+(canResend?'<a class="legal-link" onclick="sendRegVerificationCode(&#39;'+prefix+'&#39;)">Resend code</a>':'<span style="color:var(--text2)">You can resend in a moment</span>')+'</div>'
+      +'</div>';
+  }
+  return '<div style="margin:-6px 0 12px"><button type="button" class="btn btn-sm" onclick="sendRegVerificationCode(&#39;'+prefix+'&#39;)">Send verification code</button></div>';
+}
+
+async function registerStudent(name,username,email,pw,secQ,secA,emailVerified){
   if(!name||name.trim().length<2)return toast('Enter a valid name');
   const un=normalizeUsername(username);
   if(!validUsername(un))return toast('Username must be 3-20 characters: letters, numbers, underscore, or period');
@@ -1369,11 +1437,11 @@ async function registerStudent(name,username,email,pw,secQ,secA){
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
   if(DB.users.find(u=>norm(u.username)===norm(un))||DB.pending.find(r=>norm(r.username)===norm(un)))return toast('Username already taken');
-  const pwHash=await hashPw(pw);const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHash,role:'student',sec_q:secQ,sec_a:norm(secA),ts:ts()};
+  const pwHash=await hashPw(pw);const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHash,role:'student',sec_q:secQ,sec_a:norm(secA),email_verified:!!emailVerified,ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';render();
 }
-async function registerCompany(name,username,email,pw,desc,secQ,secA){
+async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerified){
   if(!name||name.trim().length<2)return toast('Enter a valid company name');
   const un=normalizeUsername(username);
   if(!validUsername(un))return toast('Username must be 3-20 characters: letters, numbers, underscore, or period');
@@ -1385,7 +1453,7 @@ async function registerCompany(name,username,email,pw,desc,secQ,secA){
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
   if(DB.users.find(u=>norm(u.username)===norm(un))||DB.pending.find(r=>norm(r.username)===norm(un)))return toast('Username already taken');
-  const pwHashCo=await hashPw(pw);const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHashCo,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),ts:ts()};
+  const pwHashCo=await hashPw(pw);const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHashCo,role:'company',description:desc.trim(),sec_q:secQ,sec_a:norm(secA),email_verified:!!emailVerified,ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';render();
 }
@@ -2240,6 +2308,7 @@ async function resetExchange(){
       sb.del('jex_flags','id=neq.x'),
       sb.del('jex_pending','id=neq.x'),
       sb.del('jex_bug_reports','id=neq.x'),
+      sb.del('jex_email_verifications','id=neq.x'),
     ]);
     // Step 2: Wipe IPO/dilution/share class related tables
     await Promise.all([
@@ -2694,6 +2763,19 @@ async function postFinancials(ticker,period,revenue,profit,summary){
   await pushNotificationToHolders(ticker,'financials','📊 '+co.name+' ('+ticker+') posted financial results for '+entry.period+': Revenue '+fmt(revenue)+', Profit '+fmt(profit));
   await logActivity('financials',co.name+' posted financials for '+entry.period+' — Rev '+fmt(revenue)+', Profit '+fmt(profit),{ticker,amount:revenue});
   toast('Financial report posted');render();
+}
+async function updateFundingGoal(ticker,goal,useOfFunds){
+  const co=getCo(ticker);if(!co)return;
+  if(!canManageCompany(co))return toast('Only this company\'s owner or founders can update the funding goal');
+  let g=null;
+  if(goal!==''&&goal!=null){
+    g=parseFloat(goal);
+    if(isNaN(g)||g<0)return toast('Funding goal must be a positive number');
+    g=Math.round(g*100)/100;
+  }
+  const uof=(useOfFunds||'').trim().slice(0,1000)||null;
+  await updateCo(ticker,{funding_goal:g,use_of_funds:uof});
+  toast('Funding goal updated');render();
 }
 async function doBuyback(ticker,qty){
   if(!requireOpen(ticker))return;const owner=cu(),co=getCo(ticker);if(!owner||!co)return;
@@ -3522,8 +3604,8 @@ function renderLogin(){
   if(UI.loginView==='forgot-email'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 1 of 3</div><div class="frow"><label class="flabel">Your email address</label><input type="email" id="forgot-email" placeholder="you@school.edu" onkeydown="if(event.key==='Enter')forgotStep1(get('forgot-email')?.value)"></div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep1(get('forgot-email')?.value)">Continue</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${esc(u?.name)}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="forgot-pw1" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="forgot-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw2')" tabindex="-1">👁</button></div></div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
-  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-username" placeholder="e.g. arielk" autocomplete="username"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div>
-<div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-co-username" placeholder="e.g. acmecorp" autocomplete="username"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu"></div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in. Your classroom will be assigned by your teacher after approval.</div><div class="frow" style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" id="reg-agree-tos" aria-label="I agree to the Terms of Service and Bylaws" style="width:auto;margin-top:2px"><span style="font-size:12px;color:var(--text2)">I agree to the <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a> and <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a>.</span></div><div class="login-actions"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
+  if(UI.loginView==='register'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div><div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-username" placeholder="e.g. arielk" autocomplete="username"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu" oninput="onRegEmailChanged('reg')"></div><div id="reg-email-verify">${renderRegEmailVerifyHTML('reg')}</div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div>
+<div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-co-username" placeholder="e.g. acmecorp" autocomplete="username"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu" oninput="onRegEmailChanged('reg-co')"></div><div id="reg-co-email-verify">${renderRegEmailVerifyHTML('reg-co')}</div><div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div><div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in. Your classroom will be assigned by your teacher after approval.</div><div class="frow" style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" id="reg-agree-tos" aria-label="I agree to the Terms of Service and Bylaws" style="width:auto;margin-top:2px"><span style="font-size:12px;color:var(--text2)">I agree to the <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a> and <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a>.</span></div><div class="login-actions"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(!['admin','company','student'].includes(UI.loginTab))UI.loginTab='student';
   const tabCounts={admin:admins.length,company:companies.length,student:students.length};
   return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-tagline">JTED Stock Exchange</div>
@@ -3538,14 +3620,19 @@ function renderLogin(){
   ${UI.loginError?`<div class="login-error">${esc(UI.loginError)}</div>`:''}
   <div class="login-actions"><button class="btn btn-primary" onclick="loginByForm()">Log in</button></div>
   <div class="login-forgot"><button class="link-btn" onclick="UI.loginView='forgot-email';render()">Forgot password?</button></div>
-  <div class="login-signup">Don't have an account? <a class="signup-link" onclick="UI.loginView='register';render()">Sign up</a></div></div></div>`;
+  <div class="login-signup">Don't have an account? <a class="signup-link" onclick="openRegisterView()">Sign up</a></div></div></div>`;
 }
 function switchRegTab(type){document.querySelectorAll('.reg-tab').forEach(t=>t.classList.remove('active'));const tab=get('reg-tab-'+type);if(tab)tab.classList.add('active');get('reg-student-fields').style.display=type==='student'?'':'none';get('reg-company-fields').style.display=type==='company'?'':'none';}
 function doRegister(){
   if(!get('reg-agree-tos')?.checked)return toast('You must agree to the Terms of Service to register');
   const active=document.querySelector('.reg-tab.active');const type=active?.id==='reg-tab-company'?'company':'student';
-  if(type==='student')registerStudent(get('reg-name')?.value,get('reg-username')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value);
-  else registerCompany(get('reg-co-name')?.value,get('reg-co-username')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value);
+  const prefix=type==='student'?'reg':'reg-co';
+  const email=norm((get(prefix+'-email')?.value||'').trim());
+  const vState=UI.regVerify[prefix];
+  const isVerified=!!(vState&&vState.status==='verified'&&vState.email===email);
+  if(emailjsReady()&&!isVerified)return toast('Please verify your email address before submitting');
+  if(type==='student')registerStudent(get('reg-name')?.value,get('reg-username')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value,isVerified);
+  else registerCompany(get('reg-co-name')?.value,get('reg-co-username')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value,isVerified);
 }
 
 // ═══════════════════════════════════════════════
@@ -3711,6 +3798,16 @@ function renderCompanyPage(parentTicker){
       +'<div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">'+(owner?fmt(owner.cash):'—')+'</div><div style="font-size:10px;color:var(--text2);margin-top:2px">After dividends & buybacks</div></div>'
       +'<div class="mcard"><div class="mlabel">Available shares</div><div class="mval">'+allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares_avail:0);},0).toLocaleString()+'</div></div>'
       +'</div>'
+
+    // Funding goal, if the company has set one
+    if(co.funding_goal){
+      const fundPct=Math.min(100,Math.round(capitalRaised/co.funding_goal*100));
+      html+='<div class="card"><div class="section-title">Funding goal</div>'
+        +'<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px"><span style="font-weight:500">'+fmt(capitalRaised)+' raised</span><span style="color:var(--text2)">of '+fmt(co.funding_goal)+' goal ('+fundPct+'%)</span></div>'
+        +'<div class="sbar-bg" style="height:8px"><div class="sbar-fill" style="height:8px;width:'+fundPct+'%;background:'+(fundPct>=100?'var(--green)':'var(--blue)')+'"></div></div>'
+        +(co.use_of_funds?'<div style="font-size:13px;color:var(--text2);margin-top:10px;white-space:pre-wrap">'+esc(co.use_of_funds)+'</div>':'')
+        +'</div>';
+    }
 
     // Latest financials, if the company has posted any
     if(co.financials&&co.financials.length){
@@ -4423,6 +4520,14 @@ function renderStockOverview(co,u){
     <div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div>
   </div>`;
 
+  // Funding goal & use of funds
+  html+=`<div class="card"><div class="section-title">Funding goal</div>
+    <div class="ibox ibox-blue" style="margin-bottom:12px">Shown to investors on your public company page, with your progress toward it based on capital raised through share sales.</div>
+    <div class="frow"><label class="flabel">Goal amount (optional)</label><input type="number" id="fund-goal" placeholder="e.g. 5000" min="0" step="0.01" value="${co.funding_goal!=null?co.funding_goal:''}"></div>
+    <div class="frow"><label class="flabel">What will the funds be used for?</label><textarea id="fund-use" rows="3" placeholder="e.g. Filament and print time for prototyping our water bottle design...">${esc(co.use_of_funds||'')}</textarea></div>
+    <button class="btn btn-primary btn-sm" onclick="updateFundingGoal('${co.ticker}',get('fund-goal')?.value,get('fund-use')?.value)">Save funding goal</button>
+  </div>`;
+
   // Base stock card
   html+='<div class="card"><div class="section-title">Share classes</div>';
 
@@ -5049,8 +5154,8 @@ function renderAdminSession(students){
 }
 function renderAdminRegs(pS,pC,students,companies){
   return`<div class="card">
-    ${pS.length?`<div class="section-title">Pending students</div>${pS.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-blue">student</span></div><div class="app-meta">${esc(r.email)} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><select id="classroom-${r.id}" style="width:110px;font-size:11px"><option value="">No classroom</option>${DB.classrooms.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:100px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
-    ${pC.length?`<div class="section-title">Pending companies</div>${pC.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-amber">company</span></div><div class="app-meta">${esc(r.email)} — ${esc(r.description||'')} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><select id="classroom-${r.id}" style="width:110px;font-size:11px"><option value="">No classroom</option>${DB.classrooms.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
+    ${pS.length?`<div class="section-title">Pending students</div>${pS.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-blue">student</span></div><div class="app-meta">${esc(r.email)} ${r.email_verified?'<span class="badge b-green" style="font-size:9px">✓ verified</span>':'<span class="badge b-gray" style="font-size:9px">not verified</span>'} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><select id="classroom-${r.id}" style="width:110px;font-size:11px"><option value="">No classroom</option>${DB.classrooms.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:100px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
+    ${pC.length?`<div class="section-title">Pending companies</div>${pC.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-amber">company</span></div><div class="app-meta">${esc(r.email)} ${r.email_verified?'<span class="badge b-green" style="font-size:9px">✓ verified</span>':'<span class="badge b-gray" style="font-size:9px">not verified</span>'} — ${esc(r.description||'')} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><select id="classroom-${r.id}" style="width:110px;font-size:11px"><option value="">No classroom</option>${DB.classrooms.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
     ${!DB.pending.length?`<div class="empty" style="padding:16px">No pending registrations</div><hr class="divider">`:''}
     <div class="section-title" style="margin-top:4px">Approved accounts</div>
     ${[...students,...companies].length?`<table><thead><tr><th>Name</th><th>Role</th><th>Email</th><th class="r">Cash</th></tr></thead><tbody>${[...students,...companies].map(u=>`<tr><td>${esc(u.name)}</td><td>${roleBadge(u.role)}</td><td style="color:var(--text2)">${esc(u.email)}</td><td class="r" style="font-family:var(--mono)">${fmt(u.cash)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No approved accounts yet</div>'}
