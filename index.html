@@ -412,7 +412,7 @@ async function fetchUserSecret(userId,field){
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
-  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],
+  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
     weekly_schedule:{sun:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},mon:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},tue:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},wed:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},thu:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},fri:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},sat:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}}},
     weekly_active:false,weekly_override:false}};
@@ -546,13 +546,13 @@ document.addEventListener('mousemove',resetActivityTimer,{passive:true});
 document.addEventListener('keydown',resetActivityTimer,{passive:true});
 document.addEventListener('touchstart',resetActivityTimer,{passive:true});
 let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',loginUsername:'',loginError:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null,lbClassroom:null,
-  regVerify:{reg:{status:'idle',email:'',resendAt:0},'reg-co':{status:'idle',email:'',resendAt:0}}};
+  regVerify:{reg:{status:'idle',email:'',resendAt:0},'reg-co':{status:'idle',email:'',resendAt:0}},fundPage:null};
 let charts={},sessionTimer=null;
 
 async function loadAll(){
   // ── Phase 1: critical data needed to render login ──────
   const [users,session,companies,announcements,halts]=await Promise.all([
-    sb.get('jex_users','order=created_at.asc&select=id,name,username,email,password,role,status,cash,holdings,shorts,watchlist,description,app_status,sec_q,sec_a,created_at,classroom_id,email_notifications,notification_email'),
+    sb.get('jex_users','order=created_at.asc&select=id,name,username,email,password,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,sec_a,created_at,classroom_id,email_notifications,notification_email'),
     sb.get('jex_session','id=eq.1'),
     sb.get('jex_companies','order=created_at.asc'),
     sb.get('jex_announcements','order=created_at.desc'),
@@ -572,7 +572,7 @@ async function loadAll(){
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
     activity,shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports]=await Promise.all([
+    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds]=await Promise.all([
     sb.get('jex_pending','order=created_at.asc'),
     sb.get('jex_news','order=created_at.desc&limit=50'),
     sb.get('jex_ipo_applications','order=created_at.asc'),
@@ -598,12 +598,13 @@ async function loadAll(){
     sb.get('jex_minutes','order=created_at.desc&limit=50'),
     sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
     sb.get('jex_bug_reports','order=created_at.desc&limit=100'),
+    sb.get('jex_funds','order=created_at.asc'),
   ]);
   Object.assign(DB,{pending,news,ipoApps,dilApps,
     trades,dividends,buybacks,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports});
+    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds});
   render(); // re-render with full data
 }
 
@@ -1283,7 +1284,7 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports,newFunds]=await Promise.all([
       sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_companies','order=created_at.asc'),
@@ -1297,6 +1298,7 @@ async function autoRefresh(){
       sb.get('jex_minutes','order=created_at.desc&limit=50'),
       sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
       sb.get('jex_bug_reports','order=created_at.desc&limit=100'),
+      sb.get('jex_funds','order=created_at.asc'),
     ]);
     const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
@@ -1310,6 +1312,7 @@ async function autoRefresh(){
     DB.minutes=newMinutes;
     DB.divApprovals=newDivApprovals;
     DB.bugReports=newBugReports;
+    DB.funds=newFunds;
     // Merge new trades (avoid duplicates)
     const existingIds=new Set(DB.trades.map(t=>t.id));
     newTrades.forEach(t=>{if(!existingIds.has(t.id))DB.trades.unshift(t);});
@@ -1465,7 +1468,7 @@ async function approveReg(id,startCash){
     cash:startCash,sec_q:r.sec_q,sec_a:r.sec_a,
     description:r.description||null,app_status:r.role==='company'?'none':null,
     holdings:{},shorts:{},watchlist:[],classroom_id:classroomId||null,
-    email_notifications:false,notification_email:null,created_at:new Date().toISOString()};
+    email_notifications:false,notification_email:null,fund_units:{},created_at:new Date().toISOString()};
   // u.id reuses the pending record's id, so a double-click or two admins approving
   // the same registration at once collide on the users table's primary key — the
   // second POST throws instead of silently creating a duplicate account. Catch
@@ -1497,7 +1500,7 @@ async function loginByForm(){
   try{localStorage.setItem(SESSION_KEY,u.id);}catch(e){}
   subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();await loadAll();
 }
-function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.tradePage=0;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
+function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.fundPage=null;UI.tradePage=0;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}render();}
 async function changeEmail(uid2,newEmail,pw){
   const u=getUser(uid2);if(!u)return;
   if(!newEmail||!newEmail.includes('@'))return toast('Enter a valid email address');
@@ -2309,6 +2312,7 @@ async function resetExchange(){
       sb.del('jex_pending','id=neq.x'),
       sb.del('jex_bug_reports','id=neq.x'),
       sb.del('jex_email_verifications','id=neq.x'),
+      sb.del('jex_funds','id=neq.x'),
     ]);
     // Step 2: Wipe IPO/dilution/share class related tables
     await Promise.all([
@@ -2350,7 +2354,7 @@ async function resetExchange(){
     DB.companies=[];DB.trades=[];DB.dividends=[];DB.buybacks=[];
     DB.limitOrders=[];DB.stopLossOrders=[];DB.notifications=[];
     DB.halts=[];DB.activity=[];DB.news=[];DB.announcements=[];
-    DB.minutes=[];DB.flags=[];DB.pending=[];DB.ipoApps=[];DB.bugReports=[];
+    DB.minutes=[];DB.flags=[];DB.pending=[];DB.ipoApps=[];DB.bugReports=[];DB.funds=[];
     DB.dilApps=[];DB.shareClasses=[];DB.classApps=[];
     DB.founderAllocations=[];DB.companyMembers=[];
     DB.priceAdjustments=[];DB.priceAlerts=[];
@@ -2749,6 +2753,116 @@ async function coverShort(ticker,qty){
   toast('Covered '+qty+' × '+ticker+' | P&L: '+(pnl>=0?'+':'')+fmt(pnl));if(UI.companyPage)render();else openPanel(ticker);
 }
 async function toggleWatch(ticker){const u=cu();if(!u)return;const wl=[...watchlist(u)];const i=wl.indexOf(ticker);if(i>=0){wl.splice(i,1);toast(ticker+' removed from watchlist');}else{wl.push(ticker);toast(ticker+' added to watchlist');}await updateUser(u.id,{watchlist:wl});render();}
+
+// ═══════════════════════════════════════════════
+// FUNDS
+// ═══════════════════════════════════════════════
+const fundUnits=u=>u.fund_units||{};
+const MAX_FUND_FEE_PCT=25;
+const getFund=id=>DB.funds.find(f=>f.id===id);
+const canManageFund=f=>{const u=cu();return !!u&&(u.id===f.manager_id||isChairman(u));};
+function currentFundNav(f){
+  const holdingsValue=Object.entries(f.holdings||{}).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0);
+  const totalValue=Math.round((f.cash+holdingsValue)*100)/100;
+  return f.units_outstanding>0?Math.round((totalValue/f.units_outstanding)*10000)/10000:10;
+}
+async function updateFund(fundId,data){const f=getFund(fundId);if(!f)return;Object.assign(f,data);await sb.patch('jex_funds','id=eq.'+fundId,data);}
+
+async function createFund(name,feePct){
+  const u=cu();if(!u||u.role!=='company')return toast('Only company accounts can create a fund');
+  if(!name||name.trim().length<3)return toast('Enter a fund name (at least 3 characters)');
+  feePct=parseFloat(feePct);
+  if(isNaN(feePct)||feePct<0||feePct>MAX_FUND_FEE_PCT)return toast('Performance fee must be between 0 and '+MAX_FUND_FEE_PCT+'%');
+  const rec={id:uid(),manager_id:u.id,manager_name:u.name,name:name.trim(),units_outstanding:0,cash:0,holdings:{},
+    fee_pct:Math.round(feePct*100)/100,status:'active',created_at:new Date().toISOString(),ts:ts()};
+  await sb.post('jex_funds',rec);DB.funds.push(rec);
+  await logActivity('fund_create',u.name+' launched a new fund: '+rec.name+' ('+rec.fee_pct+'% performance fee)',{userId:u.id,userName:u.name});
+  toast('Fund launched');UI.fundPage=rec.id;render();
+}
+async function closeFund(fundId){
+  const f=getFund(fundId);if(!f)return;
+  if(!canManageFund(f))return toast('Only this fund\'s manager or the Chairman can close it');
+  if(f.status!=='active')return;
+  await updateFund(fundId,{status:'closed'});
+  toast('Fund closed to new deposits — existing depositors can still withdraw');render();
+}
+async function depositToFund(fundId,amount){
+  const u=cu();if(!u)return;
+  const f=getFund(fundId);if(!f)return toast('Fund not found');
+  if(f.status!=='active')return toast('This fund is closed to new deposits');
+  amount=parseFloat(amount);
+  if(isNaN(amount)||amount<=0)return toast('Enter a valid amount');
+  if(u.cash<amount)return toast('Insufficient funds');
+  const nav=currentFundNav(f);
+  const unitsToMint=Math.round((amount/nav)*10000)/10000;
+  const existing=fundUnits(u)[fundId]||{units:0,costBasis:nav};
+  const newUnitsTotal=Math.round((existing.units+unitsToMint)*10000)/10000;
+  const newCostBasis=newUnitsTotal>0?Math.round((((existing.units*existing.costBasis)+(unitsToMint*nav))/newUnitsTotal)*10000)/10000:nav;
+  const newFundUnits={...fundUnits(u)};newFundUnits[fundId]={units:newUnitsTotal,costBasis:newCostBasis};
+  await updateUser(u.id,{cash:Math.round((u.cash-amount)*100)/100,fund_units:newFundUnits});
+  await updateFund(fundId,{cash:Math.round((f.cash+amount)*100)/100,units_outstanding:Math.round((f.units_outstanding+unitsToMint)*10000)/10000});
+  await logActivity('fund_deposit',u.name+' deposited '+fmt(amount)+' into '+f.name,{userId:u.id,userName:u.name,amount});
+  toast('Deposited '+fmt(amount)+' into '+f.name);render();
+}
+async function withdrawFromFund(fundId,unitsStr){
+  const u=cu();if(!u)return;
+  const f=getFund(fundId);if(!f)return toast('Fund not found');
+  const position=fundUnits(u)[fundId];
+  const held=position?position.units:0;
+  const units=parseFloat(unitsStr);
+  if(isNaN(units)||units<=0)return toast('Enter a valid number of units');
+  if(units>held+0.0001)return toast('You only hold '+held+' units');
+  const nav=currentFundNav(f);
+  const grossProceeds=Math.round((units*nav)*100)/100;
+  if(f.cash<grossProceeds)return toast('This fund does not have enough uninvested cash for this withdrawal — the manager needs to sell holdings first');
+  const gainPerUnit=Math.max(0,nav-position.costBasis);
+  const fee=Math.round((units*gainPerUnit*(f.fee_pct/100))*100)/100;
+  const netProceeds=Math.round((grossProceeds-fee)*100)/100;
+  const remainingUnits=Math.round((held-units)*10000)/10000;
+  const newFundUnits={...fundUnits(u)};
+  if(remainingUnits<=0.0001)delete newFundUnits[fundId];else newFundUnits[fundId]={units:remainingUnits,costBasis:position.costBasis};
+  await updateUser(u.id,{cash:Math.round((u.cash+netProceeds)*100)/100,fund_units:newFundUnits});
+  await updateFund(fundId,{cash:Math.round((f.cash-grossProceeds)*100)/100,units_outstanding:Math.round((f.units_outstanding-units)*10000)/10000});
+  if(fee>0){
+    const manager=getUser(f.manager_id);
+    if(manager)await updateUser(manager.id,{cash:Math.round((manager.cash+fee)*100)/100});
+  }
+  await logActivity('fund_withdraw',u.name+' withdrew '+fmt(netProceeds)+' from '+f.name+(fee?' (performance fee '+fmt(fee)+' to '+f.manager_name+')':''),{userId:u.id,userName:u.name,amount:netProceeds});
+  toast('Withdrew '+fmt(netProceeds)+' from '+f.name+(fee?' (after '+fmt(fee)+' performance fee)':''));render();
+}
+async function fundBuy(fundId,ticker,qty){
+  const f=getFund(fundId);const co=getCo(ticker);if(!f||!co)return;
+  if(!requireOpen(ticker))return;
+  const u=cu();if(!u||u.id!==f.manager_id)return toast('Only this fund\'s manager can trade on its behalf');
+  if(f.status!=='active')return toast('This fund is closed');
+  if(co.owner_id===f.manager_id)return toast('A fund cannot trade its own manager\'s company stock — conflict of interest');
+  if(!canAccessTicker(ticker,f.manager_id))return toast('This share class is restricted — the fund manager is not on the whitelist.');
+  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  if(co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
+  const np=impactPrice(co,qty,'buy'),cost=Math.round(np*qty*100)/100;
+  if(!checkPriceBand(ticker,np))return;
+  if(f.cash<cost)return toast('Fund has insufficient cash (need '+fmt(cost)+')');
+  const fH={...(f.holdings||{})};fH[ticker]=(fH[ticker]||0)+qty;
+  await updateCo(ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-qty),price_history:[...co.price_history,{p:np,t:isoNow()}]});
+  await creditCompanyCash(ticker,cost);
+  await recordTrade(ticker,qty,np,'fund:'+f.id,'exchange');
+  await updateFund(fundId,{cash:Math.round((f.cash-cost)*100)/100,holdings:fH});
+  toast('Fund bought '+qty+' × '+ticker+' @ '+fmt(np));render();
+}
+async function fundSell(fundId,ticker,qty){
+  const f=getFund(fundId);const co=getCo(ticker);if(!f||!co)return;
+  if(!requireOpen(ticker))return;
+  const u=cu();if(!u||u.id!==f.manager_id)return toast('Only this fund\'s manager can trade on its behalf');
+  if(f.status!=='active')return toast('This fund is closed');
+  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  const held=(f.holdings||{})[ticker]||0;if(held<qty)return toast('Fund only holds '+held+' shares');
+  const np=impactPrice(co,qty,'sell'),proceeds=Math.round(np*qty*100)/100;
+  const fH={...(f.holdings||{})};fH[ticker]=held-qty;if(fH[ticker]<=0)delete fH[ticker];
+  await updateCo(ticker,{price:np,shares_avail:co.shares_avail+qty,price_history:[...co.price_history,{p:np,t:isoNow()}]});
+  await recordTrade(ticker,qty,np,'exchange','fund:'+f.id);
+  await updateFund(fundId,{cash:Math.round((f.cash+proceeds)*100)/100,holdings:fH});
+  toast('Fund sold '+qty+' × '+ticker+' @ '+fmt(np));render();
+}
 async function postFinancials(ticker,period,revenue,profit,summary){
   const co=getCo(ticker);if(!co)return;
   const u=cu();if(!u||u.id!==co.owner_id)return toast('Only the company owner can post financials');
@@ -3679,10 +3793,10 @@ function renderBanner(){
 function renderNav(){
   const u=cu();
   let tabs;
-  if(isChairman(u))tabs=[['admin','Admin'],['market','Market'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
-  else if(isAdmin(u))tabs=[['admin','Admin'],['market','Market'],['settings','Settings']];
-  else if(u.role==='company')tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
-  else tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['leaderboard','Leaderboard'],['orders','Orders'+(()=>{if(!UI.userId)return'';const u=DB.users.find(x=>x.id===UI.userId);if(!u)return'';const open=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='open').length;const ah=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='after_hours').length;const sl=(DB.stopLossOrders||[]).filter(s=>s.user_id===u.id&&s.status==='active').length;const tot=open+ah+sl;return tot?' <span class="badge b-amber" style="font-size:10px">'+tot+'</span>':''})()],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
+  if(isChairman(u))tabs=[['admin','Admin'],['market','Market'],['funds','Funds'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
+  else if(isAdmin(u))tabs=[['admin','Admin'],['market','Market'],['funds','Funds'],['settings','Settings']];
+  else if(u.role==='company')tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['funds','Funds'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
+  else tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['funds','Funds'],['leaderboard','Leaderboard'],['orders','Orders'+(()=>{if(!UI.userId)return'';const u=DB.users.find(x=>x.id===UI.userId);if(!u)return'';const open=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='open').length;const ah=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='after_hours').length;const sl=(DB.stopLossOrders||[]).filter(s=>s.user_id===u.id&&s.status==='active').length;const tot=open+ah+sl;return tot?' <span class="badge b-amber" style="font-size:10px">'+tot+'</span>':''})()],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   return `<div class="nav">${tabs.map(([k,v])=>`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
 }
 
@@ -4266,6 +4380,121 @@ function renderLeaderboard(){
 // ═══════════════════════════════════════════════
 // RENDER: PORTFOLIO
 // ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════════
+// RENDER: FUNDS
+// ═══════════════════════════════════════════════
+function openFundPage(id){UI.fundPage=id;render();}
+function backToFundList(){UI.fundPage=null;render();}
+function renderFundsPage(){
+  if(UI.fundPage)return renderFundDetail(UI.fundPage);
+  return renderFundList();
+}
+function fundAUM(f){return Math.round((f.cash+Object.entries(f.holdings||{}).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0))*100)/100;}
+function renderFundList(){
+  const u=cu();
+  const activeFunds=DB.funds.filter(f=>f.status==='active');
+  const closedFunds=DB.funds.filter(f=>f.status!=='active');
+  let html='';
+  if(u.role==='company'){
+    html+=`<div class="card"><div class="section-title">Launch a fund</div>
+      <div class="ibox ibox-blue" style="margin-bottom:12px">Raise pooled capital from other students and companies, then trade it across the exchange on their behalf. You earn a performance fee only on the profit each depositor realizes when they withdraw — nothing if the fund loses money.</div>
+      <div class="frow"><label class="flabel">Fund name</label><input type="text" id="fund-name" placeholder="e.g. Acme Capital Growth Fund"></div>
+      <div class="frow"><label class="flabel">Performance fee (0–${MAX_FUND_FEE_PCT}%, charged only on a depositor's profit at withdrawal)</label><input type="number" id="fund-fee" placeholder="10" min="0" max="${MAX_FUND_FEE_PCT}" step="0.1" value="10"></div>
+      <button class="btn btn-primary" onclick="createFund(get('fund-name')?.value,get('fund-fee')?.value)">Launch fund</button>
+    </div>`;
+  }
+  html+='<div class="card"><div class="section-title">Active funds</div>';
+  if(!activeFunds.length){html+='<div class="empty">No active funds yet</div>';}
+  else{
+    html+='<table><thead><tr><th>Fund</th><th>Manager</th><th class="r">NAV</th><th class="r">AUM</th><th class="r">Since inception</th><th class="r">Fee</th></tr></thead><tbody>'
+      +activeFunds.map(f=>{
+        const nav=currentFundNav(f);
+        const ret=Math.round(((nav/10-1)*100)*100)/100;
+        return `<tr style="cursor:pointer" onclick="openFundPage('${f.id}')">
+          <td style="font-weight:500">${esc(f.name)}</td>
+          <td style="color:var(--text2)">${esc(f.manager_name)}</td>
+          <td class="r" style="font-family:var(--mono)">${fmt(nav)}</td>
+          <td class="r" style="font-family:var(--mono)">${fmt(fundAUM(f))}</td>
+          <td class="r ${ret>=0?'price-up':'price-down'}">${ret>=0?'+':''}${ret}%</td>
+          <td class="r">${f.fee_pct}%</td>
+        </tr>`;
+      }).join('')
+      +'</tbody></table>';
+  }
+  html+='</div>';
+  if(closedFunds.length){
+    html+='<div class="card"><div class="section-title">Closed funds</div><table><thead><tr><th>Fund</th><th>Manager</th><th class="r">NAV</th></tr></thead><tbody>'
+      +closedFunds.map(f=>`<tr style="cursor:pointer" onclick="openFundPage('${f.id}')"><td>${esc(f.name)}</td><td style="color:var(--text2)">${esc(f.manager_name)}</td><td class="r" style="font-family:var(--mono)">${fmt(currentFundNav(f))}</td></tr>`).join('')
+      +'</tbody></table></div>';
+  }
+  return html;
+}
+function renderFundDetail(fundId){
+  const f=getFund(fundId);
+  if(!f)return '<div class="empty">Fund not found</div><button class="btn btn-sm" onclick="backToFundList()">← Funds</button>';
+  const u=cu();
+  const nav=currentFundNav(f);
+  const aum=fundAUM(f);
+  const ret=Math.round(((nav/10-1)*100)*100)/100;
+  const isManager=u.id===f.manager_id;
+  const myPos=(u.role==='student'||u.role==='company')?fundUnits(u)[fundId]:null;
+
+  let html=`<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+    <button class="btn btn-sm" onclick="backToFundList()">← Funds</button>
+    <div style="flex:1;min-width:0"><div style="font-size:18px;font-weight:500">${esc(f.name)}</div><div style="font-size:12px;color:var(--text2)">Managed by ${esc(f.manager_name)} ${f.status!=='active'?'<span class="badge b-gray">Closed to new deposits</span>':''}</div></div>
+    ${canManageFund(f)&&f.status==='active'?`<button class="btn btn-sm btn-danger" onclick="if(confirm('Close this fund to new deposits? Existing depositors can still withdraw.'))closeFund('${f.id}')">Close fund</button>`:''}
+  </div>
+  <div class="grid4" style="margin-bottom:14px">
+    <div class="mcard"><div class="mlabel">NAV / unit</div><div class="mval" style="font-family:var(--mono)">${fmt(nav)}</div></div>
+    <div class="mcard"><div class="mlabel">Assets under management</div><div class="mval" style="font-family:var(--mono)">${fmt(aum)}</div></div>
+    <div class="mcard"><div class="mlabel">Since inception</div><div class="mval ${ret>=0?'green':'red'}">${ret>=0?'+':''}${ret}%</div></div>
+    <div class="mcard"><div class="mlabel">Performance fee</div><div class="mval">${f.fee_pct}%</div></div>
+  </div>`;
+
+  html+='<div class="card"><div class="section-title">Holdings</div>';
+  const posEntries=Object.entries(f.holdings||{});
+  if(!posEntries.length&&!f.cash){html+='<div class="empty">No positions yet</div>';}
+  else{
+    html+='<table><thead><tr><th>Position</th><th class="r">Qty</th><th class="r">Value</th></tr></thead><tbody>'
+      +posEntries.map(([t,q])=>{const c=getCo(t);return `<tr><td style="font-family:var(--mono)">${esc(t)}</td><td class="r">${q}</td><td class="r" style="font-family:var(--mono)">${fmt(c?c.price*q:0)}</td></tr>`;}).join('')
+      +`<tr><td>Cash</td><td class="r">—</td><td class="r" style="font-family:var(--mono)">${fmt(f.cash)}</td></tr>`
+      +'</tbody></table>';
+  }
+  html+='</div>';
+
+  if(u.role==='student'||u.role==='company'){
+    html+='<div class="card"><div class="section-title">Your position</div>';
+    if(myPos&&myPos.units>0){
+      const myValue=Math.round((myPos.units*nav)*100)/100;
+      const myGain=Math.round(((nav-myPos.costBasis)*myPos.units)*100)/100;
+      html+=`<div class="grid3" style="margin-bottom:12px">
+        <div class="mcard"><div class="mlabel">Units held</div><div class="mval">${myPos.units}</div></div>
+        <div class="mcard"><div class="mlabel">Current value</div><div class="mval" style="font-family:var(--mono)">${fmt(myValue)}</div></div>
+        <div class="mcard"><div class="mlabel">Unrealized gain</div><div class="mval ${myGain>=0?'green':'red'}" style="font-family:var(--mono)">${myGain>=0?'+':''}${fmt(myGain)}</div></div>
+      </div>
+      <div class="frow"><label class="flabel">Withdraw units (up to ${myPos.units})</label><div style="display:flex;gap:8px"><input type="number" id="fund-withdraw-units" placeholder="units" min="0" max="${myPos.units}" step="0.0001" style="flex:1"><button class="btn btn-danger btn-sm" onclick="withdrawFromFund('${f.id}',get('fund-withdraw-units')?.value)">Withdraw</button></div>
+      <div style="font-size:11px;color:var(--text2);margin-top:4px">A ${f.fee_pct}% performance fee applies only to your realized profit at withdrawal.</div></div>`;
+    } else {
+      html+='<div class="empty" style="margin-bottom:12px">You have no position in this fund</div>';
+    }
+    if(f.status==='active'){
+      html+=`<div class="frow"><label class="flabel">Deposit amount</label><div style="display:flex;gap:8px"><input type="number" id="fund-deposit-amount" placeholder="e.g. 500" min="0" step="0.01" style="flex:1"><button class="btn btn-primary btn-sm" onclick="depositToFund('${f.id}',get('fund-deposit-amount')?.value)">Deposit</button></div></div>`;
+    }
+    html+='</div>';
+  }
+
+  if(isManager&&f.status==='active'){
+    const tradable=DB.companies.filter(c=>c.status==='listed'&&c.owner_id!==f.manager_id);
+    html+=`<div class="card"><div class="section-title">Trade on behalf of the fund</div>
+      <div class="ibox ibox-amber" style="margin-bottom:12px">Fund cash available: <strong>${fmt(f.cash)}</strong>. You cannot trade your own company's stock through this fund.</div>
+      <div class="frow"><label class="flabel">Ticker</label><select id="fund-trade-ticker">${tradable.map(c=>`<option value="${c.ticker}">${c.ticker} — ${esc(c.name)} (${fmt(c.price)})</option>`).join('')}</select></div>
+      <div class="frow"><label class="flabel">Quantity</label><input type="number" id="fund-trade-qty" min="1" step="1" placeholder="e.g. 10"></div>
+      <div class="btn-row"><button class="btn btn-success btn-sm" onclick="fundBuy('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Buy</button><button class="btn btn-danger btn-sm" onclick="fundSell('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Sell</button></div>
+    </div>`;
+  }
+
+  return html;
+}
 function renderPortfolio(){
   const u=cu(),_pv=pv(u),_spnl=sPnl(u),_nw=nw(u);
   const held=Object.entries(holdings(u)),sh=Object.entries(shorts(u)).filter(([,s])=>s.qty>0);
@@ -6278,6 +6507,7 @@ function getPageContent(){
   if(t==='trades')return renderTrades(isAdmin(u));
   if(t==='apply')return renderApply();
   if(t==='mystock')return renderMyStock();
+  if(t==='funds')return renderFundsPage();
   if(t==='admin')return renderAdmin();
   if(t==='settings')return renderSettings();
   return '';
