@@ -3800,7 +3800,8 @@ function renderLogin(){
     const gaName=ga?esc(ga.name||''):'';
     const gaEmail=ga?esc(ga.email||''):'';
     const gaUsername=ga?esc(genUsernameFromEmail(ga.email)):'';
-    const gaBanner=ga?`<div class="ibox ibox-blue" style="margin-bottom:12px">🔵 Continuing with Google as <strong>${gaEmail}</strong> — no password needed.</div>`:'';
+    const gaBanner=ga?`<div class="ibox ibox-blue" style="margin-bottom:12px">🔵 Continuing with Google as <strong>${gaEmail}</strong> — no password needed.</div>`
+      :`<button type="button" class="btn" style="width:100%;margin-bottom:14px" onclick="signInWithGoogle()">Sign up with Google</button><div style="text-align:center;font-size:11px;color:var(--text2);margin:-8px 0 14px">or fill in the form below</div>`;
     const studentSecretFields=ga?'':`<div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-pw')" tabindex="-1">👁</button></div></div>
 <div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div>`;
     const coSecretFields=ga?'':`<div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div>`;
