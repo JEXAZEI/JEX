@@ -3876,9 +3876,9 @@ function renderLogin(){
   const tabCounts={admin:admins.length,company:companies.length,student:students.length};
   return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-tagline">JTED Stock Exchange</div>
   <div class="reg-tabs">
-    <button class="reg-tab ${UI.loginTab==='admin'?'active':''}" onclick="switchLoginTab('admin')">Administrators${tabCounts.admin?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.admin+'</span>':''}${pending?'<span class="badge b-blue" style="margin-left:4px">'+pending+' pending</span>':''}</button>
-    <button class="reg-tab ${UI.loginTab==='company'?'active':''}" onclick="switchLoginTab('company')">Companies${tabCounts.company?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.company+'</span>':''}</button>
-    <button class="reg-tab ${UI.loginTab==='student'?'active':''}" onclick="switchLoginTab('student')">Students${tabCounts.student?'<span class="badge b-gray" style="margin-left:4px">'+tabCounts.student+'</span>':''}</button>
+    <button class="reg-tab ${UI.loginTab==='admin'?'active':''}" onclick="switchLoginTab('admin')">Administrators${pending?'<span class="badge b-blue" style="margin-left:4px">'+pending+' pending</span>':''}</button>
+    <button class="reg-tab ${UI.loginTab==='company'?'active':''}" onclick="switchLoginTab('company')">Companies</button>
+    <button class="reg-tab ${UI.loginTab==='student'?'active':''}" onclick="switchLoginTab('student')">Students</button>
   </div>
   ${UI.loginTab!=='admin'?`<button type="button" class="btn" style="width:100%;margin-bottom:14px" onclick="signInWithGoogle()">Sign in with Google</button><div style="text-align:center;font-size:11px;color:var(--text2);margin:-8px 0 14px">or use a username and password</div>`:''}
   <div class="login-heading">Log in</div>
