@@ -3801,8 +3801,11 @@ function openContactAdminModal(){
   root.innerHTML=renderContactAdminModalHTML();
 }
 function closeContactAdminModal(){const root=document.getElementById('contact-modal-root');if(root)root.innerHTML='';}
+const ADMIN_ROLE_ORDER={chairman:0,president:1,secretary:2,treasurer:3,compliance_officer:4};
+const ADMIN_ROLE_LABELS={chairman:'Chairman',president:'President',secretary:'Secretary',treasurer:'Treasurer',compliance_officer:'Compliance Officer'};
 function renderContactAdminModalHTML(){
   const u=cu();
+  const officers=DB.users.filter(isAdmin).sort((a,b)=>(ADMIN_ROLE_ORDER[a.role]??9)-(ADMIN_ROLE_ORDER[b.role]??9));
   return `<div class="legal-overlay" onclick="if(event.target===this)closeContactAdminModal()">
     <div class="legal-box" style="max-width:480px;max-height:none">
       <div class="legal-header">
@@ -3810,7 +3813,8 @@ function renderContactAdminModalHTML(){
         <button class="legal-close" onclick="closeContactAdminModal()">✕</button>
       </div>
       <div class="legal-body">
-        <div class="ibox ibox-blue" style="margin-bottom:12px">This goes directly to the Chairman and President.</div>
+        <div class="ibox ibox-blue" style="margin-bottom:12px">This goes directly to every officer below.</div>
+        ${officers.length?`<div style="margin-bottom:14px">${officers.map(o=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)"><span style="font-size:13px">${esc(o.name)} <span class="badge b-gray" style="font-size:10px;margin-left:4px">${esc(ADMIN_ROLE_LABELS[o.role]||o.role)}</span></span><a href="mailto:${esc(o.email)}" class="legal-link" style="font-size:12px">${esc(o.email)}</a></div>`).join('')}</div>`:''}
         <div class="frow"><label class="flabel">Your name</label><input type="text" id="contact-name" value="${u?esc(u.name):''}" placeholder="Your name"></div>
         <div class="frow"><label class="flabel">Your email</label><input type="email" id="contact-email" value="${u?esc(u.email):''}" placeholder="you@school.edu"></div>
         <div class="frow"><label class="flabel">Message</label><textarea id="contact-message" rows="4" placeholder="What's on your mind?"></textarea></div>
@@ -3832,12 +3836,12 @@ async function submitContactMessage(){
     const rec={id:uid(),from_name:name,from_email:norm(email),user_id:u?u.id:null,message,status:'open',ts:ts()};
     await sb.post('jex_contact_messages',rec);
     DB.contactMessages.unshift(rec);
-    const admins=DB.users.filter(u2=>u2.role==='chairman'||u2.role==='president');
+    const admins=DB.users.filter(isAdmin);
     for(const a of admins){
       await pushNotification(a.id,'contact_admin','✉️ Message from '+name+': '+message.slice(0,80),null);
     }
     closeContactAdminModal();
-    toast('Message sent to the Chairman and President');
+    toast('Message sent to all officers');
   }catch(e){
     toast('Failed to send message: '+(e.message||e));
     if(btn){btn.disabled=false;btn.textContent='Send message';}
@@ -5388,16 +5392,17 @@ function renderAdmin(){
   const pDil=DB.dilApps.filter(d=>d.status==='pending'),rDil=DB.dilApps.filter(d=>d.status!=='pending');
   const pS=DB.pending.filter(r=>r.role==='student'),pC=DB.pending.filter(r=>r.role==='company');
 
-  // President can only see: session, balances, passwords
-  const presidentTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
-  const secretaryTabs=[['announcements','Announcements'],['minutes','Minutes'],['notices','Official notices'],['shareholders','Shareholder registry'],['votes_all','Vote oversight'],['news','News']];
-  const sectreTabs=u.role==='secretary'?secretaryTabs:[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
-  const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags']];
   const openFlags=(DB.flags||[]).filter(f=>f.status==='open').length;
   const openBugReports=(DB.bugReports||[]).filter(b=>b.status==='open').length;
   const openMessages=(DB.contactMessages||[]).filter(m=>m.status==='open').length;
-  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['bug_reports',openBugReports?'Bug reports <span class="badge b-red">'+openBugReports+'</span>':'Bug reports'],['messages',openMessages?'Messages <span class="badge b-red">'+openMessages+'</span>':'Messages'],['snapshots','Snapshots']];
-  const treasurerTabs=[['balances','Balances'],['cashflow','Cash flow'],['dividends_audit','Dividend audit'],['price_adj_log','Price adjustments'],['budget_warnings','Budget warnings'],['activity','Activity log']];
+  const messagesTabEntry=['messages',openMessages?'Messages <span class="badge b-red">'+openMessages+'</span>':'Messages'];
+  // President can only see: session, balances, passwords
+  const presidentTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
+  const secretaryTabs=[['announcements','Announcements'],['minutes','Minutes'],['notices','Official notices'],['shareholders','Shareholder registry'],['votes_all','Vote oversight'],['news','News'],messagesTabEntry];
+  const sectreTabs=u.role==='secretary'?secretaryTabs:[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log'],messagesTabEntry];
+  const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags'],messagesTabEntry];
+  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['bug_reports',openBugReports?'Bug reports <span class="badge b-red">'+openBugReports+'</span>':'Bug reports'],messagesTabEntry,['snapshots','Snapshots']];
+  const treasurerTabs=[['balances','Balances'],['cashflow','Cash flow'],['dividends_audit','Dividend audit'],['price_adj_log','Price adjustments'],['budget_warnings','Budget warnings'],['activity','Activity log'],messagesTabEntry];
   const tabs=(chair||isPresident(u))?chairmanTabs:u.role==='compliance_officer'?complianceTabs:u.role==='treasurer'?treasurerTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
   if(!allowedTabs.includes(UI.adminTab))UI.adminTab=tabs[0][0];
