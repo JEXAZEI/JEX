@@ -387,18 +387,51 @@ const SUPABASE_ANON_KEY = 'sb_publishable_-moLk6DXyj8L41Ope-RAXw_3YPkyv_8';
 const SESSION_KEY = 'jex-session-v3';
 const APP_VERSION = '1.0.0';
 
+// Headers carry the CURRENT user's own Supabase Auth access token when one exists
+// (real per-user identity, needed for RLS to ever enforce anything per-row), falling
+// back to the shared anon key otherwise — e.g. logged out, or a legacy account that
+// hasn't been migrated to real auth yet. supaAuth is declared further down; guarded
+// here since sb is defined before it.
+async function sbAuthToken(){
+  if(typeof supaAuth==='undefined'||!supaAuth)return SUPABASE_ANON_KEY;
+  try{
+    const{data}=await supaAuth.auth.getSession();
+    if(data&&data.session&&data.session.access_token)return data.session.access_token;
+  }catch(e){}
+  return SUPABASE_ANON_KEY;
+}
 const sb = {
-  h: {'Content-Type':'application/json','apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY},
   url:(t,q='')=>SUPABASE_URL+'/rest/v1/'+t+(q?'?'+q:''),
-  async get(t,q=''){const r=await fetch(this.url(t,q),{headers:{...this.h,'Accept':'application/json'}});if(!r.ok)throw new Error(await r.text());const d=await r.json();if(t==='jex_users'&&Array.isArray(d))d.forEach(u=>{delete u.password;delete u.sec_a;});return d;},
-  async post(t,d){const r=await fetch(this.url(t),{method:'POST',headers:{...this.h,'Prefer':'return=representation'},body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return r.json();},
-  async patch(t,q,d){const r=await fetch(this.url(t,q),{method:'PATCH',headers:{...this.h,'Prefer':'return=representation'},body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return r.json();},
-  async del(t,q){const r=await fetch(this.url(t,q),{method:'DELETE',headers:this.h});if(!r.ok)throw new Error(await r.text());}
+  async headers(extra){
+    const token=await sbAuthToken();
+    return {'Content-Type':'application/json','apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+token,...(extra||{})};
+  },
+  async get(t,q=''){const h=await this.headers({'Accept':'application/json'});const r=await fetch(this.url(t,q),{headers:h});if(!r.ok)throw new Error(await r.text());const d=await r.json();if(t==='jex_users'&&Array.isArray(d))d.forEach(u=>{delete u.password;delete u.sec_a;});return d;},
+  async post(t,d){const h=await this.headers({'Prefer':'return=representation'});const r=await fetch(this.url(t),{method:'POST',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return r.json();},
+  async patch(t,q,d){const h=await this.headers({'Prefer':'return=representation'});const r=await fetch(this.url(t,q),{method:'PATCH',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return r.json();},
+  async del(t,q){const h=await this.headers();const r=await fetch(this.url(t,q),{method:'DELETE',headers:h});if(!r.ok)throw new Error(await r.text());}
 };
 const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='YOUR_SUPABASE_ANON_KEY';
-// Used only for Google Sign-In (real Supabase Auth) — all other data access stays on the sb wrapper above.
+// Used for Google Sign-In and (Phase 1) migrated local accounts — all other data
+// access stays on the sb wrapper above, which itself borrows this client's session
+// token when one exists (see sbAuthToken below).
 let supaAuth=null;
-try{if(isConfigured()&&typeof window.supabase!=='undefined')supaAuth=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);}catch(e){console.warn('Supabase Auth client init failed:',e);}
+try{
+  if(isConfigured()&&typeof window.supabase!=='undefined'){
+    supaAuth=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
+    // A password-reset email link lands back here with a PASSWORD_RECOVERY event.
+    // Force out of any existing app session and show the "set new password" form,
+    // regardless of what the page happened to be showing before the link was clicked.
+    supaAuth.auth.onAuthStateChange((event)=>{
+      if(event==='PASSWORD_RECOVERY'){
+        UI.userId=null;
+        try{localStorage.removeItem(SESSION_KEY);}catch(e){}
+        UI.loginView='recover-pw';
+        render();
+      }
+    });
+  }
+}catch(e){console.warn('Supabase Auth client init failed:',e);}
 // ── Password hashing ─────────────────────────────────────
 // sb.get() strips password/sec_a off jex_users rows before they ever reach
 // DB.users, so auth checks must fetch the field for one user at a time
@@ -409,7 +442,8 @@ async function hashPw(pw){
 }
 const isHashed=v=>typeof v==='string'&&/^[0-9a-f]{64}$/i.test(v);
 async function fetchUserSecret(userId,field){
-  const r=await fetch(sb.url('jex_users','id=eq.'+encodeURIComponent(userId)+'&select='+field),{headers:{...sb.h,'Accept':'application/json'}});
+  const h=await sb.headers({'Accept':'application/json'});
+  const r=await fetch(sb.url('jex_users','id=eq.'+encodeURIComponent(userId)+'&select='+field),{headers:h});
   if(!r.ok)throw new Error(await r.text());
   const d=await r.json();
   return d[0]?.[field];
@@ -561,7 +595,7 @@ let charts={},sessionTimer=null;
 async function loadAll(){
   // ── Phase 1: critical data needed to render login ──────
   const [users,session,companies,announcements,halts]=await Promise.all([
-    sb.get('jex_users','order=created_at.asc&select=id,name,username,email,password,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,sec_a,auth_provider,created_at,classroom_id,email_notifications,notification_email'),
+    sb.get('jex_users','order=created_at.asc&select=id,name,username,email,password,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,sec_a,auth_provider,auth_uid,created_at,classroom_id,email_notifications,notification_email'),
     sb.get('jex_session','id=eq.1'),
     sb.get('jex_companies','order=created_at.asc'),
     sb.get('jex_announcements','order=created_at.desc'),
@@ -1430,8 +1464,14 @@ async function checkGoogleSession(){
   const email=norm(session.user.email);
   const meta=session.user.user_metadata||{};
   const name=String(meta.full_name||meta.name||email.split('@')[0]||'Google User');
+  const authUid=session.user.id||null;
   const existing=DB.users.find(u=>norm(u.email)===email&&(u.role==='student'||u.role==='company')&&u.status==='approved');
   if(existing){
+    // Quietly backfill auth_uid for a legacy account the first time it signs in with
+    // Google — costs nothing, and means one less account stuck on the old system.
+    if(authUid&&!existing.auth_uid){
+      try{await updateUser(existing.id,{auth_uid:authUid});}catch(e){console.warn('auth_uid backfill failed:',e);}
+    }
     UI.userId=existing.id;
     UI.navTab=isAdmin(existing)?'admin':existing.role==='company'?'apply':'market';
     try{localStorage.setItem(SESSION_KEY,existing.id);}catch(e){}
@@ -1446,7 +1486,7 @@ async function checkGoogleSession(){
     render();
     return;
   }
-  UI.googleAuth={email,name};
+  UI.googleAuth={email,name,authUid};
   UI.loginView='register';
   render();
 }
@@ -1513,7 +1553,19 @@ function renderRegEmailVerifyHTML(prefix){
   return '<div style="margin:-6px 0 12px"><button type="button" class="btn btn-sm" onclick="sendRegVerificationCode(&#39;'+prefix+'&#39;)">Send verification code</button></div>';
 }
 
-async function registerStudent(name,username,email,pw,secQ,secA,emailVerified,authProvider){
+// Tries to create a real Supabase Auth account for a new local (non-Google) signup.
+// Fails safe: if this doesn't succeed for any reason (misconfigured project, a stale
+// duplicate signup, no network), the caller falls back to today's custom password
+// system for that account rather than blocking registration outright.
+async function tryCreateAuthAccount(email,pw){
+  if(!supaAuth)return null;
+  try{
+    const{data,error}=await supaAuth.auth.signUp({email:norm(email),password:pw});
+    if(error){console.warn('Supabase Auth signup failed, using legacy auth for this account:',error.message);return null;}
+    return data?.user?.id||null;
+  }catch(e){console.warn('Supabase Auth signup failed, using legacy auth for this account:',e);return null;}
+}
+async function registerStudent(name,username,email,pw,secQ,secA,emailVerified,authProvider,authUid){
   if(!name||name.trim().length<2)return toast('Enter a valid name');
   const un=normalizeUsername(username);
   if(!validUsername(un))return toast('Username must be 3-20 characters: letters, numbers, underscore, or period');
@@ -1527,14 +1579,16 @@ async function registerStudent(name,username,email,pw,secQ,secA,emailVerified,au
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
   if(DB.users.find(u=>norm(u.username)===norm(un))||DB.pending.find(r=>norm(r.username)===norm(un)))return toast('Username already taken');
-  const pwHash=isGoogle?null:await hashPw(pw);
+  const newAuthUid=isGoogle?(authUid||null):await tryCreateAuthAccount(email,pw);
+  const isMigrated=isGoogle||!!newAuthUid;
+  const pwHash=isMigrated?null:await hashPw(pw);
   const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHash,role:'student',
-    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:norm(secA),
-    email_verified:isGoogle?true:!!emailVerified,auth_provider:isGoogle?'google':null,ts:ts()};
+    sec_q:isMigrated?null:secQ,sec_a:isMigrated?null:norm(secA),
+    email_verified:isGoogle?true:!!emailVerified,auth_provider:isGoogle?'google':null,auth_uid:newAuthUid,ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';UI.googleAuth=null;render();
 }
-async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerified,authProvider){
+async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerified,authProvider,authUid){
   if(!name||name.trim().length<2)return toast('Enter a valid company name');
   const un=normalizeUsername(username);
   if(!validUsername(un))return toast('Username must be 3-20 characters: letters, numbers, underscore, or period');
@@ -1549,10 +1603,12 @@ async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerifi
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
   if(DB.users.find(u=>norm(u.username)===norm(un))||DB.pending.find(r=>norm(r.username)===norm(un)))return toast('Username already taken');
-  const pwHashCo=isGoogle?null:await hashPw(pw);
+  const newAuthUidCo=isGoogle?(authUid||null):await tryCreateAuthAccount(email,pw);
+  const isMigratedCo=isGoogle||!!newAuthUidCo;
+  const pwHashCo=isMigratedCo?null:await hashPw(pw);
   const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHashCo,role:'company',description:desc.trim(),
-    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:norm(secA),
-    email_verified:isGoogle?true:!!emailVerified,auth_provider:isGoogle?'google':null,ts:ts()};
+    sec_q:isMigratedCo?null:secQ,sec_a:isMigratedCo?null:norm(secA),
+    email_verified:isGoogle?true:!!emailVerified,auth_provider:isGoogle?'google':null,auth_uid:newAuthUidCo,ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';UI.googleAuth=null;render();
 }
@@ -1561,7 +1617,7 @@ async function approveReg(id,startCash){
   const classroomId=document.getElementById('classroom-'+id)?.value||null;
   startCash=parseFloat(startCash)||DB.session.starting_cash||10000;
   const u={id:r.id,name:r.name,username:r.username||null,email:r.email,password:r.password,role:r.role,status:'approved',
-    cash:startCash,sec_q:r.sec_q,sec_a:r.sec_a,auth_provider:r.auth_provider||null,
+    cash:startCash,sec_q:r.sec_q,sec_a:r.sec_a,auth_provider:r.auth_provider||null,auth_uid:r.auth_uid||null,
     description:r.description||null,app_status:r.role==='company'?'none':null,
     holdings:{},shorts:{},watchlist:[],classroom_id:classroomId||null,
     email_notifications:false,notification_email:null,fund_units:{},created_at:new Date().toISOString()};
@@ -1578,6 +1634,11 @@ async function approveReg(id,startCash){
 }
 async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');render();}
 function switchLoginTab(role){UI.loginTab=role;UI.loginError=null;render();}
+function finishLogin(u){
+  UI.userId=u.id;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.loginError=null;UI.loginUsername='';
+  try{localStorage.setItem(SESSION_KEY,u.id);}catch(e){}
+  subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();return loadAll();
+}
 async function loginByForm(){
   const username=(get('login-username')?.value||'').trim();
   const pw=get('login-password')?.value||'';
@@ -1588,14 +1649,21 @@ async function loginByForm(){
   const u=pool.find(u=>(u.email&&norm(u.email)===idInput)||(u.username&&norm(u.username)===idInput));
   if(!u){UI.loginError='Invalid username or password';return render();}
   if(u.auth_provider==='google'){UI.loginError='This account uses Google Sign-In — use the button above instead of a password.';return render();}
+  if(u.auth_uid&&supaAuth){
+    // Migrated account: authenticate for real via Supabase Auth (needed so RLS can
+    // ever see who this request is actually from), not the legacy hash comparison.
+    let error;
+    try{({error}=await supaAuth.auth.signInWithPassword({email:u.email,password:pw}));}
+    catch(e){error=e;}
+    if(error){UI.loginError='Invalid username or password';return render();}
+    return finishLogin(u);
+  }
   const stored=await fetchUserSecret(u.id,'password');
   const candidate=isHashed(stored)?await hashPw(pw):pw; // support legacy plain-text during migration
   if(stored!==candidate){UI.loginError='Invalid username or password';return render();}
   // Auto-migrate plain-text password to hash on successful login
   if(!isHashed(stored)){const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+u.id,{password:h});}
-  UI.userId=u.id;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.loginError=null;UI.loginUsername='';
-  try{localStorage.setItem(SESSION_KEY,u.id);}catch(e){}
-  subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();await loadAll();
+  return finishLogin(u);
 }
 function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.fundPage=null;UI.tradePage=0;UI.googleAuth=null;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}if(supaAuth)supaAuth.auth.signOut().catch(()=>{});render();}
 async function changeEmail(uid2,newEmail,pw){
@@ -1616,6 +1684,18 @@ async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;
   if(storedPw!==curH)return toast('Current password incorrect');
   if(!nw2||nw2.length<6)return toast('Minimum 6 characters required');if(nw2!==conf)return toast('Passwords do not match');
   const h=await hashPw(nw2);await sb.patch('jex_users','id=eq.'+uid2,{password:h});toast('Password changed');render();}
+// For migrated (real Supabase Auth) accounts — no stored local password to check
+// against, so identity is proven by the live signed-in session instead.
+async function changePwSupa(nw2,conf){
+  if(!supaAuth)return toast('Not available right now');
+  if(!nw2||nw2.length<6)return toast('Minimum 6 characters required');
+  if(nw2!==conf)return toast('Passwords do not match');
+  try{
+    const{error}=await supaAuth.auth.updateUser({password:nw2});
+    if(error)return toast('Failed to update password: '+error.message);
+  }catch(e){return toast('Failed to update password: '+(e.message||e));}
+  toast('Password changed');render();
+}
 async function adminResetPw(uid2,pw){if(!isAdmin(cu()))return toast('Admin access required');if(!pw||pw.length<4)return toast('Min 4 characters');const u=getUser(uid2);if(!u)return;const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+uid2,{password:h});toast(u.name+"'s password reset");render();}
 async function toggleEmailNotifications(enabled){
   const u=cu();if(!u)return;
@@ -1634,9 +1714,35 @@ async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)retu
   const storedSq=await fetchUserSecret(uid2,'password');
   const sqH=isHashed(storedSq)?await hashPw(curPw):curPw;
   if(storedSq!==sqH)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');await sb.patch('jex_users','id=eq.'+uid2,{sec_q:newQ,sec_a:norm(newA)});u.sec_q=newQ;toast('Security question updated');render();}
-function forgotStep1(email){const u=DB.users.find(u=>u.email&&norm(u.email)===norm(email)&&u.status==='approved');if(!u)return toast('No account found with that email');if(u.auth_provider==='google')return toast('This account uses Google Sign-In — there\'s no password to reset. Use the "Sign in with Google" button instead.');UI.forgotUserId=u.id;UI.loginView='forgot-secq';render();}
+async function forgotStep1(email){
+  const u=DB.users.find(u=>u.email&&norm(u.email)===norm(email)&&u.status==='approved');
+  if(!u)return toast('No account found with that email');
+  if(u.auth_provider==='google')return toast('This account uses Google Sign-In — there\'s no password to reset. Use the "Sign in with Google" button instead.');
+  if(u.auth_uid&&supaAuth){
+    try{
+      const{error}=await supaAuth.auth.resetPasswordForEmail(u.email,{redirectTo:window.location.origin+window.location.pathname});
+      if(error)return toast('Could not send reset email: '+error.message);
+    }catch(e){return toast('Could not send reset email: '+(e.message||e));}
+    toast('Check your email for a password reset link');
+    UI.loginView='select';render();
+    return;
+  }
+  UI.forgotUserId=u.id;UI.loginView='forgot-secq';render();
+}
 async function forgotStep2(answer){const u=getUser(UI.forgotUserId);if(!u)return;const storedSecA=await fetchUserSecret(u.id,'sec_a');if(norm(answer)!==storedSecA)return toast('Incorrect answer — try again');UI.loginView='forgot-newpw';render();}
 async function forgotStep3(pw,conf){const u=getUser(UI.forgotUserId);if(!u)return;if(!pw||pw.length<4)return toast('Min 4 characters');if(pw!==conf)return toast('Passwords do not match');const fpH=await hashPw(pw);await sb.patch('jex_users','id=eq.'+u.id,{password:fpH});u.password=fpH;toast('Password reset');UI.loginView='select';UI.forgotUserId=null;render();}
+async function finishPasswordRecovery(pw,conf){
+  if(!supaAuth)return toast('Not available right now');
+  if(!pw||pw.length<6)return toast('Minimum 6 characters required');
+  if(pw!==conf)return toast('Passwords do not match');
+  try{
+    const{error}=await supaAuth.auth.updateUser({password:pw});
+    if(error)return toast('Failed to set password: '+error.message);
+  }catch(e){return toast('Failed to set password: '+(e.message||e));}
+  try{await supaAuth.auth.signOut();}catch(e){}
+  toast('Password set — you can now log in');
+  UI.loginView='select';render();
+}
 
 // ═══════════════════════════════════════════════
 // NEWS
@@ -3935,6 +4041,7 @@ function renderLogin(){
   if(UI.loginView==='forgot-email'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 1 of 3</div><div class="frow"><label class="flabel">Your email address</label><input type="email" id="forgot-email" placeholder="you@school.edu" onkeydown="if(event.key==='Enter')forgotStep1(get('forgot-email')?.value)"></div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep1(get('forgot-email')?.value)">Continue</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${esc(u?.name)}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="forgot-pw1" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="forgot-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw2')" tabindex="-1">👁</button></div></div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
+  if(UI.loginView==='recover-pw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Set a new password</div><div class="ibox ibox-blue" style="margin-bottom:12px">You followed a password reset link. Choose a new password below.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="recover-pw1" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('recover-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="recover-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('recover-pw2')" tabindex="-1">👁</button></div></div><div class="login-actions"><button class="btn btn-primary" onclick="finishPasswordRecovery(get('recover-pw1')?.value,get('recover-pw2')?.value)">Set password</button></div></div></div>`;}
   if(UI.loginView==='register'){
     const ga=UI.googleAuth;
     const gaName=ga?esc(ga.name||''):'';
@@ -3973,8 +4080,8 @@ function doRegister(){
   const ga=UI.googleAuth;
   if(ga){
     if(norm(ga.email)!==email)return toast('Email must match your Google account');
-    if(type==='student')registerStudent(get('reg-name')?.value,get('reg-username')?.value,get('reg-email')?.value,null,null,null,true,'google');
-    else registerCompany(get('reg-co-name')?.value,get('reg-co-username')?.value,get('reg-co-email')?.value,null,get('reg-co-desc')?.value,null,null,true,'google');
+    if(type==='student')registerStudent(get('reg-name')?.value,get('reg-username')?.value,get('reg-email')?.value,null,null,null,true,'google',ga.authUid);
+    else registerCompany(get('reg-co-name')?.value,get('reg-co-username')?.value,get('reg-co-email')?.value,null,get('reg-co-desc')?.value,null,null,true,'google',ga.authUid);
     return;
   }
   const vState=UI.regVerify[prefix];
@@ -4860,18 +4967,23 @@ function renderSettings(){
     ${DB.session.emailjs_service_id&&DB.session.emailjs_template_id&&DB.session.emailjs_public_key?'<div style="font-size:12px;color:var(--text2);margin-top:8px">✓ Configured — email alerts will send for students with it enabled</div>':''}
   </div>`:'';
   const isGoogleAccount=u.auth_provider==='google';
+  const isMigratedLocal=!!u.auth_uid&&!isGoogleAccount;
   const accountCard=`<div class="card"><div class="section-title">Account</div>
     <div class="grid2" style="margin-bottom:12px">
       <div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${esc(u.name)}</div></div>
       <div class="mcard"><div class="mlabel">Email (login)</div><div class="mval" style="font-size:14px;margin-top:4px;word-break:break-all">${esc(u.email)}</div></div>
     </div>
-    ${isGoogleAccount?`<div class="ibox ibox-blue">This account uses <strong>Google Sign-In</strong>. Your email is managed by Google and can't be changed here — sign in anytime with the "Sign in with Google" button on the login screen.</div>`:`
+    ${isGoogleAccount?`<div class="ibox ibox-blue">This account uses <strong>Google Sign-In</strong>. Your email is managed by Google and can't be changed here — sign in anytime with the "Sign in with Google" button on the login screen.</div>`
+    :isMigratedLocal?`<div class="ibox ibox-blue">Your email can't be changed here yet. Use "Forgot password?" on the login screen anytime to reset your password by email.</div>`
+    :`
     <div class="section-title" style="font-size:13px;margin-bottom:8px">Change email address</div>
     <div class="frow"><label class="flabel">New email address</label><input type="email" id="new-email" placeholder="${u.email}" autocomplete="email"></div>
     <div class="frow"><label class="flabel">Confirm with password</label><div class="pw-wrap"><input type="password" id="email-confirm-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('email-confirm-pw')" tabindex="-1">👁</button></div></div>
     <button class="btn btn-primary" onclick="changeEmail('${u.id}',get('new-email')?.value,get('email-confirm-pw')?.value)">Update email</button>`}
   </div>`;
-  const passwordCard=isGoogleAccount?'':`<div class="card"><div class="section-title">Change password</div><div class="frow"><label class="flabel">Current password</label><div class="pw-wrap"><input type="password" id="pw-cur" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('pw-cur')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="pw-new" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('pw-new')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="pw-conf" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('pw-conf')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="changePw('${u.id}',get('pw-cur')?.value,get('pw-new')?.value,get('pw-conf')?.value)">Update password</button></div>`;
+  const passwordCard=isGoogleAccount?''
+    :isMigratedLocal?`<div class="card"><div class="section-title">Change password</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="pw-new" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('pw-new')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="pw-conf" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('pw-conf')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="changePwSupa(get('pw-new')?.value,get('pw-conf')?.value)">Update password</button></div>`
+    :`<div class="card"><div class="section-title">Change password</div><div class="frow"><label class="flabel">Current password</label><div class="pw-wrap"><input type="password" id="pw-cur" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('pw-cur')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="pw-new" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('pw-new')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="pw-conf" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('pw-conf')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="changePw('${u.id}',get('pw-cur')?.value,get('pw-new')?.value,get('pw-conf')?.value)">Update password</button></div>`;
   return sheetsSection+emailjsSection+accountCard+passwordCard+
   `${u.role==='company'?`<div class="card"><div class="section-title">Company branding</div>
     <div class="ibox ibox-blue" style="margin-bottom:10px">Upload a logo image for your company. Shown on your ticker chip and company page. Max 200KB recommended.</div>
@@ -4903,7 +5015,7 @@ function renderSettings(){
       return pushRow+emailRow;
     })()}
   </div>
-  ${isGoogleAccount?'':`<div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><div class="pw-wrap"><input type="password" id="settings-secq-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('settings-secq-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`}`;
+  ${(isGoogleAccount||isMigratedLocal)?'':`<div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><div class="pw-wrap"><input type="password" id="settings-secq-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('settings-secq-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`}`;
 }
 
 // ═══════════════════════════════════════════════
