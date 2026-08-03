@@ -2998,7 +2998,10 @@ async function doBuyback(ticker,qty){
   const price=impactPrice(co,qty,'buy'),cost=Math.round(price*qty*100)/100;
   if(owner.cash<cost)return toast('Insufficient funds');
   await updateUser(owner.id,{cash:Math.round((owner.cash-cost)*100)/100});
-  await updateCo(ticker,{price,shares_avail:co.shares_avail+qty,shares:co.shares-qty,price_history:[...co.price_history,{p:price,t:'Buyback'}]});
+  // Bought-back shares are retired, not returned to the exchange's unsold pool — shares_avail
+  // is deliberately left untouched. (Previously this added qty back to shares_avail, which
+  // could push it above the new, smaller `shares` total for a large enough buyback.)
+  await updateCo(ticker,{price,shares:co.shares-qty,price_history:[...co.price_history,{p:price,t:'Buyback'}]});
   const bb={id:uid(),ticker,company_name:co.name,qty,price,total:cost,ts:ts()};
   await sb.post('jex_buybacks',bb);DB.buybacks.push(bb);
   toast('Bought back '+qty+' shares @ '+fmt(price));render();
