@@ -808,6 +808,19 @@ function buildCandleChart(canvasId,co){
   }catch(e){console.warn('buildCandleChart error:',e);buildChart(canvasId,co);}
 } // full timestamp for price history
 const priceChg=c=>{if(!c.price_history||c.price_history.length<2)return 0;const f=c.price_history[0].p,l=c.price_history[c.price_history.length-1].p;return f?((l-f)/f*100):0;};
+function computeJXI(){
+  const listed=DB.companies.filter(c=>c.status==='listed'&&!getClassMeta(c.ticker));
+  if(!listed.length)return{value:1000,change:0,constituents:[]};
+  const constituents=listed.map(c=>{
+    const base=(c.price_history&&c.price_history[0]&&c.price_history[0].p)||c.price;
+    const ratio=base>0?c.price/base:1;
+    return{ticker:c.ticker,name:c.name,price:c.price,ratio};
+  });
+  const avgRatio=constituents.reduce((s,x)=>s+x.ratio,0)/constituents.length;
+  const value=Math.round(avgRatio*1000*100)/100;
+  const change=Math.round(((avgRatio-1)*100)*100)/100;
+  return{value,change,constituents};
+}
 const holdings=u=>u.holdings||{};const shorts=u=>u.shorts||{};const watchlist=u=>u.watchlist||[];
 const pv=u=>Object.entries(holdings(u)).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0);
 const sPnl=u=>Object.entries(shorts(u)).reduce((s,[t,pos])=>{const c=getCo(t);if(!c)return s;return s+Math.round((pos.avgPrice-c.price)*pos.qty*100)/100;},0);
@@ -4194,6 +4207,22 @@ function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.com
   <div class="tprice" style="${halted?'color:var(--red)':''}">${fmt(c.price)}</div>
   ${preMarket?`<div style="font-size:10px;color:var(--amber)">pre: ${fmt(preMarket)}</div>`:`<div class="tchg ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</div>`}
   </div>`;}).join('')}</div>`;}
+function renderIndexCard(){
+  const idx=computeJXI();
+  if(!idx.constituents.length)return'';
+  return `<div class="card">
+    <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:10px">
+      <div>
+        <div class="section-title" style="margin-bottom:2px">JXI <span style="font-weight:400;color:var(--text2);font-size:12px">JEX Composite</span></div>
+        <div style="font-size:28px;font-weight:500;font-family:var(--mono)">${idx.value.toFixed(2)}</div>
+      </div>
+      <div class="${idx.change>=0?'price-up':'price-down'}" style="font-size:15px;font-weight:500">${idx.change>=0?'+':''}${idx.change}%</div>
+      <div style="margin-left:auto;font-size:12px;color:var(--text2)">${idx.constituents.length} listed compan${idx.constituents.length!==1?'ies':'y'} · equal-weighted · base 1000</div>
+    </div>
+    <table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th class="r">Since listing</th></tr></thead>
+    <tbody>${idx.constituents.map(c=>{const chg=Math.round(((c.ratio-1)*100)*100)/100;return `<tr><td>${esc(c.name)}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${esc(c.ticker)}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${chg>=0?'+':''}${chg}%</td></tr>`;}).join('')}</tbody></table>
+  </div>`;
+}
 function renderMarket(){
   const u=cu();
   const searchQ=(document.getElementById('market-search')?.value||'').toLowerCase();
@@ -4201,6 +4230,7 @@ function renderMarket(){
     &&(!searchQ||(c.name.toLowerCase().includes(searchQ)||c.ticker.toLowerCase().includes(searchQ))));
   const recentNews=DB.news.slice(0,5);
   return `${renderTickerBar()}
+    ${renderIndexCard()}
     <div class="card"><div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
       <div class="section-title" style="margin-bottom:0;flex:1">Listed companies</div>
       <input type="text" id="market-search" placeholder="Search by name or ticker..." style="max-width:240px;padding:6px 10px;font-size:13px" oninput="renderMarketInPlace()">
