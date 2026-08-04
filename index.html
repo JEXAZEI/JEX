@@ -1602,6 +1602,11 @@ async function registerStudent(name,username,email,pw,secQ,secA,emailVerified,au
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
   if(DB.users.find(u=>norm(u.username)===norm(un))||DB.pending.find(r=>norm(r.username)===norm(un)))return toast('Username already taken');
+  // Checked across every role, not just students: emails are the real Supabase Auth
+  // identity now, and checkGoogleSession()/loginByForm both key off email, so two
+  // approved-or-pending accounts sharing one email leads to genuinely broken, hard-to-
+  // diagnose login lockouts (whichever record .find() happens to match first "wins").
+  if(DB.users.find(u=>u.email&&norm(u.email)===norm(email))||DB.pending.find(r=>r.email&&norm(r.email)===norm(email)))return toast('An account with that email already exists');
   const newAuthUid=isGoogle?(authUid||null):await tryCreateAuthAccount(email,pw);
   const isMigrated=isGoogle||!!newAuthUid;
   const pwHash=isMigrated?null:await hashPw(pw);
@@ -1626,6 +1631,8 @@ async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerifi
   const n=name.trim();
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
   if(DB.users.find(u=>norm(u.username)===norm(un))||DB.pending.find(r=>norm(r.username)===norm(un)))return toast('Username already taken');
+  // See the matching check in registerStudent for why this spans every role.
+  if(DB.users.find(u=>u.email&&norm(u.email)===norm(email))||DB.pending.find(r=>r.email&&norm(r.email)===norm(email)))return toast('An account with that email already exists');
   const newAuthUidCo=isGoogle?(authUid||null):await tryCreateAuthAccount(email,pw);
   const isMigratedCo=isGoogle||!!newAuthUidCo;
   const pwHashCo=isMigratedCo?null:await hashPw(pw);
