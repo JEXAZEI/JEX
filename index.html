@@ -386,6 +386,13 @@ const SUPABASE_URL = 'https://hahxemgfkorglaoywybq.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_-moLk6DXyj8L41Ope-RAXw_3YPkyv_8';
 const SESSION_KEY = 'jex-session-v3';
 const APP_VERSION = '1.0.0';
+// jex_users/jex_pending grant anon/authenticated column-level SELECT on
+// everything except password/sec_a (see the password-hash-fix migration) —
+// a bare select=* is a table-level operation and fails outright under a
+// column-only grant, so every fetch of these two tables must explicitly
+// list columns. Centralized here so every call site stays in sync.
+const JEX_USERS_SAFE_SELECT = 'id,name,username,email,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,auth_provider,auth_uid,created_at,classroom_id,email_notifications,notification_email';
+const JEX_PENDING_SAFE_SELECT = 'id,name,email,role,sec_q,description,ts,created_at,classroom_id,username,auth_provider,email_verified,auth_uid';
 
 // Headers carry the CURRENT user's own Supabase Auth access token when one exists
 // (real per-user identity, needed for RLS to ever enforce anything per-row), falling
@@ -411,8 +418,14 @@ const sb = {
     // (see the password-hash-fix migration), so this is a no-op in practice —
     // kept in case that revoke is ever missing on a given project.
     if(t==='jex_users'&&Array.isArray(d))d.forEach(u=>{delete u.password;delete u.sec_a;});return d;},
-  async post(t,d){const h=await this.headers({'Prefer':'return=representation'});const r=await fetch(this.url(t),{method:'POST',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return r.json();},
-  async patch(t,q,d){const h=await this.headers({'Prefer':'return=representation'});const r=await fetch(this.url(t,q),{method:'PATCH',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return r.json();},
+  // jex_users/jex_pending only have column-level (not table-level) SELECT for
+  // anon/authenticated (see the password-hash-fix migration), and `return=
+  // representation` needs to read back the affected row same as a bare
+  // select=* does — same failure mode, so those two tables ask for no
+  // representation at all. Nothing reads the POST/PATCH response body for
+  // either table anyway (checked every call site before making this change).
+  async post(t,d){const minimal=t==='jex_users'||t==='jex_pending';const h=await this.headers({'Prefer':'return='+(minimal?'minimal':'representation')});const r=await fetch(this.url(t),{method:'POST',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return minimal?null:r.json();},
+  async patch(t,q,d){const minimal=t==='jex_users'||t==='jex_pending';const h=await this.headers({'Prefer':'return='+(minimal?'minimal':'representation')});const r=await fetch(this.url(t,q),{method:'PATCH',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return minimal?null:r.json();},
   async del(t,q){const h=await this.headers();const r=await fetch(this.url(t,q),{method:'DELETE',headers:h});if(!r.ok)throw new Error(await r.text());},
   async rpc(fn,params){const h=await this.headers({'Accept':'application/json'});const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:h,body:JSON.stringify(params||{})});if(!r.ok)throw new Error(await r.text());return r.json();}
 };
@@ -612,7 +625,7 @@ let charts={},sessionTimer=null;
 async function loadAll(){
   // ── Phase 1: critical data needed to render login ──────
   const [users,session,companies,announcements,halts]=await Promise.all([
-    sb.get('jex_users','order=created_at.asc&select=id,name,username,email,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,auth_provider,auth_uid,created_at,classroom_id,email_notifications,notification_email'),
+    sb.get('jex_users','order=created_at.asc&select='+JEX_USERS_SAFE_SELECT),
     sb.get('jex_session','id=eq.1'),
     sb.get('jex_companies','order=created_at.asc'),
     sb.get('jex_announcements','order=created_at.desc'),
@@ -633,7 +646,7 @@ async function loadAll(){
     activity,shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
     priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds,contactMessages,indexHistory]=await Promise.all([
-    sb.get('jex_pending','order=created_at.asc'),
+    sb.get('jex_pending','order=created_at.asc&select='+JEX_PENDING_SAFE_SELECT),
     sb.get('jex_news','order=created_at.desc&limit=50'),
     sb.get('jex_ipo_applications','order=created_at.asc'),
     sb.get('jex_dilution_applications','order=created_at.asc'),
@@ -1951,7 +1964,7 @@ async function reviewFounderAllocation(id,approve){
   if(approve){
     const co=getCo(a.ticker);
     // Reload student fresh from DB to get latest holdings
-    let studentArr=await sb.get('jex_users','id=eq.'+a.student_id);
+    let studentArr=await sb.get('jex_users','id=eq.'+a.student_id+'&select='+JEX_USERS_SAFE_SELECT);
     const student=studentArr&&studentArr[0];
     if(!co){toast('Company stock not found for ticker '+a.ticker);return;}
     if(!student){toast('Student not found: '+a.student_name);return;}
@@ -2934,7 +2947,7 @@ async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
   // Refresh buyer and seller in DB.users so shareholder lists stay current
   [buyerId,sellerId].forEach(async uid2=>{
     if(!uid2||['exchange','short','cover'].includes(uid2))return;
-    try{const fresh=await sb.get('jex_users','id=eq.'+uid2);
+    try{const fresh=await sb.get('jex_users','id=eq.'+uid2+'&select='+JEX_USERS_SAFE_SELECT);
     if(fresh&&fresh[0]){const local=getUser(uid2);if(local)Object.assign(local,fresh[0]);}}catch(e){}
   });
   pushToSheets('trades',{trades:[{ticker,qty,price,type,ts:ts(),
@@ -3168,7 +3181,7 @@ async function issueDividend(ticker,perShare,note,payerOverride,preApproved){
   if(isNaN(perShare)||perShare<=0)return toast('Enter a valid per-share amount');
   if(!note||note.trim().length<5)return toast('Please add a note');
   // Fetch all students fresh from Supabase so founder-allocated holdings are current
-  const freshStudents=await sb.get('jex_users','role=eq.student&status=eq.approved');
+  const freshStudents=await sb.get('jex_users','role=eq.student&status=eq.approved&select='+JEX_USERS_SAFE_SELECT);
   // Update local DB with fresh data
   freshStudents.forEach(fs=>{const local=getUser(fs.id);if(local)Object.assign(local,fs);else DB.users.push(fs);});
   const allT=getCompanyTickers(ticker);
@@ -4511,7 +4524,7 @@ function renderCompanyPage(parentTicker){
         +'</tbody></table>';
     }
     // Also trigger async fresh fetch
-    sb.get('jex_users','role=in.(student,company)&status=eq.approved').then(freshUsers=>{
+    sb.get('jex_users','role=in.(student,company)&status=eq.approved&select='+JEX_USERS_SAFE_SELECT).then(freshUsers=>{
       freshUsers.forEach(fu=>{const local=getUser(fu.id);if(local)Object.assign(local,fu);else DB.users.push(fu);});
       const freshMap={};
       allTickers.forEach(t=>{
@@ -5536,7 +5549,7 @@ function renderDivTab(co,myDivs){
   const allT=getCompanyTickers(co.ticker);
   const totalCirc=allT.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares-c.shares_avail:0);},0);
   // Fetch fresh holders async and populate
-  sb.get('jex_users','role=eq.student&status=eq.approved').then(freshUsers=>{
+  sb.get('jex_users','role=eq.student&status=eq.approved&select='+JEX_USERS_SAFE_SELECT).then(freshUsers=>{
     freshUsers.forEach(fu=>{const local=getUser(fu.id);if(local)Object.assign(local,fu);else DB.users.push(fu);});
     const freshSh=freshUsers.filter(s=>allT.some(t=>s.holdings&&(s.holdings[t]||0)>0));
     const el=document.getElementById('div-sh-count');if(el)el.textContent=freshSh.length;
