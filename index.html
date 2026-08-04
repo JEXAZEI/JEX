@@ -406,10 +406,15 @@ const sb = {
     const token=await sbAuthToken();
     return {'Content-Type':'application/json','apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+token,...(extra||{})};
   },
-  async get(t,q=''){const h=await this.headers({'Accept':'application/json'});const r=await fetch(this.url(t,q),{headers:h});if(!r.ok)throw new Error(await r.text());const d=await r.json();if(t==='jex_users'&&Array.isArray(d))d.forEach(u=>{delete u.password;delete u.sec_a;});return d;},
+  async get(t,q=''){const h=await this.headers({'Accept':'application/json'});const r=await fetch(this.url(t,q),{headers:h});if(!r.ok)throw new Error(await r.text());const d=await r.json();
+    // Defense in depth: the database itself now revokes SELECT on these columns
+    // (see the password-hash-fix migration), so this is a no-op in practice —
+    // kept in case that revoke is ever missing on a given project.
+    if(t==='jex_users'&&Array.isArray(d))d.forEach(u=>{delete u.password;delete u.sec_a;});return d;},
   async post(t,d){const h=await this.headers({'Prefer':'return=representation'});const r=await fetch(this.url(t),{method:'POST',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return r.json();},
   async patch(t,q,d){const h=await this.headers({'Prefer':'return=representation'});const r=await fetch(this.url(t,q),{method:'PATCH',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return r.json();},
-  async del(t,q){const h=await this.headers();const r=await fetch(this.url(t,q),{method:'DELETE',headers:h});if(!r.ok)throw new Error(await r.text());}
+  async del(t,q){const h=await this.headers();const r=await fetch(this.url(t,q),{method:'DELETE',headers:h});if(!r.ok)throw new Error(await r.text());},
+  async rpc(fn,params){const h=await this.headers({'Accept':'application/json'});const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:h,body:JSON.stringify(params||{})});if(!r.ok)throw new Error(await r.text());return r.json();}
 };
 const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='YOUR_SUPABASE_ANON_KEY';
 // Used for Google Sign-In and (Phase 1) migrated local accounts — all other data
@@ -451,20 +456,14 @@ try{
   }
 }catch(e){console.warn('Supabase Auth client init failed:',e);}
 // ── Password hashing ─────────────────────────────────────
-// sb.get() strips password/sec_a off jex_users rows before they ever reach
-// DB.users, so auth checks must fetch the field for one user at a time
-// instead of reading it off the cached record.
+// Only used to hash a NEWLY chosen password before writing it — checking
+// an EXISTING password/security-answer against what's on file happens
+// server-side now (verify_legacy_password / verify_legacy_security_answer
+// RPCs), since the database no longer lets the client read those columns
+// back at all.
 async function hashPw(pw){
   const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(String(pw)));
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
-}
-const isHashed=v=>typeof v==='string'&&/^[0-9a-f]{64}$/i.test(v);
-async function fetchUserSecret(userId,field){
-  const h=await sb.headers({'Accept':'application/json'});
-  const r=await fetch(sb.url('jex_users','id=eq.'+encodeURIComponent(userId)+'&select='+field),{headers:h});
-  if(!r.ok)throw new Error(await r.text());
-  const d=await r.json();
-  return d[0]?.[field];
 }
 
 // ═══════════════════════════════════════════════
@@ -613,7 +612,7 @@ let charts={},sessionTimer=null;
 async function loadAll(){
   // ── Phase 1: critical data needed to render login ──────
   const [users,session,companies,announcements,halts]=await Promise.all([
-    sb.get('jex_users','order=created_at.asc&select=id,name,username,email,password,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,sec_a,auth_provider,auth_uid,created_at,classroom_id,email_notifications,notification_email'),
+    sb.get('jex_users','order=created_at.asc&select=id,name,username,email,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,auth_provider,auth_uid,created_at,classroom_id,email_notifications,notification_email'),
     sb.get('jex_session','id=eq.1'),
     sb.get('jex_companies','order=created_at.asc'),
     sb.get('jex_announcements','order=created_at.desc'),
@@ -1646,17 +1645,16 @@ async function approveReg(id,startCash){
   const r=DB.pending.find(x=>x.id===id);if(!r)return;
   const classroomId=document.getElementById('classroom-'+id)?.value||null;
   startCash=parseFloat(startCash)||DB.session.starting_cash||10000;
-  const u={id:r.id,name:r.name,username:r.username||null,email:r.email,password:r.password,role:r.role,status:'approved',
-    cash:startCash,sec_q:r.sec_q,sec_a:r.sec_a,auth_provider:r.auth_provider||null,auth_uid:r.auth_uid||null,
-    description:r.description||null,app_status:r.role==='company'?'none':null,
-    holdings:{},shorts:{},watchlist:[],classroom_id:classroomId||null,
-    email_notifications:false,notification_email:null,fund_units:{},created_at:new Date().toISOString()};
-  // u.id reuses the pending record's id, so a double-click or two admins approving
-  // the same registration at once collide on the users table's primary key — the
-  // second POST throws instead of silently creating a duplicate account. Catch
+  // The copy from jex_pending into jex_users (including the legacy password
+  // hash, for accounts that still have one) happens entirely inside this
+  // function now, since the client itself can no longer read that value.
+  // u.id reuses the pending record's id, so a double-click or two admins
+  // approving the same registration at once collide on the primary key —
+  // the RPC throws instead of silently creating a duplicate account. Catch
   // that so the losing click gets a clear toast instead of an uncaught error.
-  try{await sb.post('jex_users',u);}catch(e){DB.pending=DB.pending.filter(x=>x.id!==id);render();return toast('This registration was already approved');}
-  await sb.del('jex_pending','id=eq.'+id);
+  let u;
+  try{u=await sb.rpc('approve_registration',{p_pending_id:id,p_starting_cash:startCash,p_classroom_id:classroomId||null});}
+  catch(e){DB.pending=DB.pending.filter(x=>x.id!==id);render();return toast('This registration was already approved');}
   DB.users.push(u);DB.pending=DB.pending.filter(x=>x.id!==id);
   await logActivity('registration',r.name+' approved ('+r.role+') with '+fmt(startCash),{userId:r.id,userName:r.name,amount:startCash});
 
@@ -1688,11 +1686,9 @@ async function loginByForm(){
     if(error){UI.loginError='Invalid username or password';return render();}
     return finishLogin(u);
   }
-  const stored=await fetchUserSecret(u.id,'password');
-  const candidate=isHashed(stored)?await hashPw(pw):pw; // support legacy plain-text during migration
-  if(stored!==candidate){UI.loginError='Invalid username or password';return render();}
-  // Auto-migrate plain-text password to hash on successful login
-  if(!isHashed(stored)){const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+u.id,{password:h});}
+  let ok=false;
+  try{ok=await sb.rpc('verify_legacy_password',{p_user_id:u.id,p_password:pw});}catch(e){ok=false;}
+  if(!ok){UI.loginError='Invalid username or password';return render();}
   return finishLogin(u);
 }
 function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.fundPage=null;UI.tradePage=0;UI.googleAuth=null;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}if(supaAuth)supaAuth.auth.signOut().catch(()=>{});render();}
@@ -1700,18 +1696,18 @@ async function changeEmail(uid2,newEmail,pw){
   const u=getUser(uid2);if(!u)return;
   if(!newEmail||!newEmail.includes('@'))return toast('Enter a valid email address');
   if(!pw)return toast('Enter your current password');
-  const storedEm=await fetchUserSecret(uid2,'password');
-  const emH=isHashed(storedEm)?await hashPw(pw):pw;
-  if(storedEm!==emH)return toast('Incorrect password');
+  let okEm=false;
+  try{okEm=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:pw});}catch(e){okEm=false;}
+  if(!okEm)return toast('Incorrect password');
   const norm_email=newEmail.trim().toLowerCase();
   if(DB.users.find(x=>x.id!==uid2&&x.email===norm_email))return toast('That email is already in use');
   await updateUser(uid2,{email:norm_email});
   toast('✓ Email updated to '+norm_email);render();
 }
 async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;
-  const storedPw=await fetchUserSecret(uid2,'password');
-  const curH=isHashed(storedPw)?await hashPw(cur):cur;
-  if(storedPw!==curH)return toast('Current password incorrect');
+  let okPw=false;
+  try{okPw=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:cur});}catch(e){okPw=false;}
+  if(!okPw)return toast('Current password incorrect');
   if(!nw2||nw2.length<6)return toast('Minimum 6 characters required');if(nw2!==conf)return toast('Passwords do not match');
   const h=await hashPw(nw2);await sb.patch('jex_users','id=eq.'+uid2,{password:h});toast('Password changed');render();}
 // For migrated (real Supabase Auth) accounts — no stored local password to check
@@ -1761,9 +1757,9 @@ async function saveNotifEmail(){
   toast('✓ Notification email saved: '+email);render();
 }
 async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)return;
-  const storedSq=await fetchUserSecret(uid2,'password');
-  const sqH=isHashed(storedSq)?await hashPw(curPw):curPw;
-  if(storedSq!==sqH)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');await sb.patch('jex_users','id=eq.'+uid2,{sec_q:newQ,sec_a:norm(newA)});u.sec_q=newQ;toast('Security question updated');render();}
+  let okSq=false;
+  try{okSq=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:curPw});}catch(e){okSq=false;}
+  if(!okSq)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');await sb.patch('jex_users','id=eq.'+uid2,{sec_q:newQ,sec_a:norm(newA)});u.sec_q=newQ;toast('Security question updated');render();}
 async function forgotStep1(email){
   const u=DB.users.find(u=>u.email&&norm(u.email)===norm(email)&&u.status==='approved');
   if(!u)return toast('No account found with that email');
@@ -1779,8 +1775,11 @@ async function forgotStep1(email){
   }
   UI.forgotUserId=u.id;UI.loginView='forgot-secq';render();
 }
-async function forgotStep2(answer){const u=getUser(UI.forgotUserId);if(!u)return;const storedSecA=await fetchUserSecret(u.id,'sec_a');if(norm(answer)!==storedSecA)return toast('Incorrect answer — try again');UI.loginView='forgot-newpw';render();}
-async function forgotStep3(pw,conf){const u=getUser(UI.forgotUserId);if(!u)return;if(!pw||pw.length<4)return toast('Min 4 characters');if(pw!==conf)return toast('Passwords do not match');const fpH=await hashPw(pw);await sb.patch('jex_users','id=eq.'+u.id,{password:fpH});u.password=fpH;toast('Password reset');UI.loginView='select';UI.forgotUserId=null;render();}
+async function forgotStep2(answer){const u=getUser(UI.forgotUserId);if(!u)return;
+  let okAns=false;
+  try{okAns=await sb.rpc('verify_legacy_security_answer',{p_user_id:u.id,p_answer:answer});}catch(e){okAns=false;}
+  if(!okAns)return toast('Incorrect answer — try again');UI.loginView='forgot-newpw';render();}
+async function forgotStep3(pw,conf){const u=getUser(UI.forgotUserId);if(!u)return;if(!pw||pw.length<4)return toast('Min 4 characters');if(pw!==conf)return toast('Passwords do not match');const fpH=await hashPw(pw);await sb.patch('jex_users','id=eq.'+u.id,{password:fpH});toast('Password reset');UI.loginView='select';UI.forgotUserId=null;render();}
 async function finishPasswordRecovery(pw,conf){
   if(!supaAuth)return toast('Not available right now');
   if(!pw||pw.length<6)return toast('Minimum 6 characters required');
