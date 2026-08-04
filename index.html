@@ -416,14 +416,32 @@ const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='
 // access stays on the sb wrapper above, which itself borrows this client's session
 // token when one exists (see sbAuthToken below).
 let supaAuth=null;
+// True for the whole page load a password-reset link was opened on. Guards checkGoogleSession()
+// (see below) from racing the PASSWORD_RECOVERY event: that event fires asynchronously, and if
+// checkGoogleSession()'s own getSession() call resolves first, it would otherwise treat the
+// brand-new recovery session exactly like a returning Google login and silently sign the browser
+// into the target account — skipping the "set new password" screen entirely. The URL itself is
+// also checked synchronously as a second, ordering-independent signal, since Supabase's redirect
+// link carries a recovery marker (type=recovery) before the SDK has even parsed it into an event.
+let _passwordRecoveryActive=/type=recovery/.test(window.location.hash)||/type=recovery/.test(window.location.search);
+// A recovery session is otherwise indistinguishable from a normal signed-in session once
+// persisted — if someone opens a reset link and then just closes the tab without setting a
+// new password, that live session would still be sitting in localStorage on the next visit,
+// and _passwordRecoveryActive (in-memory, reset every page load) can't catch that later visit.
+// Remembering this specific session's access_token here (durable, survives a reload) lets
+// checkGoogleSession() keep refusing to auto-login with THIS session while not affecting any
+// later, genuine login by the same person (which mints a different token entirely).
+const RECOVERY_TOKEN_KEY='jex-recovery-token';
 try{
   if(isConfigured()&&typeof window.supabase!=='undefined'){
     supaAuth=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
     // A password-reset email link lands back here with a PASSWORD_RECOVERY event.
     // Force out of any existing app session and show the "set new password" form,
     // regardless of what the page happened to be showing before the link was clicked.
-    supaAuth.auth.onAuthStateChange((event)=>{
+    supaAuth.auth.onAuthStateChange((event,session)=>{
       if(event==='PASSWORD_RECOVERY'){
+        _passwordRecoveryActive=true;
+        if(session&&session.access_token){try{localStorage.setItem(RECOVERY_TOKEN_KEY,session.access_token);}catch(e){}}
         UI.userId=null;
         try{localStorage.removeItem(SESSION_KEY);}catch(e){}
         UI.loginView='recover-pw';
@@ -1455,12 +1473,17 @@ async function signInWithGoogle(){
 }
 async function checkGoogleSession(){
   if(!supaAuth)return;
+  // Never auto-login off a password-recovery session — see _passwordRecoveryActive above.
+  if(_passwordRecoveryActive)return;
   let session=null;
   try{
     const res=await supaAuth.auth.getSession();
     session=res&&res.data&&res.data.session;
   }catch(e){console.warn('Google session check failed:',e);return;}
   if(!session||!session.user||!session.user.email)return;
+  // Also refuse a session left over from an abandoned recovery link on a LATER page load
+  // (see RECOVERY_TOKEN_KEY above) — the in-memory flag alone only covers the same load.
+  try{if(session.access_token&&session.access_token===localStorage.getItem(RECOVERY_TOKEN_KEY))return;}catch(e){}
   const email=norm(session.user.email);
   const meta=session.user.user_metadata||{};
   const name=String(meta.full_name||meta.name||email.split('@')[0]||'Google User');
@@ -1696,7 +1719,27 @@ async function changePwSupa(nw2,conf){
   }catch(e){return toast('Failed to update password: '+(e.message||e));}
   toast('Password changed');render();
 }
-async function adminResetPw(uid2,pw){if(!isAdmin(cu()))return toast('Admin access required');if(!pw||pw.length<4)return toast('Min 4 characters');const u=getUser(uid2);if(!u)return;const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+uid2,{password:h});toast(u.name+"'s password reset");render();}
+async function adminResetPw(uid2,pw){
+  if(!isAdmin(cu()))return toast('Admin access required');
+  const u=getUser(uid2);if(!u)return;
+  // Migrated/Google accounts authenticate via real Supabase Auth, which this legacy
+  // password-hash column has no effect on — setting it here would silently do nothing
+  // while telling the officer it worked. Route those through a real reset email instead.
+  if(u.auth_provider==='google'||u.auth_uid)return toast('This account uses real sign-in — use "Send password reset email" instead');
+  if(!pw||pw.length<4)return toast('Min 4 characters');
+  const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+uid2,{password:h});toast(u.name+"'s password reset");render();
+}
+async function adminSendResetEmail(uid2){
+  if(!isAdmin(cu()))return toast('Admin access required');
+  const u=getUser(uid2);if(!u)return;
+  if(u.auth_provider==='google')return toast('This account uses Google Sign-In — there is no password to reset');
+  if(!supaAuth)return toast('Not available right now');
+  try{
+    const{error}=await supaAuth.auth.resetPasswordForEmail(u.email,{redirectTo:window.location.origin+window.location.pathname});
+    if(error)return toast('Could not send reset email: '+error.message);
+  }catch(e){return toast('Could not send reset email: '+(e.message||e));}
+  toast('Password reset email sent to '+u.email);render();
+}
 async function toggleEmailNotifications(enabled){
   const u=cu();if(!u)return;
   await updateUser(u.id,{email_notifications:enabled});
@@ -1740,6 +1783,7 @@ async function finishPasswordRecovery(pw,conf){
     if(error)return toast('Failed to set password: '+error.message);
   }catch(e){return toast('Failed to set password: '+(e.message||e));}
   try{await supaAuth.auth.signOut();}catch(e){}
+  try{localStorage.removeItem(RECOVERY_TOKEN_KEY);}catch(e){}
   toast('Password set — you can now log in');
   UI.loginView='select';render();
 }
@@ -5804,7 +5848,16 @@ function renderAdminPasswords(students,companies){
 function renderAdminResetForm(){
   const uid2=get('admin-reset-uid')?.value;const form=get('admin-reset-form');if(!form)return;
   if(!uid2){form.innerHTML='';return;}const u=getUser(uid2);if(!u){form.innerHTML='';return;}
-  form.innerHTML=`<div style="font-size:13px;margin-bottom:10px;padding:10px;background:var(--bg3);border-radius:var(--radius)">Resetting: <strong>${esc(u.name)}</strong><br><span style="font-size:12px;color:var(--text2)">Security question: ${esc(u.sec_q||'—')}</span></div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="admin-reset-pw" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('admin-reset-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="adminResetPw('${u.id}',get('admin-reset-pw')?.value)">Reset password</button>`;
+  const header=`<div style="font-size:13px;margin-bottom:10px;padding:10px;background:var(--bg3);border-radius:var(--radius)">Resetting: <strong>${esc(u.name)}</strong></div>`;
+  if(u.auth_provider==='google'){
+    form.innerHTML=header+`<div class="ibox ibox-blue">This account uses Google Sign-In — there's no password to reset. If they're locked out, they need to regain access to their Google account.</div>`;
+    return;
+  }
+  if(u.auth_uid){
+    form.innerHTML=header+`<div class="ibox ibox-blue" style="margin-bottom:10px">This account uses real sign-in, not the legacy password system — a direct reset here wouldn't actually change their credential. Send them a password reset email instead.</div><button class="btn btn-primary" onclick="adminSendResetEmail('${u.id}')">Send password reset email</button>`;
+    return;
+  }
+  form.innerHTML=header+`<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Security question: ${esc(u.sec_q||'—')}</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="admin-reset-pw" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('admin-reset-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="adminResetPw('${u.id}',get('admin-reset-pw')?.value)">Reset password</button>`;
 }
 function renderAdminIPO(pIPO,rIPO){
   return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${esc(a.description||'no desc')}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewIPO('${a.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewIPO('${a.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}`;
