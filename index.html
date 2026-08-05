@@ -1737,7 +1737,7 @@ async function changeEmailSupa(uid2,newEmail){
   const norm_email=newEmail.trim().toLowerCase();
   if(DB.users.find(x=>x.id!==uid2&&x.email===norm_email))return toast('That email is already in use');
   try{
-    const{error}=await supaAuth.auth.updateUser({email:norm_email});
+    const{error}=await supaAuth.auth.updateUser({email:norm_email},{emailRedirectTo:window.location.origin+window.location.pathname});
     if(error)return toast('Failed to update email: '+error.message);
   }catch(e){return toast('Failed to update email: '+(e.message||e));}
   await updateUser(uid2,{email:norm_email});
@@ -4082,39 +4082,11 @@ function renderContactAdminModalHTML(){
         <button class="legal-close" onclick="closeContactAdminModal()">✕</button>
       </div>
       <div class="legal-body">
-        <div class="ibox ibox-blue" style="margin-bottom:12px">This goes directly to every officer below.</div>
-        ${officers.length?`<div style="margin-bottom:14px">${officers.map(o=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)"><span style="font-size:13px">${esc(o.name)} <span class="badge b-gray" style="font-size:10px;margin-left:4px">${esc(ADMIN_ROLE_LABELS[o.role]||o.role)}</span></span><a href="mailto:${esc(o.email)}" class="legal-link" style="font-size:12px">${esc(o.email)}</a></div>`).join('')}</div>`:''}
-        <div class="frow"><label class="flabel">Your name</label><input type="text" id="contact-name" value="${u?esc(u.name):''}" placeholder="Your name"></div>
-        <div class="frow"><label class="flabel">Your email</label><input type="email" id="contact-email" value="${u?esc(u.email):''}" placeholder="you@school.edu"></div>
-        <div class="frow"><label class="flabel">Message</label><textarea id="contact-message" rows="4" placeholder="What's on your mind?"></textarea></div>
-        <button class="btn btn-primary" id="contact-submit-btn" onclick="submitContactMessage()" style="width:100%">Send message</button>
+        <div class="ibox ibox-blue" style="margin-bottom:12px">Click an officer's email below to contact them directly.</div>
+        ${officers.length?`<div>${officers.map(o=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)"><span style="font-size:13px">${esc(o.name)} <span class="badge b-gray" style="font-size:10px;margin-left:4px">${esc(ADMIN_ROLE_LABELS[o.role]||o.role)}</span></span><a href="mailto:${esc(o.email)}" class="legal-link" style="font-size:12px">${esc(o.email)}</a></div>`).join('')}</div>`:'<div class="empty">No officers to contact yet</div>'}
       </div>
     </div>
   </div>`;
-}
-async function submitContactMessage(){
-  const u=cu();
-  const name=(get('contact-name')?.value||'').trim();
-  const email=(get('contact-email')?.value||'').trim();
-  const message=(get('contact-message')?.value||'').trim();
-  if(!name||name.length<2)return toast('Enter your name');
-  if(!validEmail(email))return toast('Enter a valid email so admins can reply');
-  if(!message||message.length<10)return toast('Please write a message (at least 10 characters)');
-  const btn=get('contact-submit-btn');if(btn){btn.disabled=true;btn.textContent='Sending…';}
-  try{
-    const rec={id:uid(),from_name:name,from_email:norm(email),user_id:u?u.id:null,message,status:'open',ts:ts()};
-    await sb.post('jex_contact_messages',rec);
-    DB.contactMessages.unshift(rec);
-    const admins=DB.users.filter(isAdmin);
-    for(const a of admins){
-      await pushNotification(a.id,'contact_admin','✉️ Message from '+name+': '+message.slice(0,80),null);
-    }
-    closeContactAdminModal();
-    toast('Message sent to all officers');
-  }catch(e){
-    toast('Failed to send message: '+(e.message||e));
-    if(btn){btn.disabled=false;btn.textContent='Send message';}
-  }
 }
 async function resolveContactMessage(msgId){
   const m=DB.contactMessages.find(x=>x.id===msgId);if(!m)return;
