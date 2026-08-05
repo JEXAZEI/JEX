@@ -1720,6 +1720,22 @@ async function changeEmail(uid2,newEmail,pw){
   await updateUser(uid2,{email:norm_email});
   toast('✓ Email updated to '+norm_email);render();
 }
+// For migrated (real Supabase Auth) accounts — identity is proven by the live signed-in
+// session, so no current-password confirmation is needed. Updates the real Auth email
+// (what signInWithPassword actually authenticates against) alongside jex_users.email, so
+// the two never drift out of sync with each other.
+async function changeEmailSupa(uid2,newEmail){
+  if(!supaAuth)return toast('Not available right now');
+  if(!newEmail||!newEmail.includes('@'))return toast('Enter a valid email address');
+  const norm_email=newEmail.trim().toLowerCase();
+  if(DB.users.find(x=>x.id!==uid2&&x.email===norm_email))return toast('That email is already in use');
+  try{
+    const{error}=await supaAuth.auth.updateUser({email:norm_email});
+    if(error)return toast('Failed to update email: '+error.message);
+  }catch(e){return toast('Failed to update email: '+(e.message||e));}
+  await updateUser(uid2,{email:norm_email});
+  toast('✓ Email updated to '+norm_email);render();
+}
 async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;
   let okPw=false;
   try{okPw=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:cur});}catch(e){okPw=false;}
@@ -2006,7 +2022,7 @@ async function reviewFounderAllocation(id,approve){
 // STOCK PRICE ADJUSTMENT (Chairman)
 // ═══════════════════════════════════════════════
 async function adjustStockPrice(ticker,pct,reason){
-  if(!isAdmin(cu()))return toast('Admin access required');
+  if(!isChairman(cu()))return toast('Only the Chairman or President can adjust stock prices');
   if(!ticker)return toast('Select a ticker');
   pct=parseFloat(pct);
   if(isNaN(pct)||pct===0)return toast('Enter a non-zero percentage');
@@ -5045,7 +5061,10 @@ function renderSettings(){
       <div class="mcard"><div class="mlabel">Email (login)</div><div class="mval" style="font-size:14px;margin-top:4px;word-break:break-all">${esc(u.email)}</div></div>
     </div>
     ${isGoogleAccount?`<div class="ibox ibox-blue">This account uses <strong>Google Sign-In</strong>. Your email is managed by Google and can't be changed here — sign in anytime with the "Sign in with Google" button on the login screen.</div>`
-    :isMigratedLocal?`<div class="ibox ibox-blue">Your email can't be changed here yet. Use "Forgot password?" on the login screen anytime to reset your password by email.</div>`
+    :isMigratedLocal?`
+    <div class="section-title" style="font-size:13px;margin-bottom:8px">Change email address</div>
+    <div class="frow"><label class="flabel">New email address</label><input type="email" id="new-email" placeholder="${u.email}" autocomplete="email"></div>
+    <button class="btn btn-primary" onclick="changeEmailSupa('${u.id}',get('new-email')?.value)">Update email</button>`
     :`
     <div class="section-title" style="font-size:13px;margin-bottom:8px">Change email address</div>
     <div class="frow"><label class="flabel">New email address</label><input type="email" id="new-email" placeholder="${u.email}" autocomplete="email"></div>
@@ -6324,7 +6343,7 @@ function renderAdminListed(){
     `<button class="btn btn-sm btn-danger" onclick="delistCompany('${c.ticker}')">Delist</button>`
   }</td></tr>`;}).join('')||`<tr><td colspan="7"><div class="empty">No listed companies</div></td></tr>`}
     </tbody></table></div>
-  <div class="card"><div class="section-title">Price adjustment</div>
+  ${isChairman(cu())?`<div class="card"><div class="section-title">Price adjustment</div>
     <div class="ibox ibox-amber">Apply a percentage boost or drop to any stock. Notifies all holders. Use positive % to boost, negative % to drop (e.g. -10 = drop 10%).</div>
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Stock</label>
@@ -6347,7 +6366,7 @@ function renderAdminListed(){
       <td style="font-size:12px;color:var(--text2)">${a.applied_by||'—'}</td>
       <td style="font-size:12px;color:var(--text2)">${a.ts||''}</td>
     </tr>`).join('')}</tbody></table>`:''}
-  </div>`;
+  </div>`:''}`;
 }
 
 // ═══════════════════════════════════════════════
