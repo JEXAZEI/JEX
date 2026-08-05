@@ -1726,6 +1726,13 @@ async function changeEmail(uid2,newEmail,pw){
 // the two never drift out of sync with each other.
 async function changeEmailSupa(uid2,newEmail){
   if(!supaAuth)return toast('Not available right now');
+  // Unlike the legacy changeEmail (whose current-password check is itself tied to
+  // uid2), identity here comes from the live session alone — so uid2 must be pinned
+  // to whoever that session actually belongs to, or a caller could pass someone
+  // else's id and overwrite THEIR jex_users.email while only re-authenticating their
+  // own real Auth account, leaving the victim's row pointing at an email their real
+  // credential no longer matches.
+  if(!cu()||uid2!==cu().id)return toast('You can only change your own email');
   if(!newEmail||!newEmail.includes('@'))return toast('Enter a valid email address');
   const norm_email=newEmail.trim().toLowerCase();
   if(DB.users.find(x=>x.id!==uid2&&x.email===norm_email))return toast('That email is already in use');
@@ -1757,6 +1764,7 @@ async function changePwSupa(nw2,conf){
 async function adminResetPw(uid2,pw){
   if(!isAdmin(cu()))return toast('Admin access required');
   const u=getUser(uid2);if(!u)return;
+  if(u.role==='chairman'||u.role==='president')return toast('Chairman and President passwords cannot be reset here');
   // Migrated/Google accounts authenticate via real Supabase Auth, which this legacy
   // password-hash column has no effect on — setting it here would silently do nothing
   // while telling the officer it worked. Route those through a real reset email instead.
@@ -1767,6 +1775,7 @@ async function adminResetPw(uid2,pw){
 async function adminSendResetEmail(uid2){
   if(!isAdmin(cu()))return toast('Admin access required');
   const u=getUser(uid2);if(!u)return;
+  if(u.role==='chairman'||u.role==='president')return toast('Chairman and President passwords cannot be reset here');
   if(!supaAuth)return toast('Not available right now');
   try{
     const{error}=await supaAuth.auth.resetPasswordForEmail(u.email,{redirectTo:window.location.origin+window.location.pathname});
@@ -3310,6 +3319,10 @@ async function reviewDilution(id,approve){
 async function removeUser(uid2){
   if(!isAdmin(cu()))return toast('Admin access required');
   const u=getUser(uid2);if(!u)return;
+  if(u.role==='chairman'||u.role==='president'){
+    if(cu().role!=='chairman')return toast('Only the Chairman can remove Chairman/President accounts');
+    if(uid2===cu().id)return toast('You cannot remove your own account');
+  }
   if(!confirm('Remove '+u.name+'? This cannot be undone.'))return;
   await sb.del('jex_users','id=eq.'+uid2);
   DB.users=DB.users.filter(x=>x.id!==uid2);
