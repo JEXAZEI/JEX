@@ -1689,10 +1689,12 @@ async function loginByForm(){
   const idInput=norm(normalizeUsername(username));
   const u=pool.find(u=>(u.email&&norm(u.email)===idInput)||(u.username&&norm(u.username)===idInput));
   if(!u){UI.loginError='Invalid username or password';return render();}
-  if(u.auth_provider==='google'){UI.loginError='This account uses Google Sign-In — use the button above instead of a password.';return render();}
-  if(u.auth_uid&&supaAuth){
-    // Migrated account: authenticate for real via Supabase Auth (needed so RLS can
-    // ever see who this request is actually from), not the legacy hash comparison.
+  if((u.auth_uid||u.auth_provider==='google')&&supaAuth){
+    // Covers migrated accounts and Google-linked accounts alike — Google accounts can
+    // now optionally set a password too (see changePwSupa), so this just attempts a
+    // real Supabase Auth sign-in either way rather than hard-blocking Google accounts
+    // from ever trying a password. One that never set one simply gets "invalid" below,
+    // same as any other wrong/missing credential.
     let error;
     try{({error}=await supaAuth.auth.signInWithPassword({email:u.email,password:pw}));}
     catch(e){error=e;}
@@ -1748,7 +1750,6 @@ async function adminResetPw(uid2,pw){
 async function adminSendResetEmail(uid2){
   if(!isAdmin(cu()))return toast('Admin access required');
   const u=getUser(uid2);if(!u)return;
-  if(u.auth_provider==='google')return toast('This account uses Google Sign-In — there is no password to reset');
   if(!supaAuth)return toast('Not available right now');
   try{
     const{error}=await supaAuth.auth.resetPasswordForEmail(u.email,{redirectTo:window.location.origin+window.location.pathname});
@@ -1776,8 +1777,10 @@ async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)retu
 async function forgotStep1(email){
   const u=DB.users.find(u=>u.email&&norm(u.email)===norm(email)&&u.status==='approved');
   if(!u)return toast('No account found with that email');
-  if(u.auth_provider==='google')return toast('This account uses Google Sign-In — there\'s no password to reset. Use the "Sign in with Google" button instead.');
-  if(u.auth_uid&&supaAuth){
+  if((u.auth_uid||u.auth_provider==='google')&&supaAuth){
+    // Covers Google-linked accounts too — they can now optionally have a password
+    // (see changePwSupa), so a reset email is meaningful for them as well, on top of
+    // still being able to just use the "Sign in with Google" button regardless.
     try{
       const{error}=await supaAuth.auth.resetPasswordForEmail(u.email,{redirectTo:window.location.origin+window.location.pathname});
       if(error)return toast('Could not send reset email: '+error.message);
@@ -5044,7 +5047,7 @@ function renderSettings(){
     <div class="frow"><label class="flabel">Confirm with password</label><div class="pw-wrap"><input type="password" id="email-confirm-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('email-confirm-pw')" tabindex="-1">👁</button></div></div>
     <button class="btn btn-primary" onclick="changeEmail('${u.id}',get('new-email')?.value,get('email-confirm-pw')?.value)">Update email</button>`}
   </div>`;
-  const passwordCard=isGoogleAccount?''
+  const passwordCard=isGoogleAccount?`<div class="card"><div class="section-title">Set a password (optional)</div><div class="ibox ibox-blue" style="margin-bottom:10px">Add a password as a backup way to sign in, in case Google Sign-In is ever unavailable. The "Sign in with Google" button keeps working either way.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="pw-new" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('pw-new')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="pw-conf" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('pw-conf')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="changePwSupa(get('pw-new')?.value,get('pw-conf')?.value)">Set password</button></div>`
     :isMigratedLocal?`<div class="card"><div class="section-title">Change password</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="pw-new" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('pw-new')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="pw-conf" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('pw-conf')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="changePwSupa(get('pw-new')?.value,get('pw-conf')?.value)">Update password</button></div>`
     :`<div class="card"><div class="section-title">Change password</div><div class="frow"><label class="flabel">Current password</label><div class="pw-wrap"><input type="password" id="pw-cur" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('pw-cur')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="pw-new" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('pw-new')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="pw-conf" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('pw-conf')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="changePw('${u.id}',get('pw-cur')?.value,get('pw-new')?.value,get('pw-conf')?.value)">Update password</button></div>`;
   return sheetsSection+emailjsSection+accountCard+passwordCard+
@@ -5868,11 +5871,11 @@ function renderAdminResetForm(){
   const uid2=get('admin-reset-uid')?.value;const form=get('admin-reset-form');if(!form)return;
   if(!uid2){form.innerHTML='';return;}const u=getUser(uid2);if(!u){form.innerHTML='';return;}
   const header=`<div style="font-size:13px;margin-bottom:10px;padding:10px;background:var(--bg3);border-radius:var(--radius)">Resetting: <strong>${esc(u.name)}</strong></div>`;
-  if(u.auth_provider==='google'){
-    form.innerHTML=header+`<div class="ibox ibox-blue">This account uses Google Sign-In — there's no password to reset. If they're locked out, they need to regain access to their Google account.</div>`;
-    return;
-  }
-  if(u.auth_uid){
+  if(u.auth_uid||u.auth_provider==='google'){
+    // Covers both migrated and Google-linked accounts — either way this uses real
+    // Supabase Auth, not the legacy password system, so a direct reset here wouldn't
+    // actually change their credential. A reset email works regardless of whether a
+    // password already exists (Google accounts can now optionally set one too).
     form.innerHTML=header+`<div class="ibox ibox-blue" style="margin-bottom:10px">This account uses real sign-in, not the legacy password system — a direct reset here wouldn't actually change their credential. Send them a password reset email instead.</div><button class="btn btn-primary" onclick="adminSendResetEmail('${u.id}')">Send password reset email</button>`;
     return;
   }
