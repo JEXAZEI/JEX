@@ -2580,7 +2580,7 @@ function isHalted(ticker){return !!DB.halts.find(h=>h.ticker===ticker);}
 async function resetExchange(){
   if(!isAdmin(cu()))return toast('Admin access required');
   const keepAdmins=await new Promise(resolve=>{
-    if(confirm('⚠️ FULL RESET\n\nEverything will be deleted:\n• All students and company accounts\n• All listed companies and price history\n• All trades, orders, dividends\n• All votes, news, announcements\n• All notifications, flags, minutes\n• All activity logs, price adjustments\n• All limit orders, stop-loss orders\n• All founder allocations, share classes\n• All snapshots and NW history\n\nChairman, President, Secretary, Treasurer and Compliance Officer accounts will be KEPT.\n\nThis CANNOT be undone.'))resolve(true);
+    if(confirm('⚠️ FULL RESET\n\nEverything will be deleted:\n• All students and company accounts\n• All classrooms\n• All listed companies and price history\n• All trades, orders, dividends\n• All votes, news, announcements\n• All notifications, flags, minutes\n• All activity logs, price adjustments\n• All limit orders, stop-loss orders\n• All founder allocations, share classes\n• All snapshots and NW history\n\nChairman, President, Secretary, Treasurer and Compliance Officer accounts will be KEPT.\n\nThis CANNOT be undone.'))resolve(true);
     else resolve(false);
   });
   if(!keepAdmins)return;
@@ -2630,6 +2630,9 @@ async function resetExchange(){
     await sb.del('jex_companies','id=neq.x');
     // Step 5: Delete ALL non-admin users (students and companies)
     await sb.del('jex_users','role=in.(student,company)');
+    // Step 5b: Wipe classrooms (after users/pending are gone, since both can
+    // reference a classroom_id)
+    await sb.del('jex_classrooms','id=neq.x');
     // Step 6: Reset officer cash to 0 (admins keep their accounts but not cash)
     const adminRoles=['chairman','president','secretary','treasurer','compliance_officer'];
     for(const role of adminRoles){
@@ -2656,7 +2659,8 @@ async function resetExchange(){
     DB.founderAllocations=[];DB.companyMembers=[];
     DB.priceAdjustments=[];DB.priceAlerts=[];
     DB.nwHistory=[];DB.votes=[];DB.ballots=[];
-    DB.divApprovals=[];
+    DB.divApprovals=[];DB.classrooms=[];
+    UI.classroomFilter=null;UI.lbClassroom=null;
     SHEETS_URL=null;
     // Step 9: Reload fresh from DB
     await loadAll();
