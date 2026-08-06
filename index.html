@@ -618,7 +618,7 @@ setInterval(checkInactivity,60000); // check every minute
 document.addEventListener('mousemove',resetActivityTimer,{passive:true});
 document.addEventListener('keydown',resetActivityTimer,{passive:true});
 document.addEventListener('touchstart',resetActivityTimer,{passive:true});
-let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',loginUsername:'',loginError:null,forgotUserId:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null,lbClassroom:null,
+let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',loginUsername:'',loginError:null,forgotUserId:null,forgotAnswer:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null,lbClassroom:null,
   regVerify:{reg:{status:'idle',email:'',resendAt:0},'reg-co':{status:'idle',email:'',resendAt:0}},fundPage:null,googleAuth:null};
 let charts={},sessionTimer=null;
 
@@ -1624,7 +1624,7 @@ async function registerStudent(name,username,email,pw,secQ,secA,emailVerified,au
   const isMigrated=isGoogle||!!newAuthUid;
   const pwHash=isMigrated?null:await hashPw(pw);
   const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHash,role:'student',
-    sec_q:isMigrated?null:secQ,sec_a:isMigrated?null:norm(secA),
+    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:norm(secA),
     email_verified:isGoogle?true:!!emailVerified,auth_provider:isGoogle?'google':null,auth_uid:newAuthUid,ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';UI.googleAuth=null;render();
@@ -1650,7 +1650,7 @@ async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerifi
   const isMigratedCo=isGoogle||!!newAuthUidCo;
   const pwHashCo=isMigratedCo?null:await hashPw(pw);
   const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHashCo,role:'company',description:desc.trim(),
-    sec_q:isMigratedCo?null:secQ,sec_a:isMigratedCo?null:norm(secA),
+    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:norm(secA),
     email_verified:isGoogle?true:!!emailVerified,auth_provider:isGoogle?'google':null,auth_uid:newAuthUidCo,ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';UI.googleAuth=null;render();
@@ -1798,15 +1798,26 @@ async function saveNotifEmail(){
 }
 async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)return;
   let okSq=false;
-  try{okSq=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:curPw});}catch(e){okSq=false;}
+  if(u.auth_uid){
+    // Migrated accounts have no legacy password hash to check against — the real
+    // credential lives in Supabase Auth, so verifying it means asking Supabase
+    // directly rather than the verify_legacy_password RPC (which would always
+    // fail here since jex_users.password is null for these accounts).
+    if(!supaAuth)return toast('Not available right now');
+    try{const{error}=await supaAuth.auth.signInWithPassword({email:u.email,password:curPw});okSq=!error;}catch(e){okSq=false;}
+  }else{
+    try{okSq=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:curPw});}catch(e){okSq=false;}
+  }
   if(!okSq)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');await sb.patch('jex_users','id=eq.'+uid2,{sec_q:newQ,sec_a:norm(newA)});u.sec_q=newQ;toast('Security question updated');render();}
 async function forgotStep1(email){
   const u=DB.users.find(u=>u.email&&norm(u.email)===norm(email)&&u.status==='approved');
   if(!u)return toast('No account found with that email');
-  if((u.auth_uid||u.auth_provider==='google')&&supaAuth){
-    // Covers Google-linked accounts too — they can now optionally have a password
-    // (see changePwSupa), so a reset email is meaningful for them as well, on top of
-    // still being able to just use the "Sign in with Google" button regardless.
+  if(u.auth_provider==='google'&&supaAuth){
+    // Google-linked accounts have a real, Google-verified email, so the built-in
+    // email reset is meaningful for them. Migrated-local accounts (auth_uid set,
+    // not Google) go through the security question below instead of email —
+    // recovery for those should never depend on an email actually being
+    // reachable (see reset_migrated_password).
     try{
       const{error}=await supaAuth.auth.resetPasswordForEmail(u.email,{redirectTo:window.location.origin+window.location.pathname});
       if(error)return toast('Could not send reset email: '+error.message);
@@ -1820,8 +1831,28 @@ async function forgotStep1(email){
 async function forgotStep2(answer){const u=getUser(UI.forgotUserId);if(!u)return;
   let okAns=false;
   try{okAns=await sb.rpc('verify_legacy_security_answer',{p_user_id:u.id,p_answer:answer});}catch(e){okAns=false;}
-  if(!okAns)return toast('Incorrect answer — try again');UI.loginView='forgot-newpw';render();}
-async function forgotStep3(pw,conf){const u=getUser(UI.forgotUserId);if(!u)return;if(!pw||pw.length<4)return toast('Min 4 characters');if(pw!==conf)return toast('Passwords do not match');const fpH=await hashPw(pw);await sb.patch('jex_users','id=eq.'+u.id,{password:fpH});toast('Password reset');UI.loginView='select';UI.forgotUserId=null;render();}
+  if(!okAns)return toast('Incorrect answer — try again');
+  UI.forgotAnswer=answer;
+  UI.loginView='forgot-newpw';render();}
+async function forgotStep3(pw,conf){
+  const u=getUser(UI.forgotUserId);if(!u)return;
+  if(!pw||pw.length<4)return toast('Min 4 characters');
+  if(pw!==conf)return toast('Passwords do not match');
+  if(u.auth_uid){
+    // Migrated account: the real credential lives in Supabase Auth, not
+    // jex_users.password — reset_migrated_password re-verifies the security
+    // answer itself (never trusts that forgotStep2's check alone is enough,
+    // since this RPC is reachable directly) and writes the new password to
+    // auth.users on success.
+    let ok=false;
+    try{ok=await sb.rpc('reset_migrated_password',{p_user_id:u.id,p_answer:UI.forgotAnswer,p_new_password:pw});}catch(e){ok=false;}
+    if(!ok)return toast('Could not reset password — start over from Forgot Password');
+    toast('Password reset');UI.loginView='select';UI.forgotUserId=null;UI.forgotAnswer=null;render();
+    return;
+  }
+  const fpH=await hashPw(pw);await sb.patch('jex_users','id=eq.'+u.id,{password:fpH});
+  toast('Password reset');UI.loginView='select';UI.forgotUserId=null;UI.forgotAnswer=null;render();
+}
 async function finishPasswordRecovery(pw,conf){
   if(!supaAuth)return toast('Not available right now');
   if(!pw||pw.length<6)return toast('Minimum 6 characters required');
@@ -5094,7 +5125,7 @@ function renderSettings(){
       return pushRow+emailRow;
     })()}
   </div>
-  ${(isGoogleAccount||isMigratedLocal)?'':`<div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><div class="pw-wrap"><input type="password" id="settings-secq-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('settings-secq-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`}`;
+  ${isGoogleAccount?'':`<div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><div class="pw-wrap"><input type="password" id="settings-secq-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('settings-secq-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`}`;
 }
 
 // ═══════════════════════════════════════════════
