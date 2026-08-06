@@ -1596,7 +1596,7 @@ function renderRegEmailVerifyHTML(prefix){
 async function tryCreateAuthAccount(email,pw){
   if(!supaAuth)return null;
   try{
-    const{data,error}=await supaAuth.auth.signUp({email:norm(email),password:pw});
+    const{data,error}=await supaAuth.auth.signUp({email:norm(email),password:pw,options:{emailRedirectTo:window.location.origin+window.location.pathname}});
     if(error){console.warn('Supabase Auth signup failed, using legacy auth for this account:',error.message);return null;}
     return data?.user?.id||null;
   }catch(e){console.warn('Supabase Auth signup failed, using legacy auth for this account:',e);return null;}
