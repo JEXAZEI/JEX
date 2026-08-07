@@ -904,21 +904,30 @@ async function saveDivThresholdFrom(id='div-threshold'){
 async function reviewDivApproval(id,approve){
   const da=DB.divApprovals.find(x=>x.id===id);if(!da)return;
   const u=cu();
-  // Atomically claim this approval before executing the payout — without this, a
-  // double-click or two admins reviewing the same request at once could both pass
-  // the (missing) status check and pay the dividend twice.
-  const claimed=await sb.patch('jex_dividend_approvals','id=eq.'+id+'&status=eq.pending',{status:approve?'approved':'rejected',reviewed_by:u.name});
-  if(!claimed.length)return toast('This request was already reviewed');
-  da.status=approve?'approved':'rejected';da.approved_by=u.name;
-  if(approve){
-    // Execute the dividend now, paid from the company's own cash regardless of who (Treasurer) is approving it
-    const co=getCo(da.ticker);
-    const payer=co&&getUser(co.owner_id);
-    if(payer)await issueDividend(da.ticker,da.per_share,da.note||'Treasurer-approved dividend',payer,true);
-  } else {
+  if(!approve){
+    // Rejecting doesn't move money -- stays a simple claimed status patch.
+    const claimed=await sb.patch('jex_dividend_approvals','id=eq.'+id+'&status=eq.pending',{status:'rejected',reviewed_by:u.name});
+    if(!claimed.length)return toast('This request was already reviewed');
+    da.status='rejected';da.approved_by=u.name;
     await pushNotification(da.requested_by,'div_approval','❌ Your dividend request for '+da.company_name+' was rejected by the Treasurer.',da.ticker);
-    toast('Dividend rejected');
+    toast('Dividend rejected');render();return;
   }
+  // Approving DOES move money -- rpc_pay_dividend does its own atomic claim
+  // (SELECT ... FOR UPDATE, re-checks status='pending') and requires the
+  // caller to actually be a Treasurer, closing the same "any authenticated
+  // caller could call issueDividend(...,preApproved=true) directly" gap
+  // this whole pass is about.
+  let r;
+  try{r=await sb.rpc('rpc_pay_dividend',{p_ticker:da.ticker,p_per_share:da.per_share,p_note:da.note||'Treasurer-approved dividend',p_approval_id:id});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  da.status='approved';da.approved_by=u.name;
+  if(r.owner_id){const o=getUser(r.owner_id);if(o)o.cash=r.owner_cash;}
+  await refreshDividendPayoutBalances(r.payouts);
+  if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker:da.ticker,company_name:da.company_name,per_share:da.per_share,total:r.total,note:da.note||'Treasurer-approved dividend',payouts:r.payouts,ts:ts()});
+  await logActivity('dividend',da.company_name+' paid dividend '+fmt(da.per_share)+'/share — total '+fmt(r.total),{ticker:da.ticker,userId:r.owner_id,userName:u.name,amount:r.total});
+  await pushNotificationToHolders(da.ticker,'dividend','💰 '+da.company_name+' paid a dividend of '+fmt(da.per_share)+'/share');
+  pushBalances();
+  toast(da.company_name+' paid '+fmt(da.per_share)+'/share (Treasurer-approved)');
   render();
 }
 async function togglePracticeMode(){
@@ -1976,6 +1985,9 @@ async function reviewFounderAllocation(id,approve){
 // ═══════════════════════════════════════════════
 // STOCK PRICE ADJUSTMENT (Chairman)
 // ═══════════════════════════════════════════════
+// Price adjustment runs server-side (rpc_adjust_stock_price), re-checking
+// the Chairman/President role itself rather than trusting the client-side
+// isChairman() gate.
 async function adjustStockPrice(ticker,pct,reason){
   if(!isChairman(cu()))return toast('Only the Chairman or President can adjust stock prices');
   if(!ticker)return toast('Select a ticker');
@@ -1985,19 +1997,18 @@ async function adjustStockPrice(ticker,pct,reason){
   const co=getCo(ticker);if(!co)return;
   const u=cu();
   const oldPrice=co.price;
-  const newPrice=Math.max(0.01,Math.round(oldPrice*(1+pct/100)*100)/100);
-  const label=pct>=0?'Boost +'+pct+'%':'Drop '+pct+'%';
-  const newHistory=[...co.price_history,{p:newPrice,t:label}];
-  await updateCo(ticker,{price:newPrice,price_history:newHistory});
-  // Store in price adjustments log
-  const rec={id:uid(),ticker,company_name:co.name,pct,old_price:oldPrice,new_price:newPrice,reason:(reason||'').trim(),applied_by:u.name,ts:ts()};
-  try{await sb.post('jex_price_adjustments',rec);if(!DB.priceAdjustments)DB.priceAdjustments=[];DB.priceAdjustments.unshift(rec);}catch(e){}
+  let r;
+  try{r=await sb.rpc('rpc_adjust_stock_price',{p_ticker:ticker,p_pct:pct,p_reason:(reason||'').trim()});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  co.price=r.price;co.price_history=r.price_history;
+  const rec={id:uid(),ticker,company_name:co.name,pct,old_price:r.old_price,new_price:r.price,reason:(reason||'').trim(),applied_by:u.name,ts:ts()};
+  if(!DB.priceAdjustments)DB.priceAdjustments=[];DB.priceAdjustments.unshift(rec);
   const msg=(pct>=0?'📈':'📉')+' '+co.name+' ('+ticker+') price '+(pct>=0?'boosted by +':'cut by ')+Math.abs(pct)+'%'+(reason?' — '+reason.trim():'');
   const holderIds=DB.users.filter(hu=>hu.role==='student'&&(holdings(hu)[ticker]||0)>0).map(hu=>hu.id);
   await pushNotificationToHolders(ticker,'price_adj',msg);
   await pushNotificationToAll('price_adj',msg,holderIds);
-  await logActivity('price_adj',msg,{ticker,userId:u.id,userName:u.name,amount:newPrice-oldPrice});
-  toast(ticker+' '+(pct>=0?'boosted':'cut')+' by '+Math.abs(pct)+'% → '+fmt(newPrice));render();
+  await logActivity('price_adj',msg,{ticker,userId:u.id,userName:u.name,amount:r.price-oldPrice});
+  toast(ticker+' '+(pct>=0?'boosted':'cut')+' by '+Math.abs(pct)+'% → '+fmt(r.price));render();
 }
 
 // ═══════════════════════════════════════════════
@@ -3046,6 +3057,9 @@ async function closeFund(fundId){
   await updateFund(fundId,{status:'closed'});
   toast('Fund closed to new deposits — existing depositors can still withdraw');render();
 }
+// Fund deposit/withdraw run server-side (rpc_fund_deposit/rpc_fund_withdraw)
+// -- same client-trusted-write gap as everything else in this pass, just on
+// the depositor's own cash/fund_units and the fund's cash/units_outstanding.
 async function depositToFund(fundId,amount){
   const u=cu();if(!u)return;
   const f=getFund(fundId);if(!f)return toast('Fund not found');
@@ -3053,14 +3067,11 @@ async function depositToFund(fundId,amount){
   amount=parseFloat(amount);
   if(isNaN(amount)||amount<=0)return toast('Enter a valid amount');
   if(u.cash<amount)return toast('Insufficient funds');
-  const nav=currentFundNav(f);
-  const unitsToMint=Math.round((amount/nav)*10000)/10000;
-  const existing=fundUnits(u)[fundId]||{units:0,costBasis:nav};
-  const newUnitsTotal=Math.round((existing.units+unitsToMint)*10000)/10000;
-  const newCostBasis=newUnitsTotal>0?Math.round((((existing.units*existing.costBasis)+(unitsToMint*nav))/newUnitsTotal)*10000)/10000:nav;
-  const newFundUnits={...fundUnits(u)};newFundUnits[fundId]={units:newUnitsTotal,costBasis:newCostBasis};
-  await updateUser(u.id,{cash:Math.round((u.cash-amount)*100)/100,fund_units:newFundUnits});
-  await updateFund(fundId,{cash:Math.round((f.cash+amount)*100)/100,units_outstanding:Math.round((f.units_outstanding+unitsToMint)*10000)/10000});
+  let r;
+  try{r=await sb.rpc('rpc_fund_deposit',{p_fund_id:fundId,p_amount:amount});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.cash=r.cash;u.fund_units=r.fund_units;
+  f.cash=r.fund_cash;f.units_outstanding=r.units_outstanding;
   await logActivity('fund_deposit',u.name+' deposited '+fmt(amount)+' into '+f.name,{userId:u.id,userName:u.name,amount});
   toast('Deposited '+fmt(amount)+' into '+f.name);render();
 }
@@ -3072,23 +3083,14 @@ async function withdrawFromFund(fundId,unitsStr){
   const units=parseFloat(unitsStr);
   if(isNaN(units)||units<=0)return toast('Enter a valid number of units');
   if(units>held+0.0001)return toast('You only hold '+held+' units');
-  const nav=currentFundNav(f);
-  const grossProceeds=Math.round((units*nav)*100)/100;
-  if(f.cash<grossProceeds)return toast('This fund does not have enough uninvested cash for this withdrawal — the manager needs to sell holdings first');
-  const gainPerUnit=Math.max(0,nav-position.costBasis);
-  const fee=Math.round((units*gainPerUnit*(f.fee_pct/100))*100)/100;
-  const netProceeds=Math.round((grossProceeds-fee)*100)/100;
-  const remainingUnits=Math.round((held-units)*10000)/10000;
-  const newFundUnits={...fundUnits(u)};
-  if(remainingUnits<=0.0001)delete newFundUnits[fundId];else newFundUnits[fundId]={units:remainingUnits,costBasis:position.costBasis};
-  await updateUser(u.id,{cash:Math.round((u.cash+netProceeds)*100)/100,fund_units:newFundUnits});
-  await updateFund(fundId,{cash:Math.round((f.cash-grossProceeds)*100)/100,units_outstanding:Math.round((f.units_outstanding-units)*10000)/10000});
-  if(fee>0){
-    const manager=getUser(f.manager_id);
-    if(manager)await updateUser(manager.id,{cash:Math.round((manager.cash+fee)*100)/100});
-  }
-  await logActivity('fund_withdraw',u.name+' withdrew '+fmt(netProceeds)+' from '+f.name+(fee?' (performance fee '+fmt(fee)+' to '+f.manager_name+')':''),{userId:u.id,userName:u.name,amount:netProceeds});
-  toast('Withdrew '+fmt(netProceeds)+' from '+f.name+(fee?' (after '+fmt(fee)+' performance fee)':''));render();
+  let r;
+  try{r=await sb.rpc('rpc_fund_withdraw',{p_fund_id:fundId,p_units:units});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.cash=r.cash;u.fund_units=r.fund_units;
+  f.cash=r.fund_cash;f.units_outstanding=r.units_outstanding;
+  if(r.fee>0&&r.manager_id){const manager=getUser(r.manager_id);if(manager)manager.cash=r.manager_cash;}
+  await logActivity('fund_withdraw',u.name+' withdrew '+fmt(r.net)+' from '+f.name+(r.fee?' (performance fee '+fmt(r.fee)+' to '+f.manager_name+')':''),{userId:u.id,userName:u.name,amount:r.net});
+  toast('Withdrew '+fmt(r.net)+' from '+f.name+(r.fee?' (after '+fmt(r.fee)+' performance fee)':''));render();
 }
 // Fund manager trades are executed server-side (rpc_fund_buy/sell -- see
 // fund_trade_engine_migration.sql), the same hardening already applied to
@@ -3163,38 +3165,46 @@ async function updateFundingGoal(ticker,goal,useOfFunds){
   await updateCo(ticker,{funding_goal:g,use_of_funds:uof});
   toast('Funding goal updated');render();
 }
+// Buybacks are executed server-side (rpc_buyback) -- besides closing the
+// same client-trusted-write gap as every other rpc_* here, the RPC also
+// adds the ownership/founder check this function never actually had: any
+// authenticated caller could previously invoke doBuyback() for ANY ticker
+// and spend their own cash to shrink a company they have no relationship
+// to's share count.
 async function doBuyback(ticker,qty){
   if(!requireOpen(ticker))return;const owner=cu(),co=getCo(ticker);if(!owner||!co)return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter valid quantity');
   const sold=co.shares-co.shares_avail;if(qty>sold)return toast('Only '+sold+' shares in circulation');
-  const price=impactPrice(co,qty,'buy'),cost=Math.round(price*qty*100)/100;
-  if(owner.cash<cost)return toast('Insufficient funds');
-  await updateUser(owner.id,{cash:Math.round((owner.cash-cost)*100)/100});
-  // Bought-back shares are retired, not returned to the exchange's unsold pool — shares_avail
-  // is deliberately left untouched. (Previously this added qty back to shares_avail, which
-  // could push it above the new, smaller `shares` total for a large enough buyback.)
-  await updateCo(ticker,{price,shares:co.shares-qty,price_history:[...co.price_history,{p:price,t:'Buyback'}]});
-  const bb={id:uid(),ticker,company_name:co.name,qty,price,total:cost,ts:ts()};
-  await sb.post('jex_buybacks',bb);DB.buybacks.push(bb);
-  toast('Bought back '+qty+' shares @ '+fmt(price));render();
+  let r;
+  try{r=await sb.rpc('rpc_buyback',{p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  owner.cash=r.cash;
+  co.price=r.price;co.shares=r.shares;co.price_history=r.price_history;
+  if(r.buyback)DB.buybacks.push(r.buyback);
+  toast('Bought back '+qty+' shares @ '+fmt(r.price));render();
 }
-async function issueDividend(ticker,perShare,note,payerOverride,preApproved){
-  const co=getCo(ticker),owner=payerOverride||cu();if(!co||!owner)return;
+// Dividend payout itself runs server-side (rpc_pay_dividend) -- the RPC
+// re-derives the shareholder list and total, and now enforces the
+// Treasurer-approval-above-threshold rule itself too (previously that was
+// only a client-side confirm() gate; a company owner could call
+// issueDividend(...,preApproved=true) directly and skip Treasurer review
+// for any payout size). Everything below the RPC call is just fast local
+// preview/confirm UX, not the security boundary.
+async function issueDividend(ticker,perShare,note){
+  const co=getCo(ticker),owner=cu();if(!co||!owner)return;
   perShare=Math.round(parseFloat(perShare)*100)/100;
   if(isNaN(perShare)||perShare<=0)return toast('Enter a valid per-share amount');
   if(!note||note.trim().length<5)return toast('Please add a note');
   // Fetch all students fresh from Supabase so founder-allocated holdings are current
   const freshStudents=await sb.get('jex_users','role=eq.student&status=eq.approved&select='+JEX_USERS_SAFE_SELECT);
-  // Update local DB with fresh data
   freshStudents.forEach(fs=>{const local=getUser(fs.id);if(local)Object.assign(local,fs);else DB.users.push(fs);});
   const allT=getCompanyTickers(ticker);
   const sh=freshStudents.filter(s=>allT.some(t=>(s.holdings&&s.holdings[t]||0)>0));
   if(!sh.length)return toast('No shareholders yet');
   const total=sh.reduce((s,u)=>s+allT.reduce((ts2,t)=>ts2+Math.round(((u.holdings&&u.holdings[t])||0)*perShare*100)/100,0),0);
   if(owner.cash<total)return toast('Insufficient funds (need '+fmt(total)+')');
-  // Check if Treasurer approval required (already-approved payouts skip this and go straight to payout)
   const divApprovalThreshold=DB.session.dividend_approval_threshold||1000;
-  if(!preApproved&&total>=divApprovalThreshold){
+  if(total>=divApprovalThreshold){
     const treasurer=DB.users.find(u=>u.role==='treasurer');
     if(treasurer){
       if(!confirm('This dividend total ('+fmt(total)+') requires Treasurer approval. Submit for approval?'))return;
@@ -3207,21 +3217,29 @@ async function issueDividend(ticker,perShare,note,payerOverride,preApproved){
     }
   }
   const sharesAcrossClasses=s=>allT.reduce((sum,t)=>sum+((s.holdings&&s.holdings[t])||0),0);
-  if(!preApproved&&!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(sharesAcrossClasses(s)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
-  await updateUser(owner.id,{cash:Math.round((owner.cash-total)*100)/100});
-  const payouts=[];
-  for(const s of sh){
-    const shares=sharesAcrossClasses(s);
-    const payout=Math.round(shares*perShare*100)/100;
-    await updateUser(s.id,{cash:Math.round((s.cash+payout)*100)/100});
-    payouts.push({userId:s.id,name:s.name,shares,payout});
-  }
-  const div={id:uid(),ticker,company_name:co.name,per_share:perShare,total,note:note.trim(),payouts,ts:ts()};
-  await sb.post('jex_dividends',div);DB.dividends.push(div);
-  await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(total),{ticker,userId:owner.id,userName:owner.name,amount:total});
+  if(!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(sharesAcrossClasses(s)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
+  let r;
+  try{r=await sb.rpc('rpc_pay_dividend',{p_ticker:ticker,p_per_share:perShare,p_note:note.trim()});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  if(r.owner_id){const o=getUser(r.owner_id);if(o)o.cash=r.owner_cash;}
+  await refreshDividendPayoutBalances(r.payouts);
+  if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker,company_name:co.name,per_share:perShare,total:r.total,note:note.trim(),payouts:r.payouts,ts:ts()});
+  await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(r.total),{ticker,userId:owner.id,userName:owner.name,amount:r.total});
   await pushNotificationToHolders(ticker,'dividend','💰 '+co.name+' paid a dividend of '+fmt(perShare)+'/share');
   pushBalances();
   toast(co.name+' paid '+fmt(perShare)+'/share');UI.companyTab='dividends';render();
+}
+// Each holder's cash was already updated server-side (rpc_pay_dividend); this
+// just re-syncs the client's local cache from the authoritative DB rather
+// than re-deriving cash += payout locally (which could drift if the local
+// copy was ever stale).
+async function refreshDividendPayoutBalances(payouts){
+  if(!payouts||!payouts.length)return;
+  try{
+    const ids=payouts.map(p=>p.userId).join(',');
+    const fresh=await sb.get('jex_users','id=in.('+ids+')&select='+JEX_USERS_SAFE_SELECT);
+    fresh.forEach(fu=>{const local=getUser(fu.id);if(local)local.cash=fu.cash;});
+  }catch(e){}
 }
 function submitIPOForm(){
   submitIPO(get('ipo-name')?.value,get('ipo-ticker')?.value,get('ipo-price')?.value,get('ipo-shares')?.value,get('ipo-desc')?.value);
@@ -3278,15 +3296,24 @@ async function submitDilution(ticker,newShares,reason){
   await sb.post('jex_dilution_applications',app);DB.dilApps.push(app);
   toast('Dilution application submitted');UI.companyTab='dilution';render();
 }
+// Dilution approval runs server-side (rpc_review_dilution): does its own
+// atomic claim (SELECT ... FOR UPDATE, re-checks status='pending') and now
+// requires the caller to actually be Chairman/President -- previously
+// reviewDilution had no server-side authorization check at all, only the
+// admin UI deciding who saw the approve/reject buttons.
 async function reviewDilution(id,approve){
   const app=DB.dilApps.find(d=>d.id===id);if(!app)return;
-  // Atomically claim before adjusting share count — a double-click or two admins
-  // reviewing the same request at once could otherwise both apply the dilution.
-  const claimed=await sb.patch('jex_dilution_applications','id=eq.'+id+'&status=eq.pending',{status:approve?'approved':'rejected'});
-  if(!claimed.length)return toast('This application was already reviewed');
+  let r;
+  try{r=await sb.rpc('rpc_review_dilution',{p_app_id:id,p_approve:!!approve});}
+  catch(e){return toast(rpcErrorMessage(e));}
   app.status=approve?'approved':'rejected';
-  if(approve){const co=getCo(app.ticker);if(!co)return;const old=co.shares,ns=co.shares+app.new_shares,np=Math.max(0.01,Math.round(co.price*(old/ns)*100)/100);await updateCo(app.ticker,{shares:ns,shares_avail:co.shares_avail+app.new_shares,price:np,price_history:[...co.price_history,{p:np,t:'Dilution'}]});toast(app.company_name+': +'+app.new_shares+' shares');}
-  else toast('Dilution rejected');
+  if(r.approved){
+    const co=getCo(app.ticker);
+    if(co){co.shares=r.shares;co.shares_avail=r.shares_avail;co.price=r.price;co.price_history=r.price_history;}
+    toast(app.company_name+': +'+app.new_shares+' shares');
+  } else {
+    toast('Dilution rejected');
+  }
   render();
 }
 
