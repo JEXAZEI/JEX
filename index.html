@@ -87,6 +87,15 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 .ot-btn{font-size:13px;padding:6px 18px;cursor:pointer;border:none;background:transparent;color:var(--text2);font-family:var(--font)}
 .ot-buy{background:var(--teal);color:#fff}.ot-sell{background:var(--red);color:#fff}.ot-short{background:var(--purple);color:#fff}.ot-cover{background:#BA7517;color:#fff}
 .price-up{color:var(--green)}.price-down{color:var(--red)}
+.flash-up{animation:flashUp 900ms ease-out}.flash-down{animation:flashDown 900ms ease-out}
+@keyframes flashUp{0%{background-color:rgba(0,200,150,0.35)}100%{background-color:transparent}}
+@keyframes flashDown{0%{background-color:rgba(255,77,106,0.35)}100%{background-color:transparent}}
+.info-bubble{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;background:var(--bg3);border:1px solid var(--border2);color:var(--text2);font-size:9px;font-weight:700;font-style:normal;cursor:help;margin-left:5px;position:relative;vertical-align:middle;flex-shrink:0;font-family:var(--font);line-height:1}
+.info-bubble:hover,.info-bubble:focus{background:var(--blue);border-color:var(--blue);color:#fff;outline:none}
+.info-bubble .info-tip{visibility:hidden;opacity:0;position:absolute;top:calc(100% + 7px);left:50%;transform:translateX(-50%);background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:var(--radius);padding:9px 11px;font-size:11.5px;font-weight:400;line-height:1.45;width:230px;box-shadow:0 6px 20px rgba(0,0,0,0.3);z-index:60;transition:opacity 120ms ease,visibility 120ms ease;pointer-events:none;text-align:left;white-space:normal}
+.info-bubble .info-tip::after{content:'';position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:var(--bg2)}
+.info-bubble:hover .info-tip,.info-bubble:focus .info-tip{visibility:visible;opacity:1}
+@media(max-width:480px){.info-bubble .info-tip{width:170px}}
   @keyframes progress{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
 .empty{text-align:center;padding:32px;color:var(--text2);font-size:13px}
 .divider{border:none;border-top:1px solid var(--border);margin:14px 0}
@@ -696,6 +705,7 @@ const validEmail=e=>e&&e.includes('@')&&e.includes('.');
 const normalizeUsername=v=>{v=(v||'').trim();if(v.startsWith('@'))v=v.slice(1);return v;};
 const validUsername=v=>/^[a-zA-Z0-9_.]{3,20}$/.test(v);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const infoBubble=text=>'<span class="info-bubble" tabindex="0">i<span class="info-tip">'+esc(text)+'</span></span>';
 const cu=()=>DB.users.find(u=>u.id===UI.userId)||null;
 const getUser=id=>DB.users.find(u=>u.id===id);
 const getCo=t=>DB.companies.find(c=>c.ticker===t);
@@ -2790,7 +2800,7 @@ async function checkLimitOrders(){
     }
   }
 }
-setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();await checkPriceAlerts();checkShortSqueezes();},15000);
+setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();await checkPriceAlerts();checkShortSqueezes();},3000);
 
 // ═══════════════════════════════════════════════
 // TRADING
@@ -4197,7 +4207,7 @@ function renderCompanyPage(parentTicker){
       +'<div class="mcard"><div class="mlabel">In circulation</div><div class="mval">'+totalCirculating.toLocaleString()+'</div></div>'
       +'</div>'
       +'<div class="grid4" style="margin-bottom:14px">'
-      +(()=>{const hs=calcHealthScore(co);return hs!=null?'<div class="mcard"><div class="mlabel">Company health</div><div class="mval '+(hs>=70?'green':hs>=40?'':'red')+'" style="font-size:20px">'+hs+'/100</div><div style="font-size:10px;color:var(--text2);margin-top:2px">'+(hs>=70?'✓ Healthy':hs>=40?'⚠ Moderate':'✗ At risk')+'</div></div>':''})()
+      +(()=>{const hs=calcHealthScore(co);return hs!=null?'<div class="mcard"><div class="mlabel">Company health'+infoBubble('A 0-100 score combining price stability (up to ±20), the cash cushion the company holds relative to its market cap (up to +15), short-seller interest against it (up to -15), and dividend history (+5 to +10). Starts from a baseline of 50.')+'</div><div class="mval '+(hs>=70?'green':hs>=40?'':'red')+'" style="font-size:20px">'+hs+'/100</div><div style="font-size:10px;color:var(--text2);margin-top:2px">'+(hs>=70?'✓ Healthy':hs>=40?'⚠ Moderate':'✗ At risk')+'</div></div>':''})()
       +'<div class="mcard"><div class="mlabel">Short interest</div><div class="mval '+(shortInterestPct>20?'red':'')+'">'+shortInterestPct+'%</div><div style="font-size:11px;color:var(--text2);margin-top:2px">'+totalShorted+' shares short</div></div>'
       +'<div class="mcard"><div class="mlabel">Capital raised (IPO)</div><div class="mval" style="font-family:var(--mono);color:var(--green)">'+fmt(capitalRaised)+'</div></div>'
       +'<div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">'+(owner?fmt(owner.cash):'—')+'</div><div style="font-size:10px;color:var(--text2);margin-top:2px">After dividends & buybacks</div></div>'
@@ -4327,7 +4337,7 @@ function renderCompanyPage(parentTicker){
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="cp-qty" value="1" min="1" max="'+co.shares_avail+'"></div>'
           +'<div style="padding-bottom:12px"><button class="btn btn-success" onclick="disableTradeBtn(this);cpTrade(&quot;buy&quot;)">Buy now</button></div></div>'
           +'<div id="cp-preview">'+impactPreview(co,1,'buy')+'</div>'
-          +'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy</div>'
+          +'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy'+infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')+'</div>'
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-qty" value="1" min="1"></div>'
           +'<div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="cp-lmt-price" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
           +'<div class="frow" style="flex:1"><label class="flabel">Order type</label><select id="limit-order-type"><option value="gtc">GTC (Good till cancelled)</option><option value="day">Day order (expires at close)</option></select></div>'
@@ -4338,7 +4348,7 @@ function renderCompanyPage(parentTicker){
           html+='<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="cp-qty" value="1" min="1" max="'+held+'"></div>'
             +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="disableTradeBtn(this);cpTrade(&quot;sell&quot;)">Sell now</button></div></div>'
             +'<div id="cp-preview">'+impactPreview(co,1,'sell')+'</div>'
-            +'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell</div>'
+            +'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell'+infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')+'</div>'
             +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-sty" value="1" min="1" max="'+held+'"></div>'
             +'<div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="cp-lmt-sprice" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
             +'<div class="frow" style="flex:1"><label class="flabel">Type</label><select id="limit-order-type-sell"><option value="gtc">GTC</option><option value="day">Day</option><option value="fok">FOK</option></select></div>'
@@ -4504,11 +4514,19 @@ function getMarketListed(u){
   return DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)
     &&(!searchQ||(c.name.toLowerCase().includes(searchQ)||c.ticker.toLowerCase().includes(searchQ))));
 }
+let _marketLastPrices={};
 function renderMarketRows(u,listed){
   return listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
     const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
-    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${esc(c.name)}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${esc(c.description||"")}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')+(!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:'');
+    // Ticker-style flash on the price cell when a price actually moves since
+    // the last render (realtime pushes from other clients' trades, or the
+    // 3s order-matching poll) — not on every re-render (search typing,
+    // watchlist toggles, etc. don't touch c.price so no flash fires).
+    const prevPrice=_marketLastPrices[c.ticker];
+    const flashClass=prevPrice!=null&&prevPrice!==c.price?(c.price>prevPrice?' flash-up':' flash-down'):'';
+    _marketLastPrices[c.ticker]=c.price;
+    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${esc(c.name)}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${esc(c.description||"")}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="${flashClass}" style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')+(!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:'');
 }
 function renderMarket(){
   const u=cu();
@@ -4520,7 +4538,7 @@ function renderMarket(){
       <div class="section-title" style="margin-bottom:0;flex:1">Listed companies</div>
       <input type="text" id="market-search" placeholder="Search by name or ticker..." style="max-width:240px;padding:6px 10px;font-size:13px" oninput="renderMarketInPlace()">
     </div>
-      <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${(u.role==='student'||u.role==='company')?'<th>Watch</th><th>Health</th><th></th>':''}</tr></thead>
+      <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${(u.role==='student'||u.role==='company')?'<th>Watch</th><th>Health'+infoBubble('A 0-100 score combining price stability (up to ±20), the companys cash cushion relative to its market cap (up to +15), short-seller interest against it (up to -15), and dividend history (+5 to +10). Starts from a baseline of 50.')+'</th><th></th>':''}</tr></thead>
       <tbody id="market-rows">${renderMarketRows(u,listed)}</tbody></table>
     </div>
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
@@ -4662,7 +4680,7 @@ function openPanel(ticker){
     <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${c.shares_avail}" oninput="document.getElementById('cp-preview')&&(document.getElementById('cp-preview').innerHTML=impactPreview(getCo('${ticker}'),parseInt(this.value)||1,'buy'))"></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="disableTradeBtn(this);placeBuy('${ticker}',get('t-qty')?.value)">Buy now</button></div></div>
     <div id="t-preview">${impactPreview(c,1,'buy')}</div>
     <hr class="divider" style="margin:10px 0">
-    <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy</div>
+    <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy${infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')}</div>
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="t-lmt-qty" value="1" min="1"></div>
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
@@ -4671,7 +4689,7 @@ function openPanel(ticker){
     :mode==='sell'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Sell pushes price down. You hold: <strong>${held}</strong>.</p>${held>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${held}"></div><div style="padding-bottom:12px"><button class="btn btn-danger" onclick="placeSell('${ticker}',get('t-qty')?.value)">Sell now</button></div></div>
     <div id="t-preview">${impactPreview(c,1,'sell')}</div>
     <hr class="divider" style="margin:10px 0">
-    <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell</div>
+    <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell${infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')}</div>
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="t-lmt-qty" value="1" min="1" max="${held}"></div>
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
@@ -4779,7 +4797,7 @@ function renderFundDetail(fundId){
     ${canManageFund(f)&&f.status==='active'?`<button class="btn btn-sm btn-danger" onclick="if(confirm('Close this fund to new deposits? Existing depositors can still withdraw.'))closeFund('${f.id}')">Close fund</button>`:''}
   </div>
   <div class="grid4" style="margin-bottom:14px">
-    <div class="mcard"><div class="mlabel">NAV / unit</div><div class="mval" style="font-family:var(--mono)">${fmt(nav)}</div></div>
+    <div class="mcard"><div class="mlabel">NAV / unit${infoBubble('Net Asset Value per unit: the funds total cash plus everything it holds, divided by how many units exist. This is the price you buy or sell fund units at, similar to a stock price.')}</div><div class="mval" style="font-family:var(--mono)">${fmt(nav)}</div></div>
     <div class="mcard"><div class="mlabel">Assets under management</div><div class="mval" style="font-family:var(--mono)">${fmt(aum)}</div></div>
     <div class="mcard"><div class="mlabel">Since inception</div><div class="mval ${ret>=0?'green':'red'}">${ret>=0?'+':''}${ret}%</div></div>
     <div class="mcard"><div class="mlabel">Performance fee</div><div class="mval">${f.fee_pct}%</div></div>
@@ -4838,7 +4856,7 @@ function renderFundDetail(fundId){
       <div class="frow"><label class="flabel">Quantity</label><input type="number" id="fund-trade-qty" min="1" step="1" placeholder="e.g. 10"></div>
       <div class="btn-row"><button class="btn btn-success btn-sm" onclick="fundBuy('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Buy</button><button class="btn btn-danger btn-sm" onclick="fundSell('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Sell</button><button class="btn btn-warning btn-sm" onclick="fundShort('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Short</button><button class="btn btn-sm" onclick="fundCoverShort('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Cover</button></div>
       <hr class="divider" style="margin:10px 0">
-      <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit order</div>
+      <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit order${infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')}</div>
       <div class="frow"><label class="flabel">Limit price ($)</label><input type="number" id="fund-lmt-price" step="0.01" min="0.01" placeholder="e.g. 10.00"></div>
       <div class="btn-row"><button class="btn btn-primary btn-sm" onclick="placeLimitOrder(get('fund-trade-ticker')?.value,'buy',get('fund-trade-qty')?.value,get('fund-lmt-price')?.value,'${f.id}')">Limit buy</button><button class="btn btn-primary btn-sm" onclick="placeLimitOrder(get('fund-trade-ticker')?.value,'sell',get('fund-trade-qty')?.value,get('fund-lmt-price')?.value,'${f.id}')">Limit sell</button></div>
     </div>`;
@@ -4878,9 +4896,9 @@ function renderPortfolio(){
     const _sharpe=calcSharpe(u.id),_beta=calcBeta(u.id),_var=calcVaR(u.id),_pnl=calcPnLAttribution(u.id);
     const analyticsRow=(_sharpe!=null||_beta!=null||_var!=null)?
       `<div class="grid4" style="margin-bottom:14px">
-        ${_sharpe!=null?`<div class="mcard"><div class="mlabel">Sharpe ratio</div><div class="mval ${_sharpe>1?'green':_sharpe<0?'red':''}" style="font-size:18px;font-family:var(--mono)">${_sharpe}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">return ÷ risk</div></div>`:''}
-        ${_beta!=null?`<div class="mcard"><div class="mlabel">Portfolio beta</div><div class="mval" style="font-size:18px;font-family:var(--mono)">${_beta}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">vs market</div></div>`:''}
-        ${_var!=null?`<div class="mcard"><div class="mlabel">Value at Risk 95%</div><div class="mval red" style="font-size:18px;font-family:var(--mono)">${fmt(_var)}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">max 1-session loss</div></div>`:''}
+        ${_sharpe!=null?`<div class="mcard"><div class="mlabel">Sharpe ratio${infoBubble('Measures return per unit of risk you took to get it: your average return divided by how much your returns bounced around. Above 1 is generally considered good, below 0 means you lost money on average.')}</div><div class="mval ${_sharpe>1?'green':_sharpe<0?'red':''}" style="font-size:18px;font-family:var(--mono)">${_sharpe}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">return ÷ risk</div></div>`:''}
+        ${_beta!=null?`<div class="mcard"><div class="mlabel">Portfolio beta${infoBubble('How much your portfolio moves relative to the overall market. A beta of 1 means you move with the market; above 1 means bigger swings than the market (more volatile); below 1 means smaller swings.')}</div><div class="mval" style="font-size:18px;font-family:var(--mono)">${_beta}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">vs market</div></div>`:''}
+        ${_var!=null?`<div class="mcard"><div class="mlabel">Value at Risk 95%${infoBubble('Based on your worst trading sessions so far, this is roughly how much you could lose in a single session on a bad day (the 5th-percentile loss). It is an estimate from history, not a hard cap.')}</div><div class="mval red" style="font-size:18px;font-family:var(--mono)">${fmt(_var)}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">max 1-session loss</div></div>`:''}
         ${_pnl?`<div class="mcard"><div class="mlabel">Total P&L</div><div class="mval ${_pnl.total>=0?'green':'red'}" style="font-size:18px;font-family:var(--mono)">${_pnl.total>=0?'+':''}${fmt(_pnl.total)}</div></div>`:''}
       </div>
       ${_pnl&&(_pnl.trade||_pnl.dividend||_pnl.unrealised)?`<div class="card" style="margin-bottom:14px"><div class="section-title">P&L Attribution</div><div class="grid4">
@@ -4906,7 +4924,7 @@ function renderPortfolio(){
       return '<div class="short-pos"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-weight:500">'+c.name+' <span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></span><button class="btn btn-sm btn-warning" onclick="UI.companyPage=null;setTab(&quot;market&quot;);UI.panelMode=&quot;cover&quot;;setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Cover</button></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:12px"><div><div style="color:var(--text2)">Qty</div><div>'+pos.qty+'</div></div><div><div style="color:var(--text2)">Avg price</div><div style="font-family:var(--mono)">'+fmt(pos.avgPrice)+'</div></div><div><div style="color:var(--text2)">Current</div><div style="font-family:var(--mono)">'+fmt(c.price)+'</div></div><div><div style="color:var(--text2)">P&L</div><div style="font-family:var(--mono);color:'+(p>=0?'var(--green)':'var(--red)')+'">'+fmt(p)+'</div></div></div></div>';
     }).join(''):'<div class="empty">No open short positions</div>';
     const collTotal=Object.values(shorts(u)).reduce((s,p)=>s+p.collateral,0);
-    return tabs+`<div class="grid3"><div class="mcard"><div class="mlabel">Open shorts</div><div class="mval">${sh.length}</div></div><div class="mcard"><div class="mlabel">Unrealised P&L</div><div class="mval ${_spnl>=0?'green':'red'}" style="font-family:var(--mono)">${fmt(_spnl)}</div></div><div class="mcard"><div class="mlabel">Collateral locked</div><div class="mval" style="font-family:var(--mono)">${fmt(collTotal)}</div></div></div>${shortRows}`;
+    return tabs+`<div class="grid3"><div class="mcard"><div class="mlabel">Open shorts</div><div class="mval">${sh.length}</div></div><div class="mcard"><div class="mlabel">Unrealised P&L</div><div class="mval ${_spnl>=0?'green':'red'}" style="font-family:var(--mono)">${fmt(_spnl)}</div></div><div class="mcard"><div class="mlabel">Collateral locked${infoBubble('When you short a stock, 1.5x the value of the shares you borrowed gets set aside from your cash as a safety deposit. You get it back (plus or minus your profit or loss) when you cover the position.')}</div><div class="mval" style="font-family:var(--mono)">${fmt(collTotal)}</div></div></div>${shortRows}`;
   }
 
   if(UI.portfolioTab==='watchlist'){
@@ -5043,7 +5061,7 @@ async function reapply(){const idx=DB.ipoApps.findIndex(a=>a.user_id===UI.userId
 function renderAppForm(app){
   if(app&&app.status==='pending')return`<div class="card"><div class="empty">Application under review.</div></div>`;
   if(app&&app.status==='approved')return`<div class="card"><div class="empty">Your company is already listed!</div></div>`;
-  return`<div class="card"><div class="section-title">IPO application</div><div class="row"><div class="frow" style="flex:1"><label class="flabel">Company name</label><input type="text" id="ipo-name" placeholder="Acme Corp"></div><div class="frow" style="flex:1"><label class="flabel">Ticker (3-4 letters)</label><input type="text" id="ipo-ticker" placeholder="ACM" maxlength="4" style="text-transform:uppercase"></div></div><div class="row"><div class="frow" style="flex:1"><label class="flabel">IPO price ($)</label><input type="number" id="ipo-price" placeholder="25.00" min="0.01" step="0.01"></div><div class="frow" style="flex:1"><label class="flabel">Total shares</label><input type="number" id="ipo-shares" placeholder="1000" min="1"></div></div><div class="frow"><label class="flabel">Description</label><textarea id="ipo-desc" rows="2" placeholder="Describe your business..."></textarea></div><button class="btn btn-primary" onclick="submitIPOForm()">Submit</button></div>`;
+  return`<div class="card"><div class="section-title">IPO application${infoBubble('IPO stands for Initial Public Offering — the first time a company sells shares to the public. Once approved, your stock gets listed on the market and anyone can buy or sell shares of it.')}</div><div class="row"><div class="frow" style="flex:1"><label class="flabel">Company name</label><input type="text" id="ipo-name" placeholder="Acme Corp"></div><div class="frow" style="flex:1"><label class="flabel">Ticker (3-4 letters)</label><input type="text" id="ipo-ticker" placeholder="ACM" maxlength="4" style="text-transform:uppercase"></div></div><div class="row"><div class="frow" style="flex:1"><label class="flabel">IPO price ($)</label><input type="number" id="ipo-price" placeholder="25.00" min="0.01" step="0.01"></div><div class="frow" style="flex:1"><label class="flabel">Total shares</label><input type="number" id="ipo-shares" placeholder="1000" min="1"></div></div><div class="frow"><label class="flabel">Description</label><textarea id="ipo-desc" rows="2" placeholder="Describe your business..."></textarea></div><button class="btn btn-primary" onclick="submitIPOForm()">Submit</button></div>`;
 }
 function renderMyStock(){
   const u=cu();
@@ -5496,7 +5514,7 @@ function renderDivTab(co,myDivs){
       }
     }
   }).catch(()=>{});
-  return`<div class="card"><div class="section-title">Pay a dividend</div>
+  return`<div class="card"><div class="section-title">Pay a dividend${infoBubble('A dividend is a cash payment your company makes to its shareholders, split proportionally by how many shares each person holds. It comes out of the company account cash, not from thin air.')}</div>
     <div class="ibox ibox-teal">Paid from company cash (raised at IPO) to all shareholders. Company cash grows when investors buy shares; dividends reduce it.</div>
     <div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div>
     <div class="mcard"><div class="mlabel">Shareholders</div><div class="mval" id="div-sh-count">loading...</div></div>
@@ -5520,13 +5538,13 @@ function renderFinancialsMgmtTab(co,myFinancials){
 }
 function renderBBTab(co,myBBs){
   const sold=co.shares-co.shares_avail,owner=cu();
-  return`<div class="card"><div class="section-title">Share buyback</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${sold.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div></div>${sold>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Shares to buy back</label><input type="number" id="bb-qty" placeholder="50" min="1" max="${sold}" oninput="updateBBPrev('${co.ticker}')"></div><div style="padding-bottom:12px"><button class="btn btn-primary" onclick="doBuyback('${co.ticker}',get('bb-qty')?.value)">Buy back</button></div></div><div id="bb-prev"></div>`:'<div class="empty">No shares in circulation.</div>'}</div>${myBBs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${myBBs.map(b=>`<tr><td style="color:var(--text2)">${b.ts}</td><td>${b.qty}</td><td style="font-family:var(--mono)">${fmt(b.price)}</td><td style="font-weight:500;font-family:var(--mono)">${fmt(b.total)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
+  return`<div class="card"><div class="section-title">Share buyback${infoBubble('The company repurchases its own outstanding shares using its cash. This permanently retires the shares (they do not go back into the pool of shares available to buy) and reduces the total share count.')}</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${sold.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div></div>${sold>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Shares to buy back</label><input type="number" id="bb-qty" placeholder="50" min="1" max="${sold}" oninput="updateBBPrev('${co.ticker}')"></div><div style="padding-bottom:12px"><button class="btn btn-primary" onclick="doBuyback('${co.ticker}',get('bb-qty')?.value)">Buy back</button></div></div><div id="bb-prev"></div>`:'<div class="empty">No shares in circulation.</div>'}</div>${myBBs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${myBBs.map(b=>`<tr><td style="color:var(--text2)">${b.ts}</td><td>${b.qty}</td><td style="font-family:var(--mono)">${fmt(b.price)}</td><td style="font-weight:500;font-family:var(--mono)">${fmt(b.total)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
 }
 function updateBBPrev(ticker){const co=getCo(ticker);if(!co)return;const q=parseInt(get('bb-qty')?.value)||0;const p=get('bb-prev');if(p)p.innerHTML=q>0?impactPreview(co,q,'buy'):'';}
 function renderDilTab(co){
   // Get all tickers for this company: base + classes
   const allTickers=getCompanyTickers(co.ticker);
-  let html='';
+  let html='<div class="ibox ibox-blue">Dilution'+infoBubble('Dilution means issuing new shares of your company. It raises new capital, but each existing share now represents a smaller slice of the company, so the price adjusts down proportionally when new shares are approved.')+' issues new shares to raise capital. Requires Chairman approval.</div>';
   allTickers.forEach(ticker=>{
     const stock=getCo(ticker);if(!stock)return;
     const meta=getClassMeta(ticker);
