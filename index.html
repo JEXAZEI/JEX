@@ -748,15 +748,6 @@ function exportTableCSV(table){
 function copyTicker(ticker){
   navigator.clipboard?.writeText(ticker).then(()=>toast('Copied: '+ticker)).catch(()=>toast(ticker+' (copy manually)'));
 }
-async function creditCompanyCash(ticker,amount){
-  const meta=getClassMeta(ticker);
-  const parentTicker=meta?meta.parent_ticker:ticker;
-  const co=getCo(parentTicker)||getCo(ticker);
-  if(!co)return;
-  const owner=getUser(co.owner_id);if(!owner)return;
-  const newCash=Math.round((owner.cash+amount)*100)/100;
-  await updateUser(owner.id,{cash:newCash});
-}
 const uid=()=>'id_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
 const ts=()=>new Date().toLocaleTimeString();
 const isoNow=()=>new Date().toISOString();
@@ -904,21 +895,30 @@ async function saveDivThresholdFrom(id='div-threshold'){
 async function reviewDivApproval(id,approve){
   const da=DB.divApprovals.find(x=>x.id===id);if(!da)return;
   const u=cu();
-  // Atomically claim this approval before executing the payout — without this, a
-  // double-click or two admins reviewing the same request at once could both pass
-  // the (missing) status check and pay the dividend twice.
-  const claimed=await sb.patch('jex_dividend_approvals','id=eq.'+id+'&status=eq.pending',{status:approve?'approved':'rejected',reviewed_by:u.name});
-  if(!claimed.length)return toast('This request was already reviewed');
-  da.status=approve?'approved':'rejected';da.approved_by=u.name;
-  if(approve){
-    // Execute the dividend now, paid from the company's own cash regardless of who (Treasurer) is approving it
-    const co=getCo(da.ticker);
-    const payer=co&&getUser(co.owner_id);
-    if(payer)await issueDividend(da.ticker,da.per_share,da.note||'Treasurer-approved dividend',payer,true);
-  } else {
+  if(!approve){
+    // Rejecting doesn't move money -- stays a simple claimed status patch.
+    const claimed=await sb.patch('jex_dividend_approvals','id=eq.'+id+'&status=eq.pending',{status:'rejected',reviewed_by:u.name});
+    if(!claimed.length)return toast('This request was already reviewed');
+    da.status='rejected';da.approved_by=u.name;
     await pushNotification(da.requested_by,'div_approval','❌ Your dividend request for '+da.company_name+' was rejected by the Treasurer.',da.ticker);
-    toast('Dividend rejected');
+    toast('Dividend rejected');render();return;
   }
+  // Approving DOES move money -- rpc_pay_dividend does its own atomic claim
+  // (SELECT ... FOR UPDATE, re-checks status='pending') and requires the
+  // caller to actually be a Treasurer, closing the same "any authenticated
+  // caller could call issueDividend(...,preApproved=true) directly" gap
+  // this whole pass is about.
+  let r;
+  try{r=await sb.rpc('rpc_pay_dividend',{p_ticker:da.ticker,p_per_share:da.per_share,p_note:da.note||'Treasurer-approved dividend',p_approval_id:id});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  da.status='approved';da.approved_by=u.name;
+  if(r.owner_id){const o=getUser(r.owner_id);if(o)o.cash=r.owner_cash;}
+  await refreshDividendPayoutBalances(r.payouts);
+  if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker:da.ticker,company_name:da.company_name,per_share:da.per_share,total:r.total,note:da.note||'Treasurer-approved dividend',payouts:r.payouts,ts:ts()});
+  await logActivity('dividend',da.company_name+' paid dividend '+fmt(da.per_share)+'/share — total '+fmt(r.total),{ticker:da.ticker,userId:r.owner_id,userName:u.name,amount:r.total});
+  await pushNotificationToHolders(da.ticker,'dividend','💰 '+da.company_name+' paid a dividend of '+fmt(da.per_share)+'/share');
+  pushBalances();
+  toast(da.company_name+' paid '+fmt(da.per_share)+'/share (Treasurer-approved)');
   render();
 }
 async function togglePracticeMode(){
@@ -995,22 +995,12 @@ async function doRestoreSnapshot(activityId){
   const rec=DB.activity.find(a=>a.id===activityId);if(!rec)return toast('Snapshot not found');
   let snap;
   try{snap=JSON.parse(rec.description);}catch{return toast('Snapshot data is corrupted');}
-  const data=snap.data;
   toast('Restoring snapshot...');
-  // Restore users (cash and holdings)
-  for(const u of(data.users||[])){
-    const local=getUser(u.id);
-    if(local){
-      await updateUser(u.id,{cash:u.cash,holdings:u.holdings||{},shorts:u.shorts||{}});
-    }
-  }
-  // Restore company prices and shares_avail
-  for(const c of(data.companies||[])){
-    const local=getCo(c.ticker);
-    if(local){
-      await updateCo(c.ticker,{price:c.price,shares_avail:c.shares_avail,price_history:c.price_history||[]});
-    }
-  }
+  // Restoring cash/holdings/shorts/price/shares_avail runs server-side
+  // (rpc_admin_restore_snapshot) -- the client can no longer PATCH those
+  // columns directly for every user/company in the snapshot at once.
+  try{await sb.rpc('rpc_admin_restore_snapshot',{p_activity_id:activityId});}
+  catch(e){return toast(rpcErrorMessage(e));}
   // Clear active orders and stop-loss
   await sb.del('jex_limit_orders',"status=in.(open,after_hours)");
   DB.limitOrders=DB.limitOrders.filter(o=>o.status!=='open'&&o.status!=='after_hours');
@@ -1936,37 +1926,23 @@ async function requestFounderAllocation(ticker,studentId,shares,reason){
 }
 async function reviewFounderAllocation(id,approve){
   const a=DB.founderAllocations.find(x=>x.id===id);if(!a)return;
+  // Reviewing (especially approving, which grants free shares) runs
+  // server-side (rpc_review_founder_allocation) -- previously ANY
+  // authenticated client could approve ANY pending allocation, including
+  // their own, since only requesting one was gated to the company's owner
+  // or founders; approving it was never checked at all.
+  let r;
+  try{r=await sb.rpc('rpc_review_founder_allocation',{p_id:id,p_approve:approve});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  a.status=approve?'approved':'rejected';
   if(approve){
-    const co=getCo(a.ticker);
-    // Reload student fresh from DB to get latest holdings
-    let studentArr=await sb.get('jex_users','id=eq.'+a.student_id+'&select='+JEX_USERS_SAFE_SELECT);
-    const student=studentArr&&studentArr[0];
-    if(!co){toast('Company stock not found for ticker '+a.ticker);return;}
-    if(!student){toast('Student not found: '+a.student_name);return;}
-    if(co.shares_avail<a.shares){toast('Insufficient shares — only '+co.shares_avail+' available in '+a.ticker);return;}
-    // Atomically claim before granting shares — a double-click or two admins
-    // reviewing the same allocation at once could otherwise both grant it.
-    const claimed=await sb.patch('jex_founder_allocations','id=eq.'+id+'&status=eq.pending',{status:'approved'});
-    if(!claimed.length){toast('This allocation was already reviewed');return;}
-    a.status='approved';
-    // Build updated holdings
-    const currentHoldings=typeof student.holdings==='object'&&student.holdings?student.holdings:{};
-    const newHoldings={...currentHoldings};
-    newHoldings[a.ticker]=(parseInt(newHoldings[a.ticker])||0)+a.shares;
-    // Write to DB
-    await sb.patch('jex_users','id=eq.'+a.student_id,{holdings:newHoldings});
-    // Update local DB user
     const localStudent=getUser(a.student_id);
-    if(localStudent)localStudent.holdings=newHoldings;
-    // Reduce available shares
-    await updateCo(a.ticker,{shares_avail:co.shares_avail-a.shares});
+    if(localStudent)localStudent.holdings=r.holdings;
+    const co=getCo(a.ticker);if(co)co.shares_avail=r.shares_avail;
     await pushNotification(a.student_id,'founder_alloc','🎁 '+a.shares+' founder shares of '+a.company_name+' ('+a.ticker+') have been added to your portfolio!',a.ticker);
     await logActivity('founder_alloc',a.student_name+' granted '+a.shares+' founder shares of '+a.company_name,{ticker:a.ticker,amount:a.shares});
     toast('✓ '+a.student_name+' granted '+a.shares+'×'+a.ticker+' — portfolio updated');
   } else {
-    const claimed=await sb.patch('jex_founder_allocations','id=eq.'+id+'&status=eq.pending',{status:'rejected'});
-    if(!claimed.length)return toast('This allocation was already reviewed');
-    a.status='rejected';
     await pushNotification(a.student_id,'founder_alloc','❌ Your founder share request for '+a.shares+'×'+a.ticker+' in '+a.company_name+' was rejected.');
     toast('Allocation rejected');
   }
@@ -1976,6 +1952,9 @@ async function reviewFounderAllocation(id,approve){
 // ═══════════════════════════════════════════════
 // STOCK PRICE ADJUSTMENT (Chairman)
 // ═══════════════════════════════════════════════
+// Price adjustment runs server-side (rpc_adjust_stock_price), re-checking
+// the Chairman/President role itself rather than trusting the client-side
+// isChairman() gate.
 async function adjustStockPrice(ticker,pct,reason){
   if(!isChairman(cu()))return toast('Only the Chairman or President can adjust stock prices');
   if(!ticker)return toast('Select a ticker');
@@ -1985,19 +1964,18 @@ async function adjustStockPrice(ticker,pct,reason){
   const co=getCo(ticker);if(!co)return;
   const u=cu();
   const oldPrice=co.price;
-  const newPrice=Math.max(0.01,Math.round(oldPrice*(1+pct/100)*100)/100);
-  const label=pct>=0?'Boost +'+pct+'%':'Drop '+pct+'%';
-  const newHistory=[...co.price_history,{p:newPrice,t:label}];
-  await updateCo(ticker,{price:newPrice,price_history:newHistory});
-  // Store in price adjustments log
-  const rec={id:uid(),ticker,company_name:co.name,pct,old_price:oldPrice,new_price:newPrice,reason:(reason||'').trim(),applied_by:u.name,ts:ts()};
-  try{await sb.post('jex_price_adjustments',rec);if(!DB.priceAdjustments)DB.priceAdjustments=[];DB.priceAdjustments.unshift(rec);}catch(e){}
+  let r;
+  try{r=await sb.rpc('rpc_adjust_stock_price',{p_ticker:ticker,p_pct:pct,p_reason:(reason||'').trim()});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  co.price=r.price;co.price_history=r.price_history;
+  const rec={id:uid(),ticker,company_name:co.name,pct,old_price:r.old_price,new_price:r.price,reason:(reason||'').trim(),applied_by:u.name,ts:ts()};
+  if(!DB.priceAdjustments)DB.priceAdjustments=[];DB.priceAdjustments.unshift(rec);
   const msg=(pct>=0?'📈':'📉')+' '+co.name+' ('+ticker+') price '+(pct>=0?'boosted by +':'cut by ')+Math.abs(pct)+'%'+(reason?' — '+reason.trim():'');
   const holderIds=DB.users.filter(hu=>hu.role==='student'&&(holdings(hu)[ticker]||0)>0).map(hu=>hu.id);
   await pushNotificationToHolders(ticker,'price_adj',msg);
   await pushNotificationToAll('price_adj',msg,holderIds);
-  await logActivity('price_adj',msg,{ticker,userId:u.id,userName:u.name,amount:newPrice-oldPrice});
-  toast(ticker+' '+(pct>=0?'boosted':'cut')+' by '+Math.abs(pct)+'% → '+fmt(newPrice));render();
+  await logActivity('price_adj',msg,{ticker,userId:u.id,userName:u.name,amount:r.price-oldPrice});
+  toast(ticker+' '+(pct>=0?'boosted':'cut')+' by '+Math.abs(pct)+'% → '+fmt(r.price));render();
 }
 
 // ═══════════════════════════════════════════════
@@ -2296,34 +2274,34 @@ async function cancelStopLoss(id){
   const s=DB.stopLossOrders.find(x=>x.id===id);if(s)s.status='cancelled';
   toast('Stop-loss cancelled');render();
 }
+// Stop-loss auto-sells are executed server-side (rpc_trigger_stop_loss --
+// see stop_loss_engine_migration.sql): every logged-in client polls and
+// independently notices a crossed trigger, but the RPC itself re-verifies
+// the trigger condition and the atomic active->triggered claim, rather than
+// trusting whatever the client PATCHed. The local price check below is
+// just a cheap filter so an obviously-not-due order doesn't round-trip to
+// the server on every 15s tick -- not the actual security boundary.
 async function checkStopLossOrders(){
   if(!isOpen())return;
   const active=DB.stopLossOrders.filter(s=>s.status==='active');
   for(const sl of active){
     const co=getCo(sl.ticker);if(!co)continue;
-    if(co.price>sl.trigger_price)continue; // not triggered
-    const u=getUser(sl.user_id);if(!u)continue;
-    const held=(holdings(u)[sl.ticker])||0;
-    if(held<=0){
-      await sb.patch('jex_stop_loss','id=eq.'+sl.id,{status:'cancelled'});
-      sl.status='cancelled';continue;
+    if(co.price>sl.trigger_price)continue; // not (locally) triggered yet
+    let r;
+    try{r=await sb.rpc('rpc_trigger_stop_loss',{p_stop_loss_id:sl.id});}catch(e){continue;}
+    if(!r||!r.triggered){
+      if(r&&r.reason==='no_shares_held')sl.status='cancelled';
+      else if(r&&r.reason==='not_active')sl.status='triggered'; // another client already claimed it
+      continue;
     }
-    // Atomically claim this order before moving money or shares — every logged-in
-    // client polls and runs this same check independently, so a concurrent client
-    // could otherwise also see it as 'active' and trigger it a second time. Only
-    // proceed if WE were the one who flipped active -> triggered.
-    const claimed=await sb.patch('jex_stop_loss','id=eq.'+sl.id+'&status=eq.active',{status:'triggered'});
-    if(!claimed.length){sl.status='triggered';continue;} // another client already claimed it
     sl.status='triggered';
-    const sellQty=Math.min(held,sl.shares);
-    const np=impactPrice(co,sellQty,'sell');
-    const nH={...holdings(u)};nH[sl.ticker]=held-sellQty;if(nH[sl.ticker]<=0)delete nH[sl.ticker];
-    await updateUser(u.id,{cash:Math.round((u.cash+sellQty*np)*100)/100,holdings:nH});
-    await updateCo(sl.ticker,{price:np,shares_avail:co.shares_avail+sellQty,price_history:[...co.price_history,{p:np,t:isoNow()}]});
-    await recordTrade(sl.ticker,sellQty,np,'exchange',u.id,'stop_loss');
-    await pushNotification(u.id,'stop_loss','🛑 Stop-loss triggered: sold '+sellQty+'×'+sl.ticker+' @ '+fmt(np)+' (trigger: '+fmt(sl.trigger_price)+')',sl.ticker);
-    await logActivity('stop_loss',u.name+' stop-loss triggered on '+sl.ticker+' @ '+fmt(np),{ticker:sl.ticker,userId:u.id,userName:u.name,amount:sellQty*np});
-    toast('Stop-loss triggered for '+u.name+': sold '+sellQty+'×'+sl.ticker+' @ '+fmt(np));
+    const u=getUser(r.user_id);
+    if(u){u.cash=r.cash;u.holdings=r.holdings;}
+    co.price=r.price;co.shares_avail=r.shares_avail;co.price_history=r.price_history;
+    if(r.trade)DB.trades.push(r.trade);
+    await pushNotification(r.user_id,'stop_loss','🛑 Stop-loss triggered: sold '+r.sell_qty+'×'+sl.ticker+' @ '+fmt(r.price)+' (trigger: '+fmt(sl.trigger_price)+')',sl.ticker);
+    await logActivity('stop_loss',(u?u.name:'Someone')+' stop-loss triggered on '+sl.ticker+' @ '+fmt(r.price),{ticker:sl.ticker,userId:r.user_id,userName:u?u.name:'',amount:r.sell_qty*r.price});
+    toast('Stop-loss triggered'+(u?' for '+u.name:'')+': sold '+r.sell_qty+'×'+sl.ticker+' @ '+fmt(r.price));
   }
 }
 // ═══════════════════════════════════════════════
@@ -2579,11 +2557,15 @@ async function resetExchange(){
     // Step 5b: Wipe classrooms (after users/pending are gone, since both can
     // reference a classroom_id)
     await sb.del('jex_classrooms','id=neq.x');
-    // Step 6: Reset officer cash to 0 (admins keep their accounts but not cash)
-    const adminRoles=['chairman','president','secretary','treasurer','compliance_officer'];
-    for(const role of adminRoles){
-      await sb.patch('jex_users','role=eq.'+role,{cash:0,holdings:{},shorts:{},watchlist:[]});
-    }
+    // Step 6: Reset officer cash to 0 (admins keep their accounts but not cash).
+    // Runs server-side (rpc_admin_reset_officer_cash), same admin-role check
+    // as everywhere else -- resetExchange's isAdmin() gate above is
+    // client-side only, same as this whole function's many direct DELETEs
+    // (a separate, much larger finding: table-level DELETE grants on nearly
+    // every jex_* table are just as wide open as the UPDATE grants this
+    // migration closes, and this function relies on that for every step but
+    // this one -- flagged, not fixed, here).
+    await sb.rpc('rpc_admin_reset_officer_cash',{});
     // Step 7: Reset session to clean defaults
     await sb.patch('jex_session','id=eq.1',{
       status:'closed',label:'Session closed',
@@ -2662,115 +2644,95 @@ function getOrderBook(ticker){
   return{bids,asks,bestBid,bestAsk,spread};
 }
 
-// ── Place a limit order ───────────────────────────────────
-async function placeLimitOrder(ticker,side,qty,limitPrice){
-  if(!requireOpen(ticker))return;
-  const u=cu(),co=getCo(ticker);if(!u||!co)return;
-  if(side==='buy'&&!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
+// Book-to-book matching and pool fills for resting orders are executed
+// server-side (rpc_match_limit_order_book / rpc_fill_limit_vs_pool -- see
+// limit_order_engine_migration.sql), closing the gap where matchAgainstBook
+// and checkLimitOrders computed both sides of a trade client-side and
+// PATCHed jex_users/jex_funds/jex_companies directly for accounts that
+// weren't even the caller's own. Placement is now server-side too
+// (rpc_place_limit_order): the client can no longer POST an order row
+// claiming a user_id/fund_id it doesn't own.
+function applyLimitFillToOwner(type,id,cash,holdings){
+  if(type==='fund'){const f=getFund(id);if(f){f.cash=cash;f.holdings=holdings;}}
+  else{const u=getUser(id);if(u){u.cash=cash;u.holdings=holdings;}}
+}
+function applyLimitMatchResult(r){
+  const co=getCo(r.ticker);if(co){co.price=r.price;co.price_history=r.price_history;}
+  if(r.trade)DB.trades.push(r.trade);
+  applyLimitFillToOwner(r.buyer_type,r.buyer_id,r.buyer_cash,r.buyer_holdings);
+  applyLimitFillToOwner(r.seller_type,r.seller_id,r.seller_cash,r.seller_holdings);
+  const bidLocal=DB.limitOrders.find(o=>o.id===r.bid_order_id);
+  if(bidLocal){bidLocal.status=r.bid_status;bidLocal.qty=r.bid_qty;if(r.bid_status==='filled')bidLocal.filled_price=r.fill_price;}
+  const askLocal=DB.limitOrders.find(o=>o.id===r.ask_order_id);
+  if(askLocal){askLocal.status=r.ask_status;askLocal.qty=r.ask_qty;if(r.ask_status==='filled')askLocal.filled_price=r.fill_price;}
+  checkPriceAlerts();checkCircuitBreakers();pushBalances();snapshotJXI();
+}
+function applyLimitPoolFillResult(orderId,r){
+  const co=getCo(r.ticker);if(co){co.price=r.price;co.price_history=r.price_history;if('shares_avail'in r)co.shares_avail=r.shares_avail;}
+  if(r.trade)DB.trades.push(r.trade);
+  applyLimitFillToOwner(r.owner_type,r.owner_id,r.cash,r.holdings);
+  if(r.company_owner_id&&r.company_owner_cash!=null){const owner=getUser(r.company_owner_id);if(owner)owner.cash=r.company_owner_cash;}
+  const o=DB.limitOrders.find(x=>x.id===orderId);
+  if(o){o.status='filled';o.filled_price=r.fill_price;}
+  checkPriceAlerts();checkCircuitBreakers();pushBalances();snapshotJXI();
+}
+// Repeatedly asks the server to match the book (which may resolve OTHER
+// pairs too, exactly like the old periodic scan did) until either nothing
+// crosses anymore or this specific order stops being open, then tries a
+// pool fill for whatever's left. Returns the quantity of THIS order filled.
+async function settleLimitOrder(order,cancelIfUnfilled){
+  const originalQty=order.qty;
+  let filled=0;
+  for(let i=0;i<200;i++){
+    let r;
+    try{r=await sb.rpc('rpc_match_limit_order_book',{p_ticker:order.ticker});}
+    catch(e){break;}
+    if(!r||!r.matched)break;
+    applyLimitMatchResult(r);
+    if(r.bid_order_id===order.id||r.ask_order_id===order.id)filled+=r.fill_qty;
+    const mine=DB.limitOrders.find(o=>o.id===order.id);
+    if(!mine||mine.status!=='open')break;
+  }
+  let mine=DB.limitOrders.find(o=>o.id===order.id);
+  if(mine&&mine.status==='open'){
+    const co=getCo(order.ticker);
+    const crosses=co&&((order.side==='buy'&&co.price<=order.limit_price)||(order.side==='sell'&&co.price>=order.limit_price));
+    if(crosses){
+      let pr;
+      try{pr=await sb.rpc('rpc_fill_limit_vs_pool',{p_order_id:order.id});}catch(e){pr=null;}
+      if(pr&&pr.filled){applyLimitPoolFillResult(order.id,pr);filled+=(originalQty-filled);}
+    }
+  }
+  mine=DB.limitOrders.find(o=>o.id===order.id);
+  if(mine&&mine.status==='open'&&cancelIfUnfilled){
+    try{await sb.rpc('rpc_cancel_limit_order',{p_order_id:order.id});mine.status='cancelled';}catch(e){}
+  }
+  return filled;
+}
+// ── Place a limit order (fundId optional: places on behalf of a fund) ──
+async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
+  const co=getCo(ticker);if(!co)return;
   qty=parseInt(qty);limitPrice=parseFloat(limitPrice);
   if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(isNaN(limitPrice)||limitPrice<=0)return toast('Enter a valid limit price');
-  // Price band check (only during live session)
-  if(isOpen()&&!checkPriceBand(ticker,limitPrice))return;
-  // After-hours: queue for session open
-  if(!isOpen()){
-    if(side==='buy'){const maxCost=Math.round(limitPrice*qty*100)/100;if(u.cash<maxCost)return toast('Insufficient funds (need '+fmt(maxCost)+' at limit price)');}
-    else{const held=(holdings(u)[ticker])||0;if(held<qty)return toast('You only hold '+held+' shares');}
-    const order={id:uid(),user_id:u.id,ticker,side,qty,limit_price:limitPrice,status:'after_hours',ts:ts()};
-    await sb.post('jex_limit_orders',order);
-    DB.limitOrders.push(order);
-    toast('After-hours order queued: '+qty+'×'+ticker+' @ '+fmt(limitPrice)+' — activates when session opens');
-    render();return;
-  }
-  if(side==='buy'){
-    const maxCost=Math.round(limitPrice*qty*100)/100;
-    if(u.cash<maxCost)return toast('Insufficient funds (need '+fmt(maxCost)+' at limit price)');
-  } else {
-    const held=(holdings(u)[ticker])||0;
-    if(held<qty)return toast('You only hold '+held+' shares');
-  }
-  // Try to match against existing order book first
-  const remaining=await matchAgainstBook(ticker,side,qty,limitPrice,u);
-  if(remaining<=0){toast('Limit order fully filled from order book!');render();return;}
-  // If anything left over, check if it would fill against JEX pool
-  const co2=getCo(ticker);
-  const fillsVsPool=(side==='buy'&&co2.price<=limitPrice)||(side==='sell'&&co2.price>=limitPrice);
-  if(fillsVsPool&&remaining>0){
-    if(side==='buy')await placeBuy(ticker,remaining);
-    else await placeSell(ticker,remaining);
-    if(remaining<qty)toast((qty-remaining)+' filled from book, '+remaining+' filled vs JEX pool');
-    else toast(remaining+' × '+ticker+' filled immediately vs JEX pool @ '+fmt(co2.price));
-    render();return;
-  }
-  // Queue remainder in order book
   const orderTypeEl=document.getElementById('limit-order-type');
   const orderType=(orderTypeEl?.value||'gtc').toLowerCase();
   const icebergQtyEl=document.getElementById('limit-iceberg-qty');
-  const icebergQty=orderType==='iceberg'&&icebergQtyEl?Math.max(1,parseInt(icebergQtyEl.value)||Math.ceil(remaining/4)):null;
-  // Fill-or-Kill: must be fully filled NOW or cancelled entirely
-  if(orderType==='fok'){
-    if(remaining>0){
-      toast('Fill-or-Kill cancelled — could only fill '+(qty-remaining)+' of '+qty+' shares');
-      return;
-    }
+  const icebergQty=orderType==='iceberg'&&icebergQtyEl?Math.max(1,parseInt(icebergQtyEl.value)||Math.ceil(qty/4)):null;
+  let r;
+  try{r=await sb.rpc('rpc_place_limit_order',{p_ticker:ticker,p_side:side,p_qty:qty,p_limit_price:limitPrice,p_order_type:orderType,p_iceberg_visible:icebergQty,p_fund_id:fundId||null});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.limitOrders.push(r.order);
+  if(r.status==='after_hours'){
+    toast('After-hours order queued: '+qty+'×'+ticker+' @ '+fmt(limitPrice)+' — activates when session opens');
+    render();return;
   }
-  if(remaining>0){
-  const order={id:uid(),user_id:u.id,ticker,side,qty:remaining,limit_price:limitPrice,status:'open',order_type:orderType,iceberg_visible:icebergQty,ts:ts()};
-    await sb.post('jex_limit_orders',order);
-    DB.limitOrders.push(order);
-    await logActivity('limit_order',u.name+' placed limit '+side+' '+remaining+'×'+ticker+' @ '+fmt(limitPrice),{ticker,userId:u.id,userName:u.name,amount:limitPrice});
-    const msg=remaining<qty?'Partial fill: '+(qty-remaining)+' matched, '+remaining+' queued @ '+fmt(limitPrice):'Limit '+side+': '+remaining+'×'+ticker+' @ '+fmt(limitPrice)+' — waiting for match';
-    toast(msg);
-  }
+  await logActivity('limit_order',(fundId?getFund(fundId)?.name+"'s fund":cu().name)+' placed limit '+side+' '+qty+'×'+ticker+' @ '+fmt(limitPrice),{ticker,amount:limitPrice});
+  const filledQty=await settleLimitOrder(r.order,orderType==='fok');
+  if(filledQty>=qty)toast('Limit order fully filled!');
+  else if(filledQty>0)toast('Partial fill: '+filledQty+' matched, '+(qty-filledQty)+' queued @ '+fmt(limitPrice));
+  else if(orderType!=='fok')toast('Limit '+side+': '+qty+'×'+ticker+' @ '+fmt(limitPrice)+' — waiting for match');
   render();
-}
-
-// ── Match an incoming order against the existing book ─────
-async function matchAgainstBook(ticker,side,qty,price,taker){
-  const book=getOrderBook(ticker);
-  const matches=side==='buy'?book.asks.filter(o=>o.limit_price<=price&&o.user_id!==taker.id):book.bids.filter(o=>o.limit_price>=price&&o.user_id!==taker.id);
-  let remaining=qty;
-  for(const maker of matches){
-    if(remaining<=0)break;
-    const fillQty=Math.min(remaining,maker.qty);
-    const fillPrice=maker.limit_price; // maker's price wins (price improvement for taker)
-    const makerUser=getUser(maker.user_id);if(!makerUser)continue;
-    const co=getCo(ticker);if(!co)continue;
-    if(side==='buy'){
-      // Taker buys from maker (maker is seller)
-      const cost=Math.round(fillPrice*fillQty*100)/100;
-      if(taker.cash<cost)break;
-      const tH={...holdings(taker)};tH[ticker]=(tH[ticker]||0)+fillQty;
-      await updateUser(taker.id,{cash:Math.round((taker.cash-cost)*100)/100,holdings:tH});
-      const mH={...holdings(makerUser)};mH[ticker]=(mH[ticker]||0)-fillQty;if(mH[ticker]<=0)delete mH[ticker];
-      await updateUser(makerUser.id,{cash:Math.round((makerUser.cash+cost)*100)/100,holdings:mH});
-    } else {
-      // Taker sells to maker (maker is buyer)
-      const proceeds=Math.round(fillPrice*fillQty*100)/100;
-      if(makerUser.cash<proceeds)continue;
-      const tH={...holdings(taker)};tH[ticker]=(tH[ticker]||0)-fillQty;if(tH[ticker]<=0)delete tH[ticker];
-      await updateUser(taker.id,{cash:Math.round((taker.cash+proceeds)*100)/100,holdings:tH});
-      const mH={...holdings(makerUser)};mH[ticker]=(mH[ticker]||0)+fillQty;
-      await updateUser(makerUser.id,{cash:Math.round((makerUser.cash-proceeds)*100)/100,holdings:mH});
-    }
-    // Update maker order (partial or full fill)
-    const newQty=maker.qty-fillQty;
-    if(newQty<=0){
-      await sb.patch('jex_limit_orders','id=eq.'+maker.id,{status:'filled',filled_price:fillPrice,filled_at:ts()});
-      maker.status='filled';maker.filled_price=fillPrice;
-    } else {
-      await sb.patch('jex_limit_orders','id=eq.'+maker.id,{qty:newQty});
-      maker.qty=newQty;
-    }
-    // Update price chart
-    const newHistory=[...co.price_history,{p:fillPrice,t:isoNow()}];
-    await updateCo(ticker,{price:fillPrice,price_history:newHistory});
-    await recordTrade(ticker,fillQty,fillPrice,side==='buy'?taker.id:makerUser.id,side==='buy'?makerUser.id:taker.id,'book_match');
-    await logActivity('limit_fill',taker.name+' matched '+fillQty+'×'+ticker+' @ '+fmt(fillPrice)+' with '+makerUser.name,{ticker,userId:taker.id,userName:taker.name,amount:fillPrice});
-    toast(fillQty+'×'+ticker+' matched with '+makerUser.name+' @ '+fmt(fillPrice)+'!');
-    remaining-=fillQty;
-  }
-  return remaining;
 }
 
 async function activateAfterHoursOrders(){
@@ -2787,7 +2749,8 @@ async function activateAfterHoursOrders(){
 }
 async function cancelLimitOrder(id){
   const o=DB.limitOrders.find(x=>x.id===id);if(!o)return;
-  await sb.patch('jex_limit_orders','id=eq.'+id,{status:'cancelled'});
+  try{await sb.rpc('rpc_cancel_limit_order',{p_order_id:id});}
+  catch(e){return toast(rpcErrorMessage(e));}
   o.status='cancelled';
   toast('Order cancelled');render();
 }
@@ -2797,111 +2760,33 @@ async function checkLimitOrders(){
   if(!isOpen())return;
   const openOrders=DB.limitOrders.filter(o=>o.status==='open');
   if(!openOrders.length)return;
-  // Group by ticker and check for crosses
   const tickers=[...new Set(openOrders.map(o=>o.ticker))];
   for(const ticker of tickers){
-    const book=getOrderBook(ticker);
-    // Match the best crossed orders that aren't the same user (self-trades stay resting rather
-    // than blocking every other order on the book behind them — see run_tests21 for the scenario)
-    let matched=null;
-    matchSearch:
-    for(const bid of book.bids){
-      for(const ask of book.asks){
-        if(bid.limit_price<ask.limit_price)break; // asks sorted ascending; no further crosses for this bid
-        if(bid.user_id===ask.user_id)continue;
-        matched={bid,ask};break matchSearch;
-      }
+    for(let i=0;i<50;i++){
+      let r;
+      try{r=await sb.rpc('rpc_match_limit_order_book',{p_ticker:ticker});}
+      catch(e){break;}
+      if(!r||!r.matched)break;
+      applyLimitMatchResult(r);
+      const buyerName=r.buyer_type==='fund'?(getFund(r.buyer_id)?.name||'a fund'):(getUser(r.buyer_id)?.name||'someone');
+      const sellerName=r.seller_type==='fund'?(getFund(r.seller_id)?.name||'a fund'):(getUser(r.seller_id)?.name||'someone');
+      await logActivity('limit_fill',buyerName+' ↔ '+sellerName+': '+r.fill_qty+'×'+ticker+' @ '+fmt(r.fill_price),{ticker,amount:r.fill_price});
+      toast(r.fill_qty+'×'+ticker+' matched: '+buyerName+' bought from '+sellerName+' @ '+fmt(r.fill_price));
     }
-    if(matched){
-      const bid=matched.bid,ask=matched.ask;
-      const buyer=getUser(bid.user_id),seller=getUser(ask.user_id);
-      if(!buyer||!seller)continue;
-      const fillQty=Math.min(bid.qty,ask.qty);
-      const fillPrice=ask.limit_price; // ask price (earlier order wins)
+    for(const o of DB.limitOrders.filter(ord=>ord.ticker===ticker&&ord.status==='open')){
       const co=getCo(ticker);if(!co)continue;
-      const cost=Math.round(fillPrice*fillQty*100)/100;
-      if(buyer.cash<cost)continue;
-      const held=(holdings(seller)[ticker])||0;if(held<fillQty)continue;
-      // Atomically claim both orders before moving any money or shares. Every
-      // logged-in client polls and runs this same matching logic independently,
-      // so without a claim step two concurrent clients could both match this
-      // exact pair and double-execute the fill. Condition each claim on the
-      // order's current qty too, so a partial-fill race can't double-decrement.
-      const bQty=bid.qty-fillQty,sQty=ask.qty-fillQty;
-      const bidClaim=bQty<=0
-        ?await sb.patch('jex_limit_orders','id=eq.'+bid.id+'&status=eq.open&qty=eq.'+bid.qty,{status:'filled',filled_price:fillPrice,filled_at:ts()})
-        :await sb.patch('jex_limit_orders','id=eq.'+bid.id+'&status=eq.open&qty=eq.'+bid.qty,{qty:bQty});
-      if(!bidClaim.length)continue; // another client already claimed/changed this order
-      const askClaim=sQty<=0
-        ?await sb.patch('jex_limit_orders','id=eq.'+ask.id+'&status=eq.open&qty=eq.'+ask.qty,{status:'filled',filled_price:fillPrice,filled_at:ts()})
-        :await sb.patch('jex_limit_orders','id=eq.'+ask.id+'&status=eq.open&qty=eq.'+ask.qty,{qty:sQty});
-      if(!askClaim.length){
-        // Couldn't claim the other side — release our claim on the bid so it's not stuck, retry next tick
-        if(bQty<=0)await sb.patch('jex_limit_orders','id=eq.'+bid.id,{status:'open',filled_price:null,filled_at:null});
-        else await sb.patch('jex_limit_orders','id=eq.'+bid.id,{qty:bid.qty});
-        continue;
-      }
-      // Execute
-      const bH={...holdings(buyer)};bH[ticker]=(bH[ticker]||0)+fillQty;
-      await updateUser(buyer.id,{cash:Math.round((buyer.cash-cost)*100)/100,holdings:bH});
-      const sH={...holdings(seller)};sH[ticker]=held-fillQty;if(sH[ticker]<=0)delete sH[ticker];
-      await updateUser(seller.id,{cash:Math.round((seller.cash+cost)*100)/100,holdings:sH});
-      if(bQty<=0)bid.status='filled';else bid.qty=bQty;
-      if(sQty<=0)ask.status='filled';else ask.qty=sQty;
-      // Update price
-      const newHistory=[...co.price_history,{p:fillPrice,t:isoNow()}];
-      await updateCo(ticker,{price:fillPrice,price_history:newHistory});
-      await recordTrade(ticker,fillQty,fillPrice,buyer.id,seller.id,'book_match');
-      await logActivity('limit_fill',buyer.name+' ↔ '+seller.name+': '+fillQty+'×'+ticker+' @ '+fmt(fillPrice),{ticker,amount:fillPrice});
-      toast(fillQty+'×'+ticker+' matched: '+buyer.name+' bought from '+seller.name+' @ '+fmt(fillPrice));
-    }
-    // Also fill limit orders that are now within JEX pool price
-    for(const o of openOrders.filter(ord=>ord.ticker===ticker)){
-      if(o.status!=='open')continue; // already filled above via a direct book match — don't fill it again
-      const co=getCo(ticker);if(!co)continue;
-      const u=getUser(o.user_id);if(!u)continue;
       const shouldFill=(o.side==='buy'&&co.price<=o.limit_price)||(o.side==='sell'&&co.price>=o.limit_price);
       if(!shouldFill)continue;
-      // Atomically claim this order before executing — another client polling at
-      // the same moment could otherwise also fill it against the JEX pool.
-      const claimed=await sb.patch('jex_limit_orders','id=eq.'+o.id+'&status=eq.open',{status:'claimed'});
-      if(!claimed.length){o.status='filled';continue;}
-      let executed=false;
-      if(o.side==='buy'){
-        if(co.shares_avail>=o.qty){
-          const np=impactPrice(co,o.qty,'buy'),cost=Math.round(np*o.qty*100)/100;
-          if(u.cash>=cost){
-            const bH={...holdings(u)};bH[o.ticker]=(bH[o.ticker]||0)+o.qty;
-            await updateUser(u.id,{cash:Math.round((u.cash-cost)*100)/100,holdings:bH});
-            await updateCo(ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-o.qty),price_history:[...co.price_history,{p:np,t:isoNow()}]});
-            await creditCompanyCash(ticker,Math.round(np*o.qty*100)/100);
-            await recordTrade(ticker,o.qty,np,u.id,'exchange','limit_buy');
-            executed=true;
-          }
-        }
-      } else {
-        const held=(holdings(u)[ticker])||0;
-        if(held>=o.qty){
-          const np=impactPrice(co,o.qty,'sell');
-          const sellProceeds=Math.round(np*o.qty*100)/100;
-          // JEX pool pays out — no company cash constraint
-          const nH={...holdings(u)};nH[ticker]=held-o.qty;if(nH[ticker]<=0)delete nH[ticker];
-          await updateUser(u.id,{cash:Math.round((u.cash+sellProceeds)*100)/100,holdings:nH});
-          await updateCo(ticker,{price:np,shares_avail:co.shares_avail+o.qty,price_history:[...co.price_history,{p:np,t:isoNow()}]});
-          await recordTrade(ticker,o.qty,np,'exchange',u.id,'limit_sell');
-          executed=true;
-        }
-      }
-      if(!executed){
-        // Couldn't actually fill (insufficient cash/shares/pool liquidity) — release the claim, retry next tick
-        await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'open'});
-        continue;
-      }
-      await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'filled',filled_price:getCo(ticker)?.price,filled_at:ts()});
-      o.status='filled';o.filled_price=getCo(ticker)?.price;
-      await logActivity('limit_fill',u.name+"'s limit "+o.side+" "+o.qty+"×"+ticker+" filled vs JEX pool @ "+fmt(o.filled_price),{ticker,userId:u.id,userName:u.name,amount:o.filled_price});
-      await pushNotification(u.id,'limit_fill','⚡ Limit '+o.side+' filled: '+o.qty+'×'+ticker+' @ '+fmt(o.filled_price),ticker);
-      toast(u.name+"'s limit order filled: "+o.qty+"×"+ticker+" @ "+fmt(o.filled_price));
+      let r;
+      try{r=await sb.rpc('rpc_fill_limit_vs_pool',{p_order_id:o.id});}
+      catch(e){continue;}
+      if(!r||!r.filled)continue;
+      const qty=o.qty;
+      applyLimitPoolFillResult(o.id,r);
+      const ownerName=r.owner_type==='fund'?(getFund(r.owner_id)?.name||'a fund'):(getUser(r.owner_id)?.name||'someone');
+      await logActivity('limit_fill',ownerName+"'s limit "+o.side+" "+qty+"×"+ticker+" filled vs JEX pool @ "+fmt(r.fill_price),{ticker,amount:r.fill_price});
+      if(r.owner_type==='user')await pushNotification(r.owner_id,'limit_fill','⚡ Limit '+o.side+' filled: '+qty+'×'+ticker+' @ '+fmt(r.fill_price),ticker);
+      toast(ownerName+"'s limit order filled: "+qty+"×"+ticker+" @ "+fmt(r.fill_price));
     }
   }
 }
@@ -2912,28 +2797,6 @@ setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();await
 // ═══════════════════════════════════════════════
 async function updateUser(uid2,data){const u=getUser(uid2);if(!u)return;Object.assign(u,data);await sb.patch('jex_users','id=eq.'+uid2,data);}
 async function updateCo(ticker,data){const co=getCo(ticker);if(!co)return;Object.assign(co,data);await sb.patch('jex_companies','ticker=eq.'+ticker,data);}
-async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
-  const rec={ticker,qty,price,buyer_id:buyerId,seller_id:sellerId,type:DB.session.practice_mode?'practice_'+type:type,ts:ts()};
-  const result=await sb.post('jex_trades',rec);
-  if(result&&result[0])DB.trades.push(result[0]);
-  // Snapshot NW for buyers/sellers and check alerts/breakers
-  if(buyerId&&buyerId!=='exchange'&&buyerId!=='short')snapshotNW(buyerId);
-  if(sellerId&&sellerId!=='exchange'&&sellerId!=='cover')snapshotNW(sellerId);
-  checkPriceAlerts();
-  checkCircuitBreakers();
-  pushBalances();
-  snapshotJXI();
-  // Refresh buyer and seller in DB.users so shareholder lists stay current
-  [buyerId,sellerId].forEach(async uid2=>{
-    if(!uid2||['exchange','short','cover'].includes(uid2))return;
-    try{const fresh=await sb.get('jex_users','id=eq.'+uid2+'&select='+JEX_USERS_SAFE_SELECT);
-    if(fresh&&fresh[0]){const local=getUser(uid2);if(local)Object.assign(local,fresh[0]);}}catch(e){}
-  });
-  pushToSheets('trades',{trades:[{ticker,qty,price,type,ts:ts(),
-    buyer:['exchange','short'].includes(buyerId)?'JEX':getUser(buyerId)?.name||buyerId,
-    seller:['exchange','cover'].includes(sellerId)?'JEX':getUser(sellerId)?.name||sellerId}]});
-}
-
 // Market buy/sell/short/cover are executed server-side (rpc_trade_* —
 // see trade_engine_migration.sql) so cash/holdings/shares/price can't be
 // fabricated by a raw REST call — the client can no longer PATCH those
@@ -3021,9 +2884,10 @@ const fundUnits=u=>u.fund_units||{};
 const MAX_FUND_FEE_PCT=25;
 const getFund=id=>DB.funds.find(f=>f.id===id);
 const canManageFund=f=>{const u=cu();return !!u&&(u.id===f.manager_id||isChairman(u));};
+const fundShortPnl=f=>Object.entries(fundShorts(f)).reduce((s,[t,pos])=>{const c=getCo(t);if(!c)return s;return s+Math.round((pos.avgPrice-c.price)*pos.qty*100)/100;},0);
 function currentFundNav(f){
   const holdingsValue=Object.entries(f.holdings||{}).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0);
-  const totalValue=Math.round((f.cash+holdingsValue)*100)/100;
+  const totalValue=Math.round((f.cash+holdingsValue+fundShortPnl(f))*100)/100;
   return f.units_outstanding>0?Math.round((totalValue/f.units_outstanding)*10000)/10000:10;
 }
 async function updateFund(fundId,data){const f=getFund(fundId);if(!f)return;Object.assign(f,data);await sb.patch('jex_funds','id=eq.'+fundId,data);}
@@ -3033,7 +2897,7 @@ async function createFund(name,feePct){
   if(!name||name.trim().length<3)return toast('Enter a fund name (at least 3 characters)');
   feePct=parseFloat(feePct);
   if(isNaN(feePct)||feePct<0||feePct>MAX_FUND_FEE_PCT)return toast('Performance fee must be between 0 and '+MAX_FUND_FEE_PCT+'%');
-  const rec={id:uid(),manager_id:u.id,manager_name:u.name,name:name.trim(),units_outstanding:0,cash:0,holdings:{},
+  const rec={id:uid(),manager_id:u.id,manager_name:u.name,name:name.trim(),units_outstanding:0,cash:0,holdings:{},shorts:{},
     fee_pct:Math.round(feePct*100)/100,status:'active',created_at:new Date().toISOString(),ts:ts()};
   await sb.post('jex_funds',rec);DB.funds.push(rec);
   await logActivity('fund_create',u.name+' launched a new fund: '+rec.name+' ('+rec.fee_pct+'% performance fee)',{userId:u.id,userName:u.name});
@@ -3046,6 +2910,9 @@ async function closeFund(fundId){
   await updateFund(fundId,{status:'closed'});
   toast('Fund closed to new deposits — existing depositors can still withdraw');render();
 }
+// Fund deposit/withdraw run server-side (rpc_fund_deposit/rpc_fund_withdraw)
+// -- same client-trusted-write gap as everything else in this pass, just on
+// the depositor's own cash/fund_units and the fund's cash/units_outstanding.
 async function depositToFund(fundId,amount){
   const u=cu();if(!u)return;
   const f=getFund(fundId);if(!f)return toast('Fund not found');
@@ -3053,14 +2920,11 @@ async function depositToFund(fundId,amount){
   amount=parseFloat(amount);
   if(isNaN(amount)||amount<=0)return toast('Enter a valid amount');
   if(u.cash<amount)return toast('Insufficient funds');
-  const nav=currentFundNav(f);
-  const unitsToMint=Math.round((amount/nav)*10000)/10000;
-  const existing=fundUnits(u)[fundId]||{units:0,costBasis:nav};
-  const newUnitsTotal=Math.round((existing.units+unitsToMint)*10000)/10000;
-  const newCostBasis=newUnitsTotal>0?Math.round((((existing.units*existing.costBasis)+(unitsToMint*nav))/newUnitsTotal)*10000)/10000:nav;
-  const newFundUnits={...fundUnits(u)};newFundUnits[fundId]={units:newUnitsTotal,costBasis:newCostBasis};
-  await updateUser(u.id,{cash:Math.round((u.cash-amount)*100)/100,fund_units:newFundUnits});
-  await updateFund(fundId,{cash:Math.round((f.cash+amount)*100)/100,units_outstanding:Math.round((f.units_outstanding+unitsToMint)*10000)/10000});
+  let r;
+  try{r=await sb.rpc('rpc_fund_deposit',{p_fund_id:fundId,p_amount:amount});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.cash=r.cash;u.fund_units=r.fund_units;
+  f.cash=r.fund_cash;f.units_outstanding=r.units_outstanding;
   await logActivity('fund_deposit',u.name+' deposited '+fmt(amount)+' into '+f.name,{userId:u.id,userName:u.name,amount});
   toast('Deposited '+fmt(amount)+' into '+f.name);render();
 }
@@ -3072,23 +2936,31 @@ async function withdrawFromFund(fundId,unitsStr){
   const units=parseFloat(unitsStr);
   if(isNaN(units)||units<=0)return toast('Enter a valid number of units');
   if(units>held+0.0001)return toast('You only hold '+held+' units');
-  const nav=currentFundNav(f);
-  const grossProceeds=Math.round((units*nav)*100)/100;
-  if(f.cash<grossProceeds)return toast('This fund does not have enough uninvested cash for this withdrawal — the manager needs to sell holdings first');
-  const gainPerUnit=Math.max(0,nav-position.costBasis);
-  const fee=Math.round((units*gainPerUnit*(f.fee_pct/100))*100)/100;
-  const netProceeds=Math.round((grossProceeds-fee)*100)/100;
-  const remainingUnits=Math.round((held-units)*10000)/10000;
-  const newFundUnits={...fundUnits(u)};
-  if(remainingUnits<=0.0001)delete newFundUnits[fundId];else newFundUnits[fundId]={units:remainingUnits,costBasis:position.costBasis};
-  await updateUser(u.id,{cash:Math.round((u.cash+netProceeds)*100)/100,fund_units:newFundUnits});
-  await updateFund(fundId,{cash:Math.round((f.cash-grossProceeds)*100)/100,units_outstanding:Math.round((f.units_outstanding-units)*10000)/10000});
-  if(fee>0){
-    const manager=getUser(f.manager_id);
-    if(manager)await updateUser(manager.id,{cash:Math.round((manager.cash+fee)*100)/100});
-  }
-  await logActivity('fund_withdraw',u.name+' withdrew '+fmt(netProceeds)+' from '+f.name+(fee?' (performance fee '+fmt(fee)+' to '+f.manager_name+')':''),{userId:u.id,userName:u.name,amount:netProceeds});
-  toast('Withdrew '+fmt(netProceeds)+' from '+f.name+(fee?' (after '+fmt(fee)+' performance fee)':''));render();
+  let r;
+  try{r=await sb.rpc('rpc_fund_withdraw',{p_fund_id:fundId,p_units:units});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.cash=r.cash;u.fund_units=r.fund_units;
+  f.cash=r.fund_cash;f.units_outstanding=r.units_outstanding;
+  if(r.fee>0&&r.manager_id){const manager=getUser(r.manager_id);if(manager)manager.cash=r.manager_cash;}
+  await logActivity('fund_withdraw',u.name+' withdrew '+fmt(r.net)+' from '+f.name+(r.fee?' (performance fee '+fmt(r.fee)+' to '+f.manager_name+')':''),{userId:u.id,userName:u.name,amount:r.net});
+  toast('Withdrew '+fmt(r.net)+' from '+f.name+(r.fee?' (after '+fmt(r.fee)+' performance fee)':''));render();
+}
+// Fund manager trades are executed server-side (rpc_fund_buy/sell -- see
+// fund_trade_engine_migration.sql), the same hardening already applied to
+// direct student trades (rpc_trade_*): the client can no longer PATCH
+// jex_funds/jex_companies directly to fabricate a fund's cash or holdings.
+// The checks below are fast local feedback only; the RPC re-derives and
+// re-checks everything and is the only thing that actually writes.
+function applyFundTradeResult(fundId,ticker,r){
+  const f=getFund(fundId),co=getCo(ticker);
+  if(f){f.cash=r.cash;f.holdings=r.holdings;}
+  if(co){co.price=r.price;if('shares_avail'in r)co.shares_avail=r.shares_avail;co.price_history=r.price_history;}
+  if(r.owner_id&&r.owner_cash!=null){const owner=getUser(r.owner_id);if(owner)owner.cash=r.owner_cash;}
+  if(r.trade)DB.trades.push(r.trade);
+  checkPriceAlerts();
+  checkCircuitBreakers();
+  pushBalances();
+  snapshotJXI();
 }
 async function fundBuy(fundId,ticker,qty){
   const f=getFund(fundId);const co=getCo(ticker);if(!f||!co)return;
@@ -3099,15 +2971,11 @@ async function fundBuy(fundId,ticker,qty){
   if(!canAccessTicker(ticker,f.manager_id))return toast('This share class is restricted — the fund manager is not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
-  const np=impactPrice(co,qty,'buy'),cost=Math.round(np*qty*100)/100;
-  if(!checkPriceBand(ticker,np))return;
-  if(f.cash<cost)return toast('Fund has insufficient cash (need '+fmt(cost)+')');
-  const fH={...(f.holdings||{})};fH[ticker]=(fH[ticker]||0)+qty;
-  await updateCo(ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-qty),price_history:[...co.price_history,{p:np,t:isoNow()}]});
-  await creditCompanyCash(ticker,cost);
-  await recordTrade(ticker,qty,np,'fund:'+f.id,'exchange');
-  await updateFund(fundId,{cash:Math.round((f.cash-cost)*100)/100,holdings:fH});
-  toast('Fund bought '+qty+' × '+ticker+' @ '+fmt(np));render();
+  let r;
+  try{r=await sb.rpc('rpc_fund_buy',{p_fund_id:fundId,p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  applyFundTradeResult(fundId,ticker,r);
+  toast('Fund bought '+qty+' × '+ticker+' @ '+fmt(r.price));render();
 }
 async function fundSell(fundId,ticker,qty){
   const f=getFund(fundId);const co=getCo(ticker);if(!f||!co)return;
@@ -3116,12 +2984,51 @@ async function fundSell(fundId,ticker,qty){
   if(f.status!=='active')return toast('This fund is closed');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const held=(f.holdings||{})[ticker]||0;if(held<qty)return toast('Fund only holds '+held+' shares');
-  const np=impactPrice(co,qty,'sell'),proceeds=Math.round(np*qty*100)/100;
-  const fH={...(f.holdings||{})};fH[ticker]=held-qty;if(fH[ticker]<=0)delete fH[ticker];
-  await updateCo(ticker,{price:np,shares_avail:co.shares_avail+qty,price_history:[...co.price_history,{p:np,t:isoNow()}]});
-  await recordTrade(ticker,qty,np,'exchange','fund:'+f.id);
-  await updateFund(fundId,{cash:Math.round((f.cash+proceeds)*100)/100,holdings:fH});
-  toast('Fund sold '+qty+' × '+ticker+' @ '+fmt(np));render();
+  let r;
+  try{r=await sb.rpc('rpc_fund_sell',{p_fund_id:fundId,p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  applyFundTradeResult(fundId,ticker,r);
+  toast('Fund sold '+qty+' × '+ticker+' @ '+fmt(r.price));render();
+}
+const fundShorts=f=>f.shorts||{};
+function applyFundShortResult(fundId,ticker,r){
+  const f=getFund(fundId),co=getCo(ticker);
+  if(f){f.cash=r.cash;f.shorts=r.shorts;}
+  if(co){co.price=r.price;co.price_history=r.price_history;}
+  if(r.trade)DB.trades.push(r.trade);
+  checkPriceAlerts();
+  checkCircuitBreakers();
+  pushBalances();
+  snapshotJXI();
+}
+async function fundShort(fundId,ticker,qty){
+  const f=getFund(fundId);const co=getCo(ticker);if(!f||!co)return;
+  if(!requireOpen(ticker))return;
+  const u=cu();if(!u||u.id!==f.manager_id)return toast('Only this fund\'s manager can trade on its behalf');
+  if(f.status!=='active')return toast('This fund is closed');
+  if(co.owner_id===f.manager_id)return toast('A fund cannot trade its own manager\'s company stock — conflict of interest');
+  if(!canAccessTicker(ticker,f.manager_id))return toast('This share class is restricted — the fund manager is not on the whitelist.');
+  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  const coll=Math.round(co.price*qty*1.5*100)/100;
+  if(f.cash<coll)return toast('Fund needs '+fmt(coll)+' collateral');
+  let r;
+  try{r=await sb.rpc('rpc_fund_short',{p_fund_id:fundId,p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  applyFundShortResult(fundId,ticker,r);
+  toast('Fund shorted '+qty+' × '+ticker+' @ '+fmt(r.trade.price));render();
+}
+async function fundCoverShort(fundId,ticker,qty){
+  const f=getFund(fundId);const co=getCo(ticker);if(!f||!co)return;
+  if(!requireOpen(ticker))return;
+  const u=cu();if(!u||u.id!==f.manager_id)return toast('Only this fund\'s manager can trade on its behalf');
+  if(f.status!=='active')return toast('This fund is closed');
+  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  const short=fundShorts(f)[ticker];if(!short||short.qty<qty)return toast('Fund only has '+(short?.qty||0)+' shorted');
+  let r;
+  try{r=await sb.rpc('rpc_fund_cover_short',{p_fund_id:fundId,p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  applyFundShortResult(fundId,ticker,r);
+  toast('Fund covered '+qty+' × '+ticker+' | P&L: '+(r.pnl>=0?'+':'')+fmt(r.pnl));render();
 }
 async function postFinancials(ticker,period,revenue,profit,summary){
   const co=getCo(ticker);if(!co)return;
@@ -3151,38 +3058,46 @@ async function updateFundingGoal(ticker,goal,useOfFunds){
   await updateCo(ticker,{funding_goal:g,use_of_funds:uof});
   toast('Funding goal updated');render();
 }
+// Buybacks are executed server-side (rpc_buyback) -- besides closing the
+// same client-trusted-write gap as every other rpc_* here, the RPC also
+// adds the ownership/founder check this function never actually had: any
+// authenticated caller could previously invoke doBuyback() for ANY ticker
+// and spend their own cash to shrink a company they have no relationship
+// to's share count.
 async function doBuyback(ticker,qty){
   if(!requireOpen(ticker))return;const owner=cu(),co=getCo(ticker);if(!owner||!co)return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter valid quantity');
   const sold=co.shares-co.shares_avail;if(qty>sold)return toast('Only '+sold+' shares in circulation');
-  const price=impactPrice(co,qty,'buy'),cost=Math.round(price*qty*100)/100;
-  if(owner.cash<cost)return toast('Insufficient funds');
-  await updateUser(owner.id,{cash:Math.round((owner.cash-cost)*100)/100});
-  // Bought-back shares are retired, not returned to the exchange's unsold pool — shares_avail
-  // is deliberately left untouched. (Previously this added qty back to shares_avail, which
-  // could push it above the new, smaller `shares` total for a large enough buyback.)
-  await updateCo(ticker,{price,shares:co.shares-qty,price_history:[...co.price_history,{p:price,t:'Buyback'}]});
-  const bb={id:uid(),ticker,company_name:co.name,qty,price,total:cost,ts:ts()};
-  await sb.post('jex_buybacks',bb);DB.buybacks.push(bb);
-  toast('Bought back '+qty+' shares @ '+fmt(price));render();
+  let r;
+  try{r=await sb.rpc('rpc_buyback',{p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  owner.cash=r.cash;
+  co.price=r.price;co.shares=r.shares;co.price_history=r.price_history;
+  if(r.buyback)DB.buybacks.push(r.buyback);
+  toast('Bought back '+qty+' shares @ '+fmt(r.price));render();
 }
-async function issueDividend(ticker,perShare,note,payerOverride,preApproved){
-  const co=getCo(ticker),owner=payerOverride||cu();if(!co||!owner)return;
+// Dividend payout itself runs server-side (rpc_pay_dividend) -- the RPC
+// re-derives the shareholder list and total, and now enforces the
+// Treasurer-approval-above-threshold rule itself too (previously that was
+// only a client-side confirm() gate; a company owner could call
+// issueDividend(...,preApproved=true) directly and skip Treasurer review
+// for any payout size). Everything below the RPC call is just fast local
+// preview/confirm UX, not the security boundary.
+async function issueDividend(ticker,perShare,note){
+  const co=getCo(ticker),owner=cu();if(!co||!owner)return;
   perShare=Math.round(parseFloat(perShare)*100)/100;
   if(isNaN(perShare)||perShare<=0)return toast('Enter a valid per-share amount');
   if(!note||note.trim().length<5)return toast('Please add a note');
   // Fetch all students fresh from Supabase so founder-allocated holdings are current
   const freshStudents=await sb.get('jex_users','role=eq.student&status=eq.approved&select='+JEX_USERS_SAFE_SELECT);
-  // Update local DB with fresh data
   freshStudents.forEach(fs=>{const local=getUser(fs.id);if(local)Object.assign(local,fs);else DB.users.push(fs);});
   const allT=getCompanyTickers(ticker);
   const sh=freshStudents.filter(s=>allT.some(t=>(s.holdings&&s.holdings[t]||0)>0));
   if(!sh.length)return toast('No shareholders yet');
   const total=sh.reduce((s,u)=>s+allT.reduce((ts2,t)=>ts2+Math.round(((u.holdings&&u.holdings[t])||0)*perShare*100)/100,0),0);
   if(owner.cash<total)return toast('Insufficient funds (need '+fmt(total)+')');
-  // Check if Treasurer approval required (already-approved payouts skip this and go straight to payout)
   const divApprovalThreshold=DB.session.dividend_approval_threshold||1000;
-  if(!preApproved&&total>=divApprovalThreshold){
+  if(total>=divApprovalThreshold){
     const treasurer=DB.users.find(u=>u.role==='treasurer');
     if(treasurer){
       if(!confirm('This dividend total ('+fmt(total)+') requires Treasurer approval. Submit for approval?'))return;
@@ -3195,21 +3110,29 @@ async function issueDividend(ticker,perShare,note,payerOverride,preApproved){
     }
   }
   const sharesAcrossClasses=s=>allT.reduce((sum,t)=>sum+((s.holdings&&s.holdings[t])||0),0);
-  if(!preApproved&&!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(sharesAcrossClasses(s)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
-  await updateUser(owner.id,{cash:Math.round((owner.cash-total)*100)/100});
-  const payouts=[];
-  for(const s of sh){
-    const shares=sharesAcrossClasses(s);
-    const payout=Math.round(shares*perShare*100)/100;
-    await updateUser(s.id,{cash:Math.round((s.cash+payout)*100)/100});
-    payouts.push({userId:s.id,name:s.name,shares,payout});
-  }
-  const div={id:uid(),ticker,company_name:co.name,per_share:perShare,total,note:note.trim(),payouts,ts:ts()};
-  await sb.post('jex_dividends',div);DB.dividends.push(div);
-  await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(total),{ticker,userId:owner.id,userName:owner.name,amount:total});
+  if(!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(sharesAcrossClasses(s)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
+  let r;
+  try{r=await sb.rpc('rpc_pay_dividend',{p_ticker:ticker,p_per_share:perShare,p_note:note.trim()});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  if(r.owner_id){const o=getUser(r.owner_id);if(o)o.cash=r.owner_cash;}
+  await refreshDividendPayoutBalances(r.payouts);
+  if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker,company_name:co.name,per_share:perShare,total:r.total,note:note.trim(),payouts:r.payouts,ts:ts()});
+  await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(r.total),{ticker,userId:owner.id,userName:owner.name,amount:r.total});
   await pushNotificationToHolders(ticker,'dividend','💰 '+co.name+' paid a dividend of '+fmt(perShare)+'/share');
   pushBalances();
   toast(co.name+' paid '+fmt(perShare)+'/share');UI.companyTab='dividends';render();
+}
+// Each holder's cash was already updated server-side (rpc_pay_dividend); this
+// just re-syncs the client's local cache from the authoritative DB rather
+// than re-deriving cash += payout locally (which could drift if the local
+// copy was ever stale).
+async function refreshDividendPayoutBalances(payouts){
+  if(!payouts||!payouts.length)return;
+  try{
+    const ids=payouts.map(p=>p.userId).join(',');
+    const fresh=await sb.get('jex_users','id=in.('+ids+')&select='+JEX_USERS_SAFE_SELECT);
+    fresh.forEach(fu=>{const local=getUser(fu.id);if(local)local.cash=fu.cash;});
+  }catch(e){}
 }
 function submitIPOForm(){
   submitIPO(get('ipo-name')?.value,get('ipo-ticker')?.value,get('ipo-price')?.value,get('ipo-shares')?.value,get('ipo-desc')?.value);
@@ -3266,15 +3189,24 @@ async function submitDilution(ticker,newShares,reason){
   await sb.post('jex_dilution_applications',app);DB.dilApps.push(app);
   toast('Dilution application submitted');UI.companyTab='dilution';render();
 }
+// Dilution approval runs server-side (rpc_review_dilution): does its own
+// atomic claim (SELECT ... FOR UPDATE, re-checks status='pending') and now
+// requires the caller to actually be Chairman/President -- previously
+// reviewDilution had no server-side authorization check at all, only the
+// admin UI deciding who saw the approve/reject buttons.
 async function reviewDilution(id,approve){
   const app=DB.dilApps.find(d=>d.id===id);if(!app)return;
-  // Atomically claim before adjusting share count — a double-click or two admins
-  // reviewing the same request at once could otherwise both apply the dilution.
-  const claimed=await sb.patch('jex_dilution_applications','id=eq.'+id+'&status=eq.pending',{status:approve?'approved':'rejected'});
-  if(!claimed.length)return toast('This application was already reviewed');
+  let r;
+  try{r=await sb.rpc('rpc_review_dilution',{p_app_id:id,p_approve:!!approve});}
+  catch(e){return toast(rpcErrorMessage(e));}
   app.status=approve?'approved':'rejected';
-  if(approve){const co=getCo(app.ticker);if(!co)return;const old=co.shares,ns=co.shares+app.new_shares,np=Math.max(0.01,Math.round(co.price*(old/ns)*100)/100);await updateCo(app.ticker,{shares:ns,shares_avail:co.shares_avail+app.new_shares,price:np,price_history:[...co.price_history,{p:np,t:'Dilution'}]});toast(app.company_name+': +'+app.new_shares+' shares');}
-  else toast('Dilution rejected');
+  if(r.approved){
+    const co=getCo(app.ticker);
+    if(co){co.shares=r.shares;co.shares_avail=r.shares_avail;co.price=r.price;co.price_history=r.price_history;}
+    toast(app.company_name+': +'+app.new_shares+' shares');
+  } else {
+    toast('Dilution rejected');
+  }
   render();
 }
 
@@ -3358,9 +3290,14 @@ async function relistCompany(ticker){
   if(!isAdmin(cu()))return toast('Admin access required');
   const co=DB.companies.find(c=>c.ticker===ticker);if(!co)return;
   if(!confirm('Allow '+co.name+' to reapply for IPO? This resets their application status.'))return;
-  await sb.patch('jex_companies','ticker=eq.'+ticker,{status:'unlisted',shares_avail:co.shares,price_history:[{p:co.price,t:'Re-IPO'}]});
-  co.status='unlisted';co.shares_avail=co.shares;
-  await updateUser(co.owner_id,{app_status:'none'});
+  // Resetting shares_avail runs server-side (rpc_admin_relist_company) --
+  // same admin-role check as the client-side isAdmin() gate above, now
+  // actually enforced.
+  let r;
+  try{r=await sb.rpc('rpc_admin_relist_company',{p_ticker:ticker});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  co.status='unlisted';co.shares_avail=r.shares_avail;co.price_history=r.price_history;
+  const owner=getUser(r.owner_id);if(owner)owner.app_status='none';
   await pushNotification(co.owner_id,'ipo','🔄 Your company '+co.name+' has been reset — you can now submit a new IPO application.',ticker);
   toast(co.name+' reset — owner can now submit a new IPO application');
   render();
@@ -4859,6 +4796,19 @@ function renderFundDetail(fundId){
   }
   html+='</div>';
 
+  const shortEntries=Object.entries(fundShorts(f)).filter(([,s])=>s.qty>0);
+  if(shortEntries.length){
+    const shortPnl=fundShortPnl(f);
+    html+=`<div class="card"><div class="section-title">Short positions</div>
+      <table><thead><tr><th>Ticker</th><th class="r">Qty</th><th class="r">Avg price</th><th class="r">Current</th><th class="r">P&L</th><th class="r">Collateral</th></tr></thead><tbody>`
+      +shortEntries.map(([t,pos])=>{const c=getCo(t);const p=c?Math.round((pos.avgPrice-c.price)*pos.qty*100)/100:0;
+        return `<tr><td style="font-family:var(--mono)">${esc(t)}</td><td class="r">${pos.qty}</td><td class="r" style="font-family:var(--mono)">${fmt(pos.avgPrice)}</td><td class="r" style="font-family:var(--mono)">${c?fmt(c.price):'—'}</td><td class="r ${p>=0?'green':'red'}" style="font-family:var(--mono)">${p>=0?'+':''}${fmt(p)}</td><td class="r" style="font-family:var(--mono)">${fmt(pos.collateral)}</td></tr>`;
+      }).join('')
+      +`</tbody></table>
+      <div style="font-size:12px;color:var(--text2);margin-top:6px">Unrealised short P&L: <strong class="${shortPnl>=0?'green':'red'}">${shortPnl>=0?'+':''}${fmt(shortPnl)}</strong></div>
+    </div>`;
+  }
+
   if(u.role==='student'||u.role==='company'){
     html+='<div class="card"><div class="section-title">Your position</div>';
     if(myPos&&myPos.units>0){
@@ -4886,8 +4836,19 @@ function renderFundDetail(fundId){
       <div class="ibox ibox-amber" style="margin-bottom:12px">Fund cash available: <strong>${fmt(f.cash)}</strong>. You cannot trade your own company's stock through this fund.</div>
       <div class="frow"><label class="flabel">Ticker</label><select id="fund-trade-ticker">${tradable.map(c=>`<option value="${c.ticker}">${c.ticker} — ${esc(c.name)} (${fmt(c.price)})</option>`).join('')}</select></div>
       <div class="frow"><label class="flabel">Quantity</label><input type="number" id="fund-trade-qty" min="1" step="1" placeholder="e.g. 10"></div>
-      <div class="btn-row"><button class="btn btn-success btn-sm" onclick="fundBuy('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Buy</button><button class="btn btn-danger btn-sm" onclick="fundSell('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Sell</button></div>
+      <div class="btn-row"><button class="btn btn-success btn-sm" onclick="fundBuy('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Buy</button><button class="btn btn-danger btn-sm" onclick="fundSell('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Sell</button><button class="btn btn-warning btn-sm" onclick="fundShort('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Short</button><button class="btn btn-sm" onclick="fundCoverShort('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Cover</button></div>
+      <hr class="divider" style="margin:10px 0">
+      <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit order</div>
+      <div class="frow"><label class="flabel">Limit price ($)</label><input type="number" id="fund-lmt-price" step="0.01" min="0.01" placeholder="e.g. 10.00"></div>
+      <div class="btn-row"><button class="btn btn-primary btn-sm" onclick="placeLimitOrder(get('fund-trade-ticker')?.value,'buy',get('fund-trade-qty')?.value,get('fund-lmt-price')?.value,'${f.id}')">Limit buy</button><button class="btn btn-primary btn-sm" onclick="placeLimitOrder(get('fund-trade-ticker')?.value,'sell',get('fund-trade-qty')?.value,get('fund-lmt-price')?.value,'${f.id}')">Limit sell</button></div>
     </div>`;
+    const fundOpenOrders=DB.limitOrders.filter(o=>o.fund_id===f.id&&o.status==='open');
+    if(fundOpenOrders.length){
+      html+=`<div class="card"><div class="section-title">Fund's open limit orders</div>
+        <table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th class="r">Limit price</th><th></th></tr></thead><tbody>`
+        +fundOpenOrders.map(o=>`<tr><td style="font-family:var(--mono)">${esc(o.ticker)}</td><td><span class="badge ${o.side==='buy'?'b-teal':'b-red'}">${o.side}</span></td><td>${o.qty}</td><td class="r" style="font-family:var(--mono)">${fmt(o.limit_price)}</td><td><button class="btn btn-sm btn-danger" onclick="cancelLimitOrder('${o.id}')">Cancel</button></td></tr>`).join('')
+        +'</tbody></table></div>';
+    }
   }
 
   return html;
