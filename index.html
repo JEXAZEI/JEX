@@ -87,6 +87,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 .ot-btn{font-size:13px;padding:6px 18px;cursor:pointer;border:none;background:transparent;color:var(--text2);font-family:var(--font)}
 .ot-buy{background:var(--teal);color:#fff}.ot-sell{background:var(--red);color:#fff}.ot-short{background:var(--purple);color:#fff}.ot-cover{background:#BA7517;color:#fff}
 .price-up{color:var(--green)}.price-down{color:var(--red)}
+.flash-up{animation:flashUp 900ms ease-out}.flash-down{animation:flashDown 900ms ease-out}
+@keyframes flashUp{0%{background-color:rgba(0,200,150,0.35)}100%{background-color:transparent}}
+@keyframes flashDown{0%{background-color:rgba(255,77,106,0.35)}100%{background-color:transparent}}
   @keyframes progress{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
 .empty{text-align:center;padding:32px;color:var(--text2);font-size:13px}
 .divider{border:none;border-top:1px solid var(--border);margin:14px 0}
@@ -4504,11 +4507,19 @@ function getMarketListed(u){
   return DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)
     &&(!searchQ||(c.name.toLowerCase().includes(searchQ)||c.ticker.toLowerCase().includes(searchQ))));
 }
+let _marketLastPrices={};
 function renderMarketRows(u,listed){
   return listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
     const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
-    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${esc(c.name)}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${esc(c.description||"")}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')+(!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:'');
+    // Ticker-style flash on the price cell when a price actually moves since
+    // the last render (realtime pushes from other clients' trades, or the
+    // 3s order-matching poll) — not on every re-render (search typing,
+    // watchlist toggles, etc. don't touch c.price so no flash fires).
+    const prevPrice=_marketLastPrices[c.ticker];
+    const flashClass=prevPrice!=null&&prevPrice!==c.price?(c.price>prevPrice?' flash-up':' flash-down'):'';
+    _marketLastPrices[c.ticker]=c.price;
+    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${esc(c.name)}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${esc(c.description||"")}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="${flashClass}" style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')+(!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:'');
 }
 function renderMarket(){
   const u=cu();
