@@ -761,128 +761,6 @@ const uid=()=>'id_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
 const ts=()=>new Date().toLocaleTimeString();
 const isoNow=()=>new Date().toISOString();
 
-// ── OHLCV (Open/High/Low/Close/Volume) computation ───────
-function computeOHLCV(priceHistory,trades,ticker,periodMs=5*60*1000){
-  if(!priceHistory||priceHistory.length<2)return[];
-  // Accept both ISO timestamps and plain price points
-  const pts=priceHistory.filter(p=>p.t&&(p.t.includes('T')||p.t.includes('-')));
-  if(pts.length<2){
-    // Fallback: treat all points as evenly spaced
-    const prices=priceHistory.map(p=>p.p);
-    if(prices.length<2)return[];
-    const synth=[{t:new Date(Date.now()-prices.length*periodMs).toISOString(),o:prices[0],h:Math.max(...prices),l:Math.min(...prices),c:prices[prices.length-1],v:0}];
-    return synth;
-  }
-  const tickerTrades=(trades||[]).filter(t=>t.ticker===ticker&&t.ts&&t.ts.includes('T')||t.ts&&t.ts.length>10);
-  const start=new Date(pts[0].t).getTime();
-  const end=new Date(pts[pts.length-1].t).getTime();
-  const candles=[];
-  let lastClose=pts[0].p;
-  for(let t=start;t<end;t+=periodMs){
-    const ptsInPeriod=pts.filter(p=>{const pt=new Date(p.t).getTime();return pt>=t&&pt<t+periodMs;});
-    const vol=tickerTrades.filter(tr=>{const tt=new Date(tr.ts).getTime();return tt>=t&&tt<t+periodMs;}).reduce((s,tr)=>s+tr.qty,0);
-    if(!ptsInPeriod.length){
-      // No price activity this period — carry the last close forward as a flat candle
-      // so the chart stays continuous instead of leaving a gap.
-      candles.push({t:new Date(t).toISOString(),o:lastClose,h:lastClose,l:lastClose,c:lastClose,v:0});
-      continue;
-    }
-    const prices=ptsInPeriod.map(p=>p.p);
-    lastClose=ptsInPeriod[ptsInPeriod.length-1].p;
-    candles.push({
-      t:new Date(t).toISOString(),
-      o:ptsInPeriod[0].p,
-      h:Math.max(...prices),
-      l:Math.min(...prices),
-      c:lastClose,
-      v:vol
-    });
-  }
-  return candles;
-}
-
-// ── Build candlestick chart using floating bars (no plugin needed) ──
-function buildCandleChart(canvasId,co){
-  destroyChart(canvasId);
-  const canvas=document.getElementById(canvasId);if(!canvas||!window.Chart)return;
-  // Use the current interval setting
-  const interval=chartIntervals[canvasId]||'max';
-  const periodMs={'1d':5*60000,'5d':30*60000,'1m':4*3600000,'max':3600000}[interval]||3600000;
-  const candles=computeOHLCV(co.price_history,DB.trades,co.ticker,periodMs);
-  if(!candles||candles.length<2){buildChart(canvasId,co);return;} // fallback to line
-
-  // Floating bar approach: each bar is [low, high] with open/close as separate overlay
-  const labels=candles.map(c=>{
-    try{return new Date(c.t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}
-    catch(e){return c.t||'';}
-  });
-  // Flat (no-activity) candles have o=h=l=c, which renders as a zero-height, invisible bar.
-  // Nudge just the drawn extent by a tiny epsilon so they still show as a thin flat tick —
-  // the underlying candle data (and tooltip) is untouched.
-  const allPrices=candles.flatMap(c=>[c.h,c.l]);
-  const priceRange=Math.max(...allPrices)-Math.min(...allPrices);
-  const eps=Math.max(priceRange*0.004,(candles[0].c||1)*0.001,0.01);
-  const wickData=candles.map(c=>c.h===c.l?[c.l-eps/2,c.h+eps/2]:[c.l,c.h]);
-  const bodyData=candles.map(c=>c.o===c.c?[c.o-eps/2,c.c+eps/2]:[Math.min(c.o,c.c),Math.max(c.o,c.c)]);
-  const bodyColors=candles.map(c=>c.c>=c.o?'rgba(0,200,150,0.85)':'rgba(255,77,106,0.85)');
-  const wickColors=candles.map(c=>c.c>=c.o?'rgba(0,200,150,0.4)':'rgba(255,77,106,0.4)');
-
-  try{
-    charts[canvasId]=new Chart(canvas,{
-      type:'bar',
-      data:{
-        labels,
-        datasets:[
-          {
-            label:'Wick',
-            data:wickData,
-            backgroundColor:wickColors,
-            barPercentage:0.3,
-            categoryPercentage:0.8,
-            order:2
-          },
-          {
-            label:'Body',
-            data:bodyData,
-            backgroundColor:bodyColors,
-            barPercentage:0.7,
-            categoryPercentage:0.8,
-            order:1
-          }
-        ]
-      },
-      options:{
-        responsive:true,
-        maintainAspectRatio:false,
-        animation:{duration:200},
-        plugins:{
-          legend:{display:false},
-          tooltip:{
-            callbacks:{
-              label:ctx=>{
-                const c=candles[ctx.dataIndex];
-                if(!c)return '';
-                return ['O: '+fmt(c.o),'H: '+fmt(c.h),'L: '+fmt(c.l),'C: '+fmt(c.c),'Vol: '+c.v];
-              },
-              title:ctx=>ctx[0]?.label||''
-            }
-          }
-        },
-        scales:{
-          x:{
-            grid:{color:'rgba(136,150,168,0.07)'},
-            ticks:{color:'#4a5568',font:{size:10},maxTicksLimit:8,autoSkip:true}
-          },
-          y:{
-            grid:{color:'rgba(136,150,168,0.07)'},
-            ticks:{color:'#4a5568',font:{size:10},callback:v=>fmt(v)},
-            beginAtZero:false
-          }
-        }
-      }
-    });
-  }catch(e){console.warn('buildCandleChart error:',e);buildChart(canvasId,co);}
-} // full timestamp for price history
 const priceChg=c=>{if(!c.price_history||c.price_history.length<2)return 0;const f=c.price_history[0].p,l=c.price_history[c.price_history.length-1].p;return f?((l-f)/f*100):0;};
 function computeJXI(){
   const listed=DB.companies.filter(c=>c.status==='listed'&&!getClassMeta(c.ticker));
@@ -3493,27 +3371,6 @@ async function relistCompany(ticker){
 // ═══════════════════════════════════════════════
 // Chart interval state
 const chartIntervals={};
-function buildChartTypeToggle(chartId,type,ticker){
-  return '<button style="font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;border:1px solid '+(type==='line'?'var(--blue)':'var(--border2)')+';background:'+(type==='line'?'var(--blue)':'transparent')+';color:'+(type==='line'?'white':'var(--text2)')+'" onclick="setChartType(&quot;'+chartId+'&quot;,&quot;line&quot;,&quot;'+ticker+'&quot;)">Line</button>'
-    +'<button style="font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;border:1px solid '+(type==='candle'?'var(--blue)':'var(--border2)')+';background:'+(type==='candle'?'var(--blue)':'transparent')+';color:'+(type==='candle'?'white':'var(--text2)')+'" onclick="setChartType(&quot;'+chartId+'&quot;,&quot;candle&quot;,&quot;'+ticker+'&quot;)">Candle</button>';
-}
-function setChartType(chartId,type,ticker){
-  UI['chartType_'+chartId]=type;
-  const co=getCo(ticker);
-  if(!co)return;
-  destroyChart(chartId);
-  const interval=chartIntervals[chartId]||'max';
-  chartIntervals[chartId]=interval;
-  // Update interval bar and the Line/Candle toggle to reflect active state
-  const barEl=document.getElementById('ibar-'+chartId);
-  if(barEl)barEl.innerHTML=buildIntervalButtons(chartId,co);
-  const toggleEl=document.getElementById('ctoggle-'+chartId);
-  if(toggleEl)toggleEl.innerHTML=buildChartTypeToggle(chartId,type,ticker);
-  setTimeout(()=>{
-    if(type==='candle')buildCandleChart(chartId,co);
-    else buildChart(chartId,co);
-  },20);
-}
 function setChartInterval(canvasId,interval,co){
   if(interval)chartIntervals[canvasId]=interval;
   // Destroy just this chart
@@ -3522,11 +3379,8 @@ function setChartInterval(canvasId,interval,co){
   const barId='ibar-'+canvasId;
   const bar=document.getElementById(barId);
   if(bar)bar.innerHTML=buildIntervalButtons(canvasId,co);
-  // Build line or candle chart depending on type
-  const chartType=UI['chartType_'+canvasId]||'line';
   setTimeout(()=>{
-    if(chartType==='candle')buildCandleChart(canvasId,co);
-    else buildChart(canvasId,co);
+    buildChart(canvasId,co);
   },20);
 }
 function buildIntervalButtons(canvasId,co){
@@ -4455,10 +4309,8 @@ function renderCompanyPage(parentTicker){
       const stock=getCo(ticker);if(!stock)return;
       const meta=getClassMeta(ticker);
       const chartId='cp-chart-'+ticker;
-      const chartType=UI['chartType_'+chartId]||'line';
-      html+='<div><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
-        +'<div style="font-size:12px;font-weight:500;font-family:var(--mono);color:var(--text2)">'+ticker+(meta?' Class '+meta.class:'')+'</div>'
-        +'<div id="ctoggle-'+chartId+'" style="display:flex;gap:2px">'+buildChartTypeToggle(chartId,chartType,ticker)+'</div></div>'
+      html+='<div><div style="margin-bottom:4px">'
+        +'<div style="font-size:12px;font-weight:500;font-family:var(--mono);color:var(--text2)">'+ticker+(meta?' Class '+meta.class:'')+'</div></div>'
         +buildChartIntervalBar(chartId,stock)
         +'<div style="position:relative;height:140px"><canvas id="'+chartId+'"></canvas></div></div>';
     });
