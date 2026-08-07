@@ -748,15 +748,6 @@ function exportTableCSV(table){
 function copyTicker(ticker){
   navigator.clipboard?.writeText(ticker).then(()=>toast('Copied: '+ticker)).catch(()=>toast(ticker+' (copy manually)'));
 }
-async function creditCompanyCash(ticker,amount){
-  const meta=getClassMeta(ticker);
-  const parentTicker=meta?meta.parent_ticker:ticker;
-  const co=getCo(parentTicker)||getCo(ticker);
-  if(!co)return;
-  const owner=getUser(co.owner_id);if(!owner)return;
-  const newCash=Math.round((owner.cash+amount)*100)/100;
-  await updateUser(owner.id,{cash:newCash});
-}
 const uid=()=>'id_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
 const ts=()=>new Date().toLocaleTimeString();
 const isoNow=()=>new Date().toISOString();
@@ -1004,22 +995,12 @@ async function doRestoreSnapshot(activityId){
   const rec=DB.activity.find(a=>a.id===activityId);if(!rec)return toast('Snapshot not found');
   let snap;
   try{snap=JSON.parse(rec.description);}catch{return toast('Snapshot data is corrupted');}
-  const data=snap.data;
   toast('Restoring snapshot...');
-  // Restore users (cash and holdings)
-  for(const u of(data.users||[])){
-    const local=getUser(u.id);
-    if(local){
-      await updateUser(u.id,{cash:u.cash,holdings:u.holdings||{},shorts:u.shorts||{}});
-    }
-  }
-  // Restore company prices and shares_avail
-  for(const c of(data.companies||[])){
-    const local=getCo(c.ticker);
-    if(local){
-      await updateCo(c.ticker,{price:c.price,shares_avail:c.shares_avail,price_history:c.price_history||[]});
-    }
-  }
+  // Restoring cash/holdings/shorts/price/shares_avail runs server-side
+  // (rpc_admin_restore_snapshot) -- the client can no longer PATCH those
+  // columns directly for every user/company in the snapshot at once.
+  try{await sb.rpc('rpc_admin_restore_snapshot',{p_activity_id:activityId});}
+  catch(e){return toast(rpcErrorMessage(e));}
   // Clear active orders and stop-loss
   await sb.del('jex_limit_orders',"status=in.(open,after_hours)");
   DB.limitOrders=DB.limitOrders.filter(o=>o.status!=='open'&&o.status!=='after_hours');
@@ -1945,37 +1926,23 @@ async function requestFounderAllocation(ticker,studentId,shares,reason){
 }
 async function reviewFounderAllocation(id,approve){
   const a=DB.founderAllocations.find(x=>x.id===id);if(!a)return;
+  // Reviewing (especially approving, which grants free shares) runs
+  // server-side (rpc_review_founder_allocation) -- previously ANY
+  // authenticated client could approve ANY pending allocation, including
+  // their own, since only requesting one was gated to the company's owner
+  // or founders; approving it was never checked at all.
+  let r;
+  try{r=await sb.rpc('rpc_review_founder_allocation',{p_id:id,p_approve:approve});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  a.status=approve?'approved':'rejected';
   if(approve){
-    const co=getCo(a.ticker);
-    // Reload student fresh from DB to get latest holdings
-    let studentArr=await sb.get('jex_users','id=eq.'+a.student_id+'&select='+JEX_USERS_SAFE_SELECT);
-    const student=studentArr&&studentArr[0];
-    if(!co){toast('Company stock not found for ticker '+a.ticker);return;}
-    if(!student){toast('Student not found: '+a.student_name);return;}
-    if(co.shares_avail<a.shares){toast('Insufficient shares — only '+co.shares_avail+' available in '+a.ticker);return;}
-    // Atomically claim before granting shares — a double-click or two admins
-    // reviewing the same allocation at once could otherwise both grant it.
-    const claimed=await sb.patch('jex_founder_allocations','id=eq.'+id+'&status=eq.pending',{status:'approved'});
-    if(!claimed.length){toast('This allocation was already reviewed');return;}
-    a.status='approved';
-    // Build updated holdings
-    const currentHoldings=typeof student.holdings==='object'&&student.holdings?student.holdings:{};
-    const newHoldings={...currentHoldings};
-    newHoldings[a.ticker]=(parseInt(newHoldings[a.ticker])||0)+a.shares;
-    // Write to DB
-    await sb.patch('jex_users','id=eq.'+a.student_id,{holdings:newHoldings});
-    // Update local DB user
     const localStudent=getUser(a.student_id);
-    if(localStudent)localStudent.holdings=newHoldings;
-    // Reduce available shares
-    await updateCo(a.ticker,{shares_avail:co.shares_avail-a.shares});
+    if(localStudent)localStudent.holdings=r.holdings;
+    const co=getCo(a.ticker);if(co)co.shares_avail=r.shares_avail;
     await pushNotification(a.student_id,'founder_alloc','🎁 '+a.shares+' founder shares of '+a.company_name+' ('+a.ticker+') have been added to your portfolio!',a.ticker);
     await logActivity('founder_alloc',a.student_name+' granted '+a.shares+' founder shares of '+a.company_name,{ticker:a.ticker,amount:a.shares});
     toast('✓ '+a.student_name+' granted '+a.shares+'×'+a.ticker+' — portfolio updated');
   } else {
-    const claimed=await sb.patch('jex_founder_allocations','id=eq.'+id+'&status=eq.pending',{status:'rejected'});
-    if(!claimed.length)return toast('This allocation was already reviewed');
-    a.status='rejected';
     await pushNotification(a.student_id,'founder_alloc','❌ Your founder share request for '+a.shares+'×'+a.ticker+' in '+a.company_name+' was rejected.');
     toast('Allocation rejected');
   }
@@ -2590,11 +2557,15 @@ async function resetExchange(){
     // Step 5b: Wipe classrooms (after users/pending are gone, since both can
     // reference a classroom_id)
     await sb.del('jex_classrooms','id=neq.x');
-    // Step 6: Reset officer cash to 0 (admins keep their accounts but not cash)
-    const adminRoles=['chairman','president','secretary','treasurer','compliance_officer'];
-    for(const role of adminRoles){
-      await sb.patch('jex_users','role=eq.'+role,{cash:0,holdings:{},shorts:{},watchlist:[]});
-    }
+    // Step 6: Reset officer cash to 0 (admins keep their accounts but not cash).
+    // Runs server-side (rpc_admin_reset_officer_cash), same admin-role check
+    // as everywhere else -- resetExchange's isAdmin() gate above is
+    // client-side only, same as this whole function's many direct DELETEs
+    // (a separate, much larger finding: table-level DELETE grants on nearly
+    // every jex_* table are just as wide open as the UPDATE grants this
+    // migration closes, and this function relies on that for every step but
+    // this one -- flagged, not fixed, here).
+    await sb.rpc('rpc_admin_reset_officer_cash',{});
     // Step 7: Reset session to clean defaults
     await sb.patch('jex_session','id=eq.1',{
       status:'closed',label:'Session closed',
@@ -2826,28 +2797,6 @@ setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();await
 // ═══════════════════════════════════════════════
 async function updateUser(uid2,data){const u=getUser(uid2);if(!u)return;Object.assign(u,data);await sb.patch('jex_users','id=eq.'+uid2,data);}
 async function updateCo(ticker,data){const co=getCo(ticker);if(!co)return;Object.assign(co,data);await sb.patch('jex_companies','ticker=eq.'+ticker,data);}
-async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
-  const rec={ticker,qty,price,buyer_id:buyerId,seller_id:sellerId,type:DB.session.practice_mode?'practice_'+type:type,ts:ts()};
-  const result=await sb.post('jex_trades',rec);
-  if(result&&result[0])DB.trades.push(result[0]);
-  // Snapshot NW for buyers/sellers and check alerts/breakers
-  if(buyerId&&buyerId!=='exchange'&&buyerId!=='short')snapshotNW(buyerId);
-  if(sellerId&&sellerId!=='exchange'&&sellerId!=='cover')snapshotNW(sellerId);
-  checkPriceAlerts();
-  checkCircuitBreakers();
-  pushBalances();
-  snapshotJXI();
-  // Refresh buyer and seller in DB.users so shareholder lists stay current
-  [buyerId,sellerId].forEach(async uid2=>{
-    if(!uid2||['exchange','short','cover'].includes(uid2))return;
-    try{const fresh=await sb.get('jex_users','id=eq.'+uid2+'&select='+JEX_USERS_SAFE_SELECT);
-    if(fresh&&fresh[0]){const local=getUser(uid2);if(local)Object.assign(local,fresh[0]);}}catch(e){}
-  });
-  pushToSheets('trades',{trades:[{ticker,qty,price,type,ts:ts(),
-    buyer:['exchange','short'].includes(buyerId)?'JEX':getUser(buyerId)?.name||buyerId,
-    seller:['exchange','cover'].includes(sellerId)?'JEX':getUser(sellerId)?.name||sellerId}]});
-}
-
 // Market buy/sell/short/cover are executed server-side (rpc_trade_* —
 // see trade_engine_migration.sql) so cash/holdings/shares/price can't be
 // fabricated by a raw REST call — the client can no longer PATCH those
@@ -3341,9 +3290,14 @@ async function relistCompany(ticker){
   if(!isAdmin(cu()))return toast('Admin access required');
   const co=DB.companies.find(c=>c.ticker===ticker);if(!co)return;
   if(!confirm('Allow '+co.name+' to reapply for IPO? This resets their application status.'))return;
-  await sb.patch('jex_companies','ticker=eq.'+ticker,{status:'unlisted',shares_avail:co.shares,price_history:[{p:co.price,t:'Re-IPO'}]});
-  co.status='unlisted';co.shares_avail=co.shares;
-  await updateUser(co.owner_id,{app_status:'none'});
+  // Resetting shares_avail runs server-side (rpc_admin_relist_company) --
+  // same admin-role check as the client-side isAdmin() gate above, now
+  // actually enforced.
+  let r;
+  try{r=await sb.rpc('rpc_admin_relist_company',{p_ticker:ticker});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  co.status='unlisted';co.shares_avail=r.shares_avail;co.price_history=r.price_history;
+  const owner=getUser(r.owner_id);if(owner)owner.app_status='none';
   await pushNotification(co.owner_id,'ipo','🔄 Your company '+co.name+' has been reset — you can now submit a new IPO application.',ticker);
   toast(co.name+' reset — owner can now submit a new IPO application');
   render();
