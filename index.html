@@ -5961,13 +5961,17 @@ async function adjustCompanyCash(uid2){
   const op=document.getElementById('co-cash-op-'+uid2)?.value;
   const amt=parseFloat(document.getElementById('co-cash-amt-'+uid2)?.value);
   if(isNaN(amt)||amt<0)return toast('Enter a valid amount');
+  if(!op)return toast('Select an operation');
+  const prev=u.cash;
   let newCash;
-  if(op==='add')newCash=Math.round((u.cash+amt)*100)/100;
-  else if(op==='subtract')newCash=Math.max(0,Math.round((u.cash-amt)*100)/100);
-  else if(op==='set')newCash=Math.round(amt*100)/100;
-  else return toast('Select an operation');
-  await updateUser(uid2,{cash:newCash});
-  await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-u.cash});
+  // Authorization is re-checked server-side too (admin_adjust_cash resolves the
+  // caller's own role from their real Supabase Auth identity), not just trusted
+  // from the isAdmin() check above — same defense-in-depth pattern used
+  // elsewhere today.
+  try{newCash=await sb.rpc('admin_adjust_cash',{p_target_id:uid2,p_op:op,p_amount:amt});}
+  catch(e){return toast('Failed to adjust balance: '+(e.message||e));}
+  u.cash=newCash;
+  await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
   toast(u.name+"'s balance updated to "+fmt(newCash));render();
 }
 async function adjustCash(uid2){
@@ -5976,13 +5980,12 @@ async function adjustCash(uid2){
   const op=get('cash-op-'+uid2)?.value;
   const amt=parseFloat(get('cash-amt-'+uid2)?.value);
   if(isNaN(amt)||amt<0)return toast('Enter a valid amount');
-  let newCash;
-  if(op==='add')newCash=Math.round((u.cash+amt)*100)/100;
-  else if(op==='subtract')newCash=Math.max(0,Math.round((u.cash-amt)*100)/100);
-  else if(op==='set')newCash=Math.round(amt*100)/100;
-  else return toast('Select an operation');
+  if(!op)return toast('Select an operation');
   const prev=u.cash;
-  await updateUser(uid2,{cash:newCash});
+  let newCash;
+  try{newCash=await sb.rpc('admin_adjust_cash',{p_target_id:uid2,p_op:op,p_amount:amt});}
+  catch(e){return toast('Failed to adjust balance: '+(e.message||e));}
+  u.cash=newCash;
   await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:''+u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
   pushBalances();
   toast(u.name+"'s balance updated to "+fmt(newCash));render();
