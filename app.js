@@ -240,6 +240,12 @@ document.addEventListener('touchstart',resetActivityTimer,{passive:true});
 let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',loginUsername:'',loginError:null,forgotUserId:null,forgotAnswer:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null,lbClassroom:null,
   regVerify:{reg:{status:'idle',email:'',resendAt:0},'reg-co':{status:'idle',email:'',resendAt:0}},fundPage:null,googleAuth:null};
 let charts={},sessionTimer=null;
+// Pages that have been split out into their own real HTML file (see the
+// "split into real separate pages" plan) -- everything else still lives as
+// an in-app UI.navTab switch rendered by getPageContent(). renderNav()
+// links a routed page with a real <a href>; every other tab stays an
+// onclick="setTab(...)" button. Grows one entry at a time as pages convert.
+const PAGE_ROUTES=new Set(['settings']);
 
 async function loadAll(){
   // ── Phase 1: critical data needed to render login ──────
@@ -3706,7 +3712,9 @@ function renderNav(){
   else if(isAdmin(u))tabs=[['admin','Admin'],['market','Market'],['funds','Funds'],['settings','Settings']];
   else if(u.role==='company')tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['funds','Funds'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   else tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['funds','Funds'],['leaderboard','Leaderboard'],['orders','Orders'+(()=>{if(!UI.userId)return'';const u=DB.users.find(x=>x.id===UI.userId);if(!u)return'';const open=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='open').length;const ah=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='after_hours').length;const sl=(DB.stopLossOrders||[]).filter(s=>s.user_id===u.id&&s.status==='active').length;const tot=open+ah+sl;return tot?' <span class="badge b-amber" style="font-size:10px">'+tot+'</span>':''})()],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
-  return `<div class="nav">${tabs.map(([k,v])=>`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
+  return `<div class="nav">${tabs.map(([k,v])=>PAGE_ROUTES.has(k)
+    ?`<a class="nav-btn ${UI.navTab===k?'active':''}" href="${k}.html">${v}</a>`
+    :`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -6643,6 +6651,11 @@ async function boot(){
       if(u){
         UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'apply':'market';
         if(isAdmin(u))UI.adminTab='dashboard';
+        // Real routed pages (settings.html, etc. -- see PAGE_ROUTES) set
+        // window.__JEX_PAGE__ in an inline script before app.js loads, so
+        // boot() knows which page it's actually on instead of always
+        // defaulting to the role's usual landing tab.
+        if(typeof window!=='undefined'&&window.__JEX_PAGE__&&PAGE_ROUTES.has(window.__JEX_PAGE__))UI.navTab=window.__JEX_PAGE__;
         // loadAll() already rendered twice (Phase 1, then Phase 2 once its data
         // arrived), but both of those renders ran before UI.navTab was set here
         // -- for anyone whose real tab isn't the 'market' default (every admin
