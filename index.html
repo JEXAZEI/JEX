@@ -1693,8 +1693,10 @@ async function loginByForm(){
   if(!u){UI.loginError='Invalid username or password';return render();}
   // Secretary/Treasurer/Compliance Officer sign in with a username only — their
   // email exists purely as the backing Supabase Auth credential, not something
-  // they're meant to use or see day-to-day, unlike Chairman/President.
-  if(['secretary','treasurer','compliance_officer'].includes(u.role)&&u.email&&idInput===norm(u.email)){
+  // they're meant to use or see day-to-day, unlike Chairman/President. Only
+  // enforced when the account actually HAS a username — refusing email with no
+  // usable alternative would permanently lock the account out instead.
+  if(['secretary','treasurer','compliance_officer'].includes(u.role)&&u.username&&u.email&&idInput===norm(u.email)){
     UI.loginError='This account can only sign in with a username, not an email';return render();
   }
   if((u.auth_uid||u.auth_provider==='google')&&supaAuth){
