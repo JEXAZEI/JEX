@@ -245,7 +245,7 @@ let charts={},sessionTimer=null;
 // an in-app UI.navTab switch rendered by getPageContent(). renderNav()
 // links a routed page with a real <a href>; every other tab stays an
 // onclick="setTab(...)" button. Grows one entry at a time as pages convert.
-const PAGE_ROUTES=new Set(['settings']);
+const PAGE_ROUTES=new Set(['settings','admin','exchange','leaderboard','trades','apply','mystock','news','notifications']);
 
 async function loadAll(){
   // ── Phase 1: critical data needed to render login ──────
@@ -5210,6 +5210,14 @@ function submitDilutionFor(ticker){
 // ═══════════════════════════════════════════════
 function renderAdmin(){
   const u=cu();
+  // renderNav() only ever showed the "Admin" nav button to admin roles, so
+  // this had no check of its own -- any other caller fell through the tab
+  // ternary below into the secretary/treasurer tab set by default, showing
+  // real student balances and org-wide activity to whoever reached this
+  // function. That was already reachable from devtools (UI.navTab='admin'
+  // is just a global var), but admin.html turns it into a page anyone can
+  // type into the address bar, so it needs its own real check now.
+  if(!isAdmin(u))return'<div class="card"><div class="empty">Admin access required.</div></div>';
   const chair=isChairman(u);
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
   const companies=DB.users.filter(u=>u.role==='company'&&u.status==='approved');

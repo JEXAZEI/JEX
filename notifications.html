@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230f1117'/><text x='16' y='23' font-family='monospace' font-size='20' font-weight='700' fill='%23f0a500' text-anchor='middle'>J</text></svg>">
+<title>Notifications — JEX</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app"><div class="loading-screen"><div class="spinner"></div><div style="color:var(--text2);font-size:13px">Connecting to JEX...</div></div></div>
+<div id="legal-modal-root"></div>
+<div id="bug-modal-root"></div>
+<div id="contact-modal-root"></div>
+<div class="toast" id="toast"></div>
+<script>window.__JEX_PAGE__='notifications';</script>
+<script src="app.js"></script>
+</body>
+</html>
