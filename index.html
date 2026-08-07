@@ -3365,6 +3365,7 @@ async function removeUser(uid2){
     if(cu().role!=='chairman')return toast('Only the Chairman can remove Chairman/President accounts');
     if(uid2===cu().id)return toast('You cannot remove your own account');
   }
+  if(['secretary','treasurer','compliance_officer'].includes(u.role))return toast('Officer accounts cannot be removed');
   if(!confirm('Remove '+u.name+'? This cannot be undone.'))return;
   await sb.del('jex_users','id=eq.'+uid2);
   DB.users=DB.users.filter(x=>x.id!==uid2);
@@ -5918,7 +5919,7 @@ function renderAdminPasswords(students,companies){
   const resetableUsers=[...students,...companies,...officers];
   return`<div class="card"><div class="section-title">Manual password reset</div>
     <p style="font-size:13px;color:var(--text2);margin-bottom:14px">Use only if a user has forgotten both their password and security answer. Chairman and President cannot reset each other's passwords.</p>
-    <div class="frow"><label class="flabel">Select user</label><select id="admin-reset-uid" onchange="renderAdminResetForm()"><option value="">— Select a user —</option>${resetableUsers.map(x=>`<option value="${x.id}">${esc(x.name)} (${esc(x.email)}) — ${esc(x.role)}</option>`).join('')}</select></div>
+    <div class="frow"><label class="flabel">Select user</label><select id="admin-reset-uid" onchange="renderAdminResetForm()"><option value="">— Select a user —</option>${resetableUsers.map(x=>`<option value="${x.id}">${esc(x.name)}${['secretary','treasurer','compliance_officer'].includes(x.role)?'':' ('+esc(x.email)+')'} — ${esc(x.role)}</option>`).join('')}</select></div>
     <div id="admin-reset-form"></div>
   </div>`;
 }
@@ -6008,9 +6009,7 @@ function renderAdminUsers(students,companies,officers,leadership){
     ${officers.map(u=>`<div class="app-row">
       <div class="app-info">
         <div class="app-name">${esc(u.name)} ${roleBadge(u.role)}</div>
-        <div class="app-meta">${esc(u.email)}</div>
       </div>
-      <button class="btn btn-sm btn-danger" onclick="removeUser('${u.id}')">Remove</button>
     </div>`).join('')}
   </div>`:''}
   <div class="card"><div class="section-title">Students — balance adjustment</div>
