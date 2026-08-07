@@ -106,10 +106,11 @@ input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 
 .wk-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:8px;border-radius:var(--radius);margin-bottom:4px}
 .wk-today{background:var(--bg3)}
 .wk-daylabel{display:flex;align-items:center;gap:8px;font-size:13px;width:132px;flex-shrink:0;cursor:pointer;white-space:nowrap}
-.wk-daylabel .badge{flex-shrink:0}
+.wk-daylabel input[type="checkbox"]{width:14px;flex-shrink:0}
 .wk-times{display:flex;align-items:center;gap:8px}
 .wk-times input[type="time"]{width:118px}
 .wk-to{color:var(--text2);font-size:12px}
+.wk-todaybadge{margin-left:auto;flex-shrink:0}
 .legal-overlay{position:fixed;inset:0;background:rgba(6,10,18,0.72);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px}
 .legal-box{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius);width:100%;max-width:720px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.5)}
 .legal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border);flex-shrink:0}
@@ -5761,12 +5762,13 @@ function renderWeeklySchedule(){
     ${WEEKDAY_KEYS.map(day=>{
       const d=ws[day]||{enabled:false,open:{h:16,m:0},close:{h:18,m:30}};
       return `<div class="wk-row ${day===today?'wk-today':''}">
-        <label class="wk-daylabel"><input type="checkbox" id="wk-${day}-on" ${d.enabled?'checked':''}> <span>${WEEKDAY_LABELS[day]}</span>${day===today?' <span class="badge b-purple">today</span>':''}</label>
+        <label class="wk-daylabel"><input type="checkbox" id="wk-${day}-on" ${d.enabled?'checked':''}> <span>${WEEKDAY_LABELS[day]}</span></label>
         <div class="wk-times">
           <input type="time" id="wk-${day}-open" value="${pad(d.open.h)}:${pad(d.open.m)}" title="Open time">
           <span class="wk-to">to</span>
           <input type="time" id="wk-${day}-close" value="${pad(d.close.h)}:${pad(d.close.m)}" title="Close time">
         </div>
+        ${day===today?'<span class="badge b-purple wk-todaybadge">today</span>':''}
       </div>`;
     }).join('')}
     <button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="saveWeeklySchedule()">Save weekly schedule</button>
