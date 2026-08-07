@@ -1714,6 +1714,31 @@ async function loginByForm(){
   let ok=false;
   try{ok=await sb.rpc('verify_legacy_password',{p_user_id:u.id,p_password:pw});}catch(e){ok=false;}
   if(!ok){UI.loginError='Invalid username or password';return render();}
+  // Quietly migrate this account to a real Supabase Auth identity on a successful
+  // legacy-password login — same "one less account stuck on the old system" idea
+  // as the Google backfill above, just triggered by password login instead of
+  // Google. This is what makes trading (which now requires a server-verifiable
+  // auth.uid(), see rpc_trade_*) keep working for existing accounts without
+  // anyone having to do anything extra. Best-effort and silent either way —
+  // login must still succeed on the already-verified legacy path even if this
+  // fails (e.g. the account's legacy password is shorter than Supabase Auth's
+  // minimum length, so signUp itself gets rejected — an account like that stays
+  // on the legacy path and just can't trade until an admin migrates it by hand).
+  if(supaAuth&&!u.auth_uid&&u.email){
+    try{
+      let authUid=null;
+      const{data,error}=await supaAuth.auth.signUp({email:u.email,password:pw});
+      if(!error&&data&&data.user)authUid=data.user.id;
+      else{
+        // An Auth account may already exist from a prior migration attempt that
+        // didn't finish backfilling auth_uid (e.g. the PATCH below raced or
+        // failed) — try signing into it before giving up.
+        const signInRes=await supaAuth.auth.signInWithPassword({email:u.email,password:pw});
+        if(!signInRes.error&&signInRes.data&&signInRes.data.session)authUid=signInRes.data.session.user.id;
+      }
+      if(authUid)await updateUser(u.id,{auth_uid:authUid});
+    }catch(e){console.warn('legacy account auth migration failed:',e);}
+  }
   return finishLogin(u);
 }
 function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.fundPage=null;UI.tradePage=0;UI.googleAuth=null;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}if(supaAuth)supaAuth.auth.signOut().catch(()=>{});render();}
@@ -3031,6 +3056,32 @@ async function recordTrade(ticker,qty,price,buyerId,sellerId,type='market'){
     seller:['exchange','cover'].includes(sellerId)?'JEX':getUser(sellerId)?.name||sellerId}]});
 }
 
+// Market buy/sell/short/cover are executed server-side (rpc_trade_* —
+// see trade_engine_migration.sql) so cash/holdings/shares/price can't be
+// fabricated by a raw REST call — the client can no longer PATCH those
+// columns directly for these four actions. The checks still done here
+// (requireOpen, canAccessTicker, funds/qty sanity, etc.) are just fast
+// local feedback; the RPC re-derives and re-checks everything itself and
+// is the only thing that actually writes the trade.
+function rpcErrorMessage(e){
+  try{const parsed=JSON.parse(e.message);if(parsed&&parsed.message)return parsed.message;}catch(err){}
+  return (e&&e.message)||String(e);
+}
+function applyTradeResult(ticker,r){
+  const u=cu(),co=getCo(ticker);
+  if(u){u.cash=r.cash;if('holdings'in r)u.holdings=r.holdings;if('shorts'in r)u.shorts=r.shorts;}
+  if(co){co.price=r.price;if('shares_avail'in r)co.shares_avail=r.shares_avail;co.price_history=r.price_history;}
+  if(r.owner_id&&r.owner_cash!=null){const owner=getUser(r.owner_id);if(owner)owner.cash=r.owner_cash;}
+  if(r.trade)DB.trades.push(r.trade);
+  if(u)snapshotNW(u.id);
+  checkPriceAlerts();
+  checkCircuitBreakers();
+  pushBalances();
+  snapshotJXI();
+  if(r.trade)pushToSheets('trades',{trades:[{ticker,qty:r.trade.qty,price:r.trade.price,type:r.trade.type,ts:r.trade.ts,
+    buyer:['exchange','short'].includes(r.trade.buyer_id)?'JEX':getUser(r.trade.buyer_id)?.name||r.trade.buyer_id,
+    seller:['exchange','cover'].includes(r.trade.seller_id)?'JEX':getUser(r.trade.seller_id)?.name||r.trade.seller_id}]});
+}
 async function placeBuy(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   if(!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
@@ -3038,64 +3089,50 @@ async function placeBuy(ticker,qty){
   if(u.role==='company'&&co.owner_id===u.id)return toast("You can't buy your own company's stock — use Buyback instead.");
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
-  const np=impactPrice(co,qty,'buy'),cost=Math.round(np*qty*100)/100;
-  if(!checkPriceBand(ticker,np))return;
-  if(u.cash<cost)return toast('Insufficient funds (need '+fmt(cost)+')');
-  const bH={...holdings(u)};bH[ticker]=(bH[ticker]||0)+qty;
-  await updateUser(u.id,{cash:Math.round((u.cash-cost)*100)/100,holdings:bH});
-  const newH=[...co.price_history,{p:np,t:isoNow()}];
-  await updateCo(ticker,{price:np,shares_avail:Math.max(0,co.shares_avail-qty),price_history:newH});
-  await creditCompanyCash(ticker,cost); // IPO/dilution proceeds go to company
-  await recordTrade(ticker,qty,np,u.id,'exchange');
-  const slippage=Math.round((np-co.price)*100)/100;
+  let r;
+  try{r=await sb.rpc('rpc_trade_buy',{p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  const oldPrice=r.old_price;
+  applyTradeResult(ticker,r);
+  const slippage=Math.round((r.price-oldPrice)*100)/100;
   const slipMsg=Math.abs(slippage)>0.01?' (slippage: '+(slippage>0?'+':'')+fmt(slippage)+')':'';
-  toast('Bought '+qty+' × '+ticker+' @ '+fmt(np)+slipMsg);if(UI.companyPage)render();else openPanel(ticker);
+  toast('Bought '+qty+' × '+ticker+' @ '+fmt(r.price)+slipMsg);if(UI.companyPage)render();else openPanel(ticker);
 }
 async function placeSell(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   if(!checkRateLimit(u.id))return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const held=(holdings(u)[ticker])||0;if(held<qty)return toast('You only hold '+held+' shares');
-  const np=impactPrice(co,qty,'sell');
-  const proceeds=Math.round(np*qty*100)/100;
-  // JEX pool absorbs secondary sells — infinite liquidity, no company cash needed
-  const nH={...holdings(u)};nH[ticker]=held-qty;if(nH[ticker]<=0)delete nH[ticker];
-  await updateUser(u.id,{cash:Math.round((u.cash+proceeds)*100)/100,holdings:nH});
-  const newH=[...co.price_history,{p:np,t:isoNow()}];
-  await updateCo(ticker,{price:np,shares_avail:co.shares_avail+qty,price_history:newH});
-  await recordTrade(ticker,qty,np,'exchange',u.id);
-  const slippageSell=Math.round((co.price-np)*100)/100;
+  let r;
+  try{r=await sb.rpc('rpc_trade_sell',{p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  const oldPrice=r.old_price;
+  applyTradeResult(ticker,r);
+  const slippageSell=Math.round((oldPrice-r.price)*100)/100;
   const slipMsgSell=Math.abs(slippageSell)>0.01?' (slippage: '+(slippageSell>0?'+':'')+fmt(slippageSell)+')':'';
-  toast('Sold '+qty+' × '+ticker+' @ '+fmt(np)+slipMsgSell);if(UI.companyPage)render();else openPanel(ticker);
+  toast('Sold '+qty+' × '+ticker+' @ '+fmt(r.price)+slipMsgSell);if(UI.companyPage)render();else openPanel(ticker);
 }
 async function placeShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   if(!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
-  const price=co.price,coll=Math.round(price*qty*1.5*100)/100;
+  const coll=Math.round(co.price*qty*1.5*100)/100;
   if(u.cash<coll)return toast('Need '+fmt(coll)+' collateral');
-  const sh={...shorts(u)};if(!sh[ticker])sh[ticker]={qty:0,avgPrice:0,collateral:0};
-  const ex=sh[ticker],tq=ex.qty+qty;
-  sh[ticker]={qty:tq,avgPrice:Math.round(((ex.avgPrice*ex.qty)+(price*qty))/tq*100)/100,collateral:Math.round((ex.collateral+coll)*100)/100};
-  await updateUser(u.id,{cash:Math.round((u.cash-coll)*100)/100,shorts:sh});
-  const np=impactPrice(co,qty,'sell');
-  await updateCo(ticker,{price:np,price_history:[...co.price_history,{p:np,t:isoNow()}]});
-  await recordTrade(ticker,qty,price,'short',u.id,'short');
-  toast('Shorted '+qty+' × '+ticker+' @ '+fmt(price));if(UI.companyPage)render();else openPanel(ticker);
+  let r;
+  try{r=await sb.rpc('rpc_trade_short',{p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  applyTradeResult(ticker,r);
+  toast('Shorted '+qty+' × '+ticker+' @ '+fmt(r.trade.price));if(UI.companyPage)render();else openPanel(ticker);
 }
 async function coverShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
-  const sh={...shorts(u)},short=sh[ticker];if(!short||short.qty<qty)return toast('You only have '+(short?.qty||0)+' shorted');
-  const cp=impactPrice(co,qty,'buy'),pnl=Math.round((short.avgPrice-cp)*qty*100)/100;
-  const cb=Math.round((short.collateral*(qty/short.qty))*100)/100;
-  sh[ticker]={...short,qty:short.qty-qty,collateral:Math.round((short.collateral-cb)*100)/100};
-  if(sh[ticker].qty<=0)delete sh[ticker];
-  await updateUser(u.id,{cash:Math.round((u.cash+cb+pnl)*100)/100,shorts:sh});
-  // Return covered shares to the pool (they were borrowed, now given back)
-  await updateCo(ticker,{price:cp,shares_avail:co.shares_avail+qty,price_history:[...co.price_history,{p:cp,t:isoNow()}]});
-  await recordTrade(ticker,qty,cp,u.id,'cover','cover');
-  toast('Covered '+qty+' × '+ticker+' | P&L: '+(pnl>=0?'+':'')+fmt(pnl));if(UI.companyPage)render();else openPanel(ticker);
+  const short=(shorts(u))[ticker];if(!short||short.qty<qty)return toast('You only have '+(short?.qty||0)+' shorted');
+  let r;
+  try{r=await sb.rpc('rpc_trade_cover_short',{p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  applyTradeResult(ticker,r);
+  toast('Covered '+qty+' × '+ticker+' | P&L: '+(r.pnl>=0?'+':'')+fmt(r.pnl));if(UI.companyPage)render();else openPanel(ticker);
 }
 async function toggleWatch(ticker){const u=cu();if(!u)return;const wl=[...watchlist(u)];const i=wl.indexOf(ticker);if(i>=0){wl.splice(i,1);toast(ticker+' removed from watchlist');}else{wl.push(ticker);toast(ticker+' added to watchlist');}await updateUser(u.id,{watchlist:wl});render();}
 
