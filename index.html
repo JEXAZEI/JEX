@@ -7054,6 +7054,18 @@ async function boot(){
       if(u){
         UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'apply':'market';
         if(isAdmin(u))UI.adminTab='dashboard';
+        // loadAll() already rendered twice (Phase 1, then Phase 2 once its data
+        // arrived), but both of those renders ran before UI.navTab was set here
+        // -- for anyone whose real tab isn't the 'market' default (every admin
+        // role, company accounts), the DOM is left showing loadAll()'s last
+        // render regardless. Beyond just being the wrong page, that stale
+        // render's own delayed chart-drawing setTimeout (buildJxiChart, etc.)
+        // re-checks UI.navTab when it fires and silently no-ops once it no
+        // longer matches -- leaving a permanently blank chart canvas sitting in
+        // DOM nobody redraws. One more render() here with the final, settled
+        // navTab makes the DOM match reality and gives every chart's own timer
+        // a stable navTab to fire against.
+        render();
         subscribeRealtime();
       } else {
         UI.userId=null; // session invalid
