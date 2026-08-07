@@ -1690,6 +1690,12 @@ async function loginByForm(){
   const idInput=norm(normalizeUsername(username));
   const u=pool.find(u=>(u.email&&norm(u.email)===idInput)||(u.username&&norm(u.username)===idInput));
   if(!u){UI.loginError='Invalid username or password';return render();}
+  // Secretary/Treasurer/Compliance Officer sign in with a username only — their
+  // email exists purely as the backing Supabase Auth credential, not something
+  // they're meant to use or see day-to-day, unlike Chairman/President.
+  if(['secretary','treasurer','compliance_officer'].includes(u.role)&&u.email&&idInput===norm(u.email)){
+    UI.loginError='This account can only sign in with a username, not an email';return render();
+  }
   if((u.auth_uid||u.auth_provider==='google')&&supaAuth){
     // Covers migrated accounts and Google-linked accounts alike — Google accounts can
     // now optionally set a password too (see changePwSupa), so this just attempts a
@@ -1733,6 +1739,7 @@ async function changeEmailSupa(uid2,newEmail){
   // own real Auth account, leaving the victim's row pointing at an email their real
   // credential no longer matches.
   if(!cu()||uid2!==cu().id)return toast('You can only change your own email');
+  if(['secretary','treasurer','compliance_officer'].includes(cu().role))return toast('This account cannot change its email');
   if(!newEmail||!newEmail.includes('@'))return toast('Enter a valid email address');
   const norm_email=newEmail.trim().toLowerCase();
   if(DB.users.find(x=>x.id!==uid2&&x.email===norm_email))return toast('That email is already in use');
@@ -4109,7 +4116,7 @@ const ADMIN_ROLE_ORDER={chairman:0,president:1,secretary:2,treasurer:3,complianc
 const ADMIN_ROLE_LABELS={chairman:'Chairman',president:'President',secretary:'Secretary',treasurer:'Treasurer',compliance_officer:'Compliance Officer'};
 function renderContactAdminModalHTML(){
   const u=cu();
-  const officers=DB.users.filter(isAdmin).sort((a,b)=>(ADMIN_ROLE_ORDER[a.role]??9)-(ADMIN_ROLE_ORDER[b.role]??9));
+  const officers=DB.users.filter(isChairman).sort((a,b)=>(ADMIN_ROLE_ORDER[a.role]??9)-(ADMIN_ROLE_ORDER[b.role]??9));
   return `<div class="legal-overlay" onclick="if(event.target===this)closeContactAdminModal()">
     <div class="legal-box" style="max-width:480px;max-height:none">
       <div class="legal-header">
@@ -5075,12 +5082,16 @@ function renderSettings(){
   </div>`:'';
   const isGoogleAccount=u.auth_provider==='google';
   const isMigratedLocal=!!u.auth_uid&&!isGoogleAccount;
+  // Secretary/Treasurer/Compliance Officer sign in with a username only — their
+  // backing email is an implementation detail, not something they see or manage,
+  // unlike Chairman/President.
+  const emailRestrictedRole=['secretary','treasurer','compliance_officer'].includes(u.role);
   const accountCard=`<div class="card"><div class="section-title">Account</div>
     <div class="grid2" style="margin-bottom:12px">
       <div class="mcard"><div class="mlabel">Name</div><div class="mval" style="font-size:16px">${esc(u.name)}</div></div>
-      <div class="mcard"><div class="mlabel">Email (login)</div><div class="mval" style="font-size:14px;margin-top:4px;word-break:break-all">${esc(u.email)}</div></div>
+      ${emailRestrictedRole?'':`<div class="mcard"><div class="mlabel">Email (login)</div><div class="mval" style="font-size:14px;margin-top:4px;word-break:break-all">${esc(u.email)}</div></div>`}
     </div>
-    ${isGoogleAccount?`<div class="ibox ibox-blue">This account uses <strong>Google Sign-In</strong>. Your email is managed by Google and can't be changed here — sign in anytime with the "Sign in with Google" button on the login screen.</div>`
+    ${emailRestrictedRole?'':isGoogleAccount?`<div class="ibox ibox-blue">This account uses <strong>Google Sign-In</strong>. Your email is managed by Google and can't be changed here — sign in anytime with the "Sign in with Google" button on the login screen.</div>`
     :isMigratedLocal?`
     <div class="section-title" style="font-size:13px;margin-bottom:8px">Change email address</div>
     <div class="frow"><label class="flabel">New email address</label><input type="email" id="new-email" placeholder="${u.email}" autocomplete="email"></div>
