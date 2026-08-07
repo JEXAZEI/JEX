@@ -1792,12 +1792,14 @@ async function adminSendResetEmail(uid2){
 }
 async function toggleEmailNotifications(enabled){
   const u=cu();if(!u)return;
+  if(['secretary','treasurer','compliance_officer'].includes(u.role))return toast('Email notifications are not available for this account');
   await updateUser(u.id,{email_notifications:enabled});
   toast(enabled?'Email notifications enabled':'Email notifications disabled');
   render();
 }
 async function saveNotifEmail(){
   const u=cu();if(!u)return;
+  if(['secretary','treasurer','compliance_officer'].includes(u.role))return toast('Email notifications are not available for this account');
   const email=(get('notif-email')?.value||'').trim().toLowerCase();
   if(!email||!email.includes('@'))return toast('Enter a valid email address');
   await updateUser(u.id,{notification_email:email});
@@ -5134,7 +5136,8 @@ function renderSettings(){
           +'<div style="display:flex;align-items:center;gap:8px"><button class="btn btn-sm btn-primary" onclick="saveNotifEmail()">Save</button>'
           +'<span style="font-size:11px;color:var(--text2)">Alerts for: dividends, session open/close, IPO, stop-loss, order fills</span></div>':'')
         +'</div>';
-      return pushRow+emailRow;
+      const emailNotifRestricted=['secretary','treasurer','compliance_officer'].includes(u.role);
+      return pushRow+(emailNotifRestricted?'':emailRow);
     })()}
   </div>
   ${isGoogleAccount?'':`<div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><div class="pw-wrap"><input type="password" id="settings-secq-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('settings-secq-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`}`;
