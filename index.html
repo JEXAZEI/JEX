@@ -3032,9 +3032,10 @@ const fundUnits=u=>u.fund_units||{};
 const MAX_FUND_FEE_PCT=25;
 const getFund=id=>DB.funds.find(f=>f.id===id);
 const canManageFund=f=>{const u=cu();return !!u&&(u.id===f.manager_id||isChairman(u));};
+const fundShortPnl=f=>Object.entries(fundShorts(f)).reduce((s,[t,pos])=>{const c=getCo(t);if(!c)return s;return s+Math.round((pos.avgPrice-c.price)*pos.qty*100)/100;},0);
 function currentFundNav(f){
   const holdingsValue=Object.entries(f.holdings||{}).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0);
-  const totalValue=Math.round((f.cash+holdingsValue)*100)/100;
+  const totalValue=Math.round((f.cash+holdingsValue+fundShortPnl(f))*100)/100;
   return f.units_outstanding>0?Math.round((totalValue/f.units_outstanding)*10000)/10000:10;
 }
 async function updateFund(fundId,data){const f=getFund(fundId);if(!f)return;Object.assign(f,data);await sb.patch('jex_funds','id=eq.'+fundId,data);}
@@ -3044,7 +3045,7 @@ async function createFund(name,feePct){
   if(!name||name.trim().length<3)return toast('Enter a fund name (at least 3 characters)');
   feePct=parseFloat(feePct);
   if(isNaN(feePct)||feePct<0||feePct>MAX_FUND_FEE_PCT)return toast('Performance fee must be between 0 and '+MAX_FUND_FEE_PCT+'%');
-  const rec={id:uid(),manager_id:u.id,manager_name:u.name,name:name.trim(),units_outstanding:0,cash:0,holdings:{},
+  const rec={id:uid(),manager_id:u.id,manager_name:u.name,name:name.trim(),units_outstanding:0,cash:0,holdings:{},shorts:{},
     fee_pct:Math.round(feePct*100)/100,status:'active',created_at:new Date().toISOString(),ts:ts()};
   await sb.post('jex_funds',rec);DB.funds.push(rec);
   await logActivity('fund_create',u.name+' launched a new fund: '+rec.name+' ('+rec.fee_pct+'% performance fee)',{userId:u.id,userName:u.name});
@@ -3136,6 +3137,46 @@ async function fundSell(fundId,ticker,qty){
   catch(e){return toast(rpcErrorMessage(e));}
   applyFundTradeResult(fundId,ticker,r);
   toast('Fund sold '+qty+' × '+ticker+' @ '+fmt(r.price));render();
+}
+const fundShorts=f=>f.shorts||{};
+function applyFundShortResult(fundId,ticker,r){
+  const f=getFund(fundId),co=getCo(ticker);
+  if(f){f.cash=r.cash;f.shorts=r.shorts;}
+  if(co){co.price=r.price;co.price_history=r.price_history;}
+  if(r.trade)DB.trades.push(r.trade);
+  checkPriceAlerts();
+  checkCircuitBreakers();
+  pushBalances();
+  snapshotJXI();
+}
+async function fundShort(fundId,ticker,qty){
+  const f=getFund(fundId);const co=getCo(ticker);if(!f||!co)return;
+  if(!requireOpen(ticker))return;
+  const u=cu();if(!u||u.id!==f.manager_id)return toast('Only this fund\'s manager can trade on its behalf');
+  if(f.status!=='active')return toast('This fund is closed');
+  if(co.owner_id===f.manager_id)return toast('A fund cannot trade its own manager\'s company stock — conflict of interest');
+  if(!canAccessTicker(ticker,f.manager_id))return toast('This share class is restricted — the fund manager is not on the whitelist.');
+  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  const coll=Math.round(co.price*qty*1.5*100)/100;
+  if(f.cash<coll)return toast('Fund needs '+fmt(coll)+' collateral');
+  let r;
+  try{r=await sb.rpc('rpc_fund_short',{p_fund_id:fundId,p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  applyFundShortResult(fundId,ticker,r);
+  toast('Fund shorted '+qty+' × '+ticker+' @ '+fmt(r.trade.price));render();
+}
+async function fundCoverShort(fundId,ticker,qty){
+  const f=getFund(fundId);const co=getCo(ticker);if(!f||!co)return;
+  if(!requireOpen(ticker))return;
+  const u=cu();if(!u||u.id!==f.manager_id)return toast('Only this fund\'s manager can trade on its behalf');
+  if(f.status!=='active')return toast('This fund is closed');
+  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  const short=fundShorts(f)[ticker];if(!short||short.qty<qty)return toast('Fund only has '+(short?.qty||0)+' shorted');
+  let r;
+  try{r=await sb.rpc('rpc_fund_cover_short',{p_fund_id:fundId,p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  applyFundShortResult(fundId,ticker,r);
+  toast('Fund covered '+qty+' × '+ticker+' | P&L: '+(r.pnl>=0?'+':'')+fmt(r.pnl));render();
 }
 async function postFinancials(ticker,period,revenue,profit,summary){
   const co=getCo(ticker);if(!co)return;
@@ -4898,6 +4939,19 @@ function renderFundDetail(fundId){
   }
   html+='</div>';
 
+  const shortEntries=Object.entries(fundShorts(f)).filter(([,s])=>s.qty>0);
+  if(shortEntries.length){
+    const shortPnl=fundShortPnl(f);
+    html+=`<div class="card"><div class="section-title">Short positions</div>
+      <table><thead><tr><th>Ticker</th><th class="r">Qty</th><th class="r">Avg price</th><th class="r">Current</th><th class="r">P&L</th><th class="r">Collateral</th></tr></thead><tbody>`
+      +shortEntries.map(([t,pos])=>{const c=getCo(t);const p=c?Math.round((pos.avgPrice-c.price)*pos.qty*100)/100:0;
+        return `<tr><td style="font-family:var(--mono)">${esc(t)}</td><td class="r">${pos.qty}</td><td class="r" style="font-family:var(--mono)">${fmt(pos.avgPrice)}</td><td class="r" style="font-family:var(--mono)">${c?fmt(c.price):'—'}</td><td class="r ${p>=0?'green':'red'}" style="font-family:var(--mono)">${p>=0?'+':''}${fmt(p)}</td><td class="r" style="font-family:var(--mono)">${fmt(pos.collateral)}</td></tr>`;
+      }).join('')
+      +`</tbody></table>
+      <div style="font-size:12px;color:var(--text2);margin-top:6px">Unrealised short P&L: <strong class="${shortPnl>=0?'green':'red'}">${shortPnl>=0?'+':''}${fmt(shortPnl)}</strong></div>
+    </div>`;
+  }
+
   if(u.role==='student'||u.role==='company'){
     html+='<div class="card"><div class="section-title">Your position</div>';
     if(myPos&&myPos.units>0){
@@ -4925,7 +4979,7 @@ function renderFundDetail(fundId){
       <div class="ibox ibox-amber" style="margin-bottom:12px">Fund cash available: <strong>${fmt(f.cash)}</strong>. You cannot trade your own company's stock through this fund.</div>
       <div class="frow"><label class="flabel">Ticker</label><select id="fund-trade-ticker">${tradable.map(c=>`<option value="${c.ticker}">${c.ticker} — ${esc(c.name)} (${fmt(c.price)})</option>`).join('')}</select></div>
       <div class="frow"><label class="flabel">Quantity</label><input type="number" id="fund-trade-qty" min="1" step="1" placeholder="e.g. 10"></div>
-      <div class="btn-row"><button class="btn btn-success btn-sm" onclick="fundBuy('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Buy</button><button class="btn btn-danger btn-sm" onclick="fundSell('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Sell</button></div>
+      <div class="btn-row"><button class="btn btn-success btn-sm" onclick="fundBuy('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Buy</button><button class="btn btn-danger btn-sm" onclick="fundSell('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Sell</button><button class="btn btn-warning btn-sm" onclick="fundShort('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Short</button><button class="btn btn-sm" onclick="fundCoverShort('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Cover</button></div>
     </div>`;
   }
 
