@@ -4826,10 +4826,18 @@ function closeCompanyPage(){
   UI.companyPage=null;destroyCharts();render();
 }
 function openPanel(ticker){
-  UI.panelTicker=ticker;const c=getCo(ticker),u=cu();
+  // Trade actions call this after an async round-trip (placeBuy/placeSell/
+  // placeShort/coverShort) -- by the time it resolves, the user may have
+  // navigated off the Market tab (or logged out) entirely, so #market-content
+  // and cu() are not guaranteed to still be there. Bail quietly rather than
+  // throwing on a null DOM node or a null user.
+  const marketContent=document.getElementById('market-content');
+  const c=getCo(ticker),u=cu();
+  if(!marketContent||!c||!u)return;
+  UI.panelTicker=ticker;
   const held=(holdings(u)[ticker])||0,chg=priceChg(c),short=(shorts(u))[ticker];
   destroyCharts();
-  document.getElementById('market-content').innerHTML=renderMarket();
+  marketContent.innerHTML=renderMarket();
   const panel=get('trade-panel');if(!panel)return;
   const mode=UI.panelMode,fin=c.financials&&c.financials[0];
   panel.innerHTML=`<div class="card" style="border-color:var(--blue)">
@@ -5041,7 +5049,7 @@ function renderPortfolio(){
     const rows=held.length?held.map(([t,q])=>{
       const c=getCo(t);if(!c)return'';
       const val=c.price*q,chg=priceChg(c);
-      return '<tr><td><span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></td><td>'+c.name+'</td><td>'+q+'</td><td style="font-family:var(--mono)">'+fmt(c.price)+'</td><td style="font-weight:500;font-family:var(--mono)">'+fmt(val)+'</td><td class="'+(chg>=0?'price-up':'price-down')+'">'+fmtChg(chg)+'</td><td><button class="btn btn-sm" onclick="setTab(&quot;market&quot;);setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Trade</button></td></tr>';
+      return '<tr><td><span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></td><td>'+c.name+'</td><td>'+q+'</td><td style="font-family:var(--mono)">'+fmt(c.price)+'</td><td style="font-weight:500;font-family:var(--mono)">'+fmt(val)+'</td><td class="'+(chg>=0?'price-up':'price-down')+'">'+fmtChg(chg)+'</td><td><button class="btn btn-sm" onclick="UI.companyPage=null;setTab(&quot;market&quot;);setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Trade</button></td></tr>';
     }).join(''):'<tr><td colspan="7"><div class="empty">No holdings</div></td></tr>';
     const _sharpe=calcSharpe(u.id),_beta=calcBeta(u.id),_var=calcVaR(u.id),_pnl=calcPnLAttribution(u.id);
     const analyticsRow=(_sharpe!=null||_beta!=null||_var!=null)?
@@ -5071,7 +5079,7 @@ function renderPortfolio(){
   if(UI.portfolioTab==='shorts'){
     const shortRows=sh.length?sh.map(([t,pos])=>{
       const c=getCo(t);if(!c)return'';const p=(pos.avgPrice-c.price)*pos.qty;
-      return '<div class="short-pos"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-weight:500">'+c.name+' <span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></span><button class="btn btn-sm btn-warning" onclick="setTab(&quot;market&quot;);UI.panelMode=&quot;cover&quot;;setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Cover</button></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:12px"><div><div style="color:var(--text2)">Qty</div><div>'+pos.qty+'</div></div><div><div style="color:var(--text2)">Avg price</div><div style="font-family:var(--mono)">'+fmt(pos.avgPrice)+'</div></div><div><div style="color:var(--text2)">Current</div><div style="font-family:var(--mono)">'+fmt(c.price)+'</div></div><div><div style="color:var(--text2)">P&L</div><div style="font-family:var(--mono);color:'+(p>=0?'var(--green)':'var(--red)')+'">'+fmt(p)+'</div></div></div></div>';
+      return '<div class="short-pos"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-weight:500">'+c.name+' <span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></span><button class="btn btn-sm btn-warning" onclick="UI.companyPage=null;setTab(&quot;market&quot;);UI.panelMode=&quot;cover&quot;;setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Cover</button></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:12px"><div><div style="color:var(--text2)">Qty</div><div>'+pos.qty+'</div></div><div><div style="color:var(--text2)">Avg price</div><div style="font-family:var(--mono)">'+fmt(pos.avgPrice)+'</div></div><div><div style="color:var(--text2)">Current</div><div style="font-family:var(--mono)">'+fmt(c.price)+'</div></div><div><div style="color:var(--text2)">P&L</div><div style="font-family:var(--mono);color:'+(p>=0?'var(--green)':'var(--red)')+'">'+fmt(p)+'</div></div></div></div>';
     }).join(''):'<div class="empty">No open short positions</div>';
     const collTotal=Object.values(shorts(u)).reduce((s,p)=>s+p.collateral,0);
     return tabs+`<div class="grid3"><div class="mcard"><div class="mlabel">Open shorts</div><div class="mval">${sh.length}</div></div><div class="mcard"><div class="mlabel">Unrealised P&L</div><div class="mval ${_spnl>=0?'green':'red'}" style="font-family:var(--mono)">${fmt(_spnl)}</div></div><div class="mcard"><div class="mlabel">Collateral locked</div><div class="mval" style="font-family:var(--mono)">${fmt(collTotal)}</div></div></div>${shortRows}`;
@@ -5079,7 +5087,7 @@ function renderPortfolio(){
 
   if(UI.portfolioTab==='watchlist'){
     if(!watched.length)return tabs+'<div class="empty">No stocks on your watchlist.<br>Click ☆ on any stock to add it.</div>';
-    const wrows=watched.map(c=>{const chg=priceChg(c);return '<tr><td><span class="badge b-gray" style="font-family:var(--mono)">'+c.ticker+'</span></td><td>'+c.name+'</td><td style="font-family:var(--mono)">'+fmt(c.price)+'</td><td class="'+(chg>=0?'price-up':'price-down')+'">'+fmtChg(chg)+'</td><td>'+c.shares_avail.toLocaleString()+'</td><td><button class="wstar on" onclick="toggleWatch(&quot;'+c.ticker+'&quot;)">★</button></td><td><button class="btn btn-sm btn-primary" onclick="setTab(&quot;market&quot;);setTimeout(()=>openPanel(&quot;'+c.ticker+'&quot;),50)">Trade</button></td></tr>';}).join('');
+    const wrows=watched.map(c=>{const chg=priceChg(c);return '<tr><td><span class="badge b-gray" style="font-family:var(--mono)">'+c.ticker+'</span></td><td>'+c.name+'</td><td style="font-family:var(--mono)">'+fmt(c.price)+'</td><td class="'+(chg>=0?'price-up':'price-down')+'">'+fmtChg(chg)+'</td><td>'+c.shares_avail.toLocaleString()+'</td><td><button class="wstar on" onclick="toggleWatch(&quot;'+c.ticker+'&quot;)">★</button></td><td><button class="btn btn-sm btn-primary" onclick="UI.companyPage=null;setTab(&quot;market&quot;);setTimeout(()=>openPanel(&quot;'+c.ticker+'&quot;),50)">Trade</button></td></tr>';}).join('');
     return tabs+'<div class="card"><div class="section-title">Watched stocks</div><table><thead><tr><th>Ticker</th><th>Company</th><th>Price</th><th>Change</th><th>Avail.</th><th></th><th></th></tr></thead><tbody>'+wrows+'</tbody></table></div>';
   }
 
