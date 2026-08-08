@@ -2067,8 +2067,14 @@ async function addPriceAlert(ticker,targetPrice,direction){
   targetPrice=parseFloat(targetPrice);
   if(isNaN(targetPrice)||targetPrice<=0)return toast('Enter a valid price');
   if(!direction)return toast('Select above or below');
-  const rec={id:uid(),user_id:u.id,ticker,target_price:targetPrice,direction,triggered:false,ts:ts()};
-  await sb.post('jex_price_alerts',rec);
+  // Runs server-side (rpc_add_price_alert), which derives the caller from
+  // their own session instead of trusting this client-supplied user_id --
+  // a raw POST here used to let anyone plant a spoofed price-alert
+  // notification in ANY other real account (confirmed live: the foreign
+  // key on user_id only checks the id is real, not that it's yours).
+  let rec;
+  try{rec=await sb.rpc('rpc_add_price_alert',{p_ticker:ticker,p_target_price:targetPrice,p_direction:direction});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.priceAlerts.push(rec);
   toast('Alert set: '+ticker+' '+direction+' '+fmt(targetPrice));render();
 }
