@@ -1478,8 +1478,13 @@ async function postNews(ticker,headline,body){
   if(!headline||headline.trim().length<3)return toast('Enter a headline');
   const co=getCo(ticker);if(!co)return;
   if(!canManageCompany(co))return toast('Only this company\'s owner or founders can post news for it');
-  const rec={id:uid(),ticker,company_name:co.name,headline:headline.trim(),body:(body||'').trim(),author_id:UI.userId,ts:ts()};
-  await sb.post('jex_news',rec);
+  // Runs server-side (rpc_post_news), re-checking the same owner-or-
+  // founder rule above -- it was client-side only, so a raw POST could
+  // fabricate market-moving "news" for any company, indistinguishable
+  // from a real company-posted headline.
+  let rec;
+  try{rec=await sb.rpc('rpc_post_news',{p_ticker:ticker,p_headline:headline.trim(),p_body:(body||'').trim()});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.news.unshift(rec);
   if(document.getElementById('news-notify')?.checked)await pushNotificationToHolders(ticker,'news','📰 '+co.name+': '+headline.trim());
   toast('News posted');UI.companyTab='news';render();
