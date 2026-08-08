@@ -245,7 +245,7 @@ let charts={},sessionTimer=null;
 // an in-app UI.navTab switch rendered by getPageContent(). renderNav()
 // links a routed page with a real <a href>; every other tab stays an
 // onclick="setTab(...)" button. Grows one entry at a time as pages convert.
-const PAGE_ROUTES=new Set(['settings','admin','exchange','leaderboard','trades','apply','mystock','news','notifications','funds','orders','portfolio','market']);
+const PAGE_ROUTES=new Set(['settings','admin','exchange','leaderboard','trades','mystock','news','notifications','funds','orders','portfolio','market']);
 // market has no market.html -- index.html IS the market page (old root
 // bookmarks/links keep working), so its route target is the root file.
 const pageHref=k=>k==='market'?'index.html':k+'.html';
@@ -867,7 +867,7 @@ function userIsFillingForm(){
   const active=document.activeElement;
   if(active&&['INPUT','TEXTAREA','SELECT'].includes(active.tagName))return true;
   // Also skip if on a form-heavy tab
-  const formTabs=['apply','register','settings'];
+  const formTabs=['mystock','register','settings'];
   if(formTabs.includes(UI.navTab))return true;
   if(UI.loginView==='register')return true;
   // Check for any filled-in inputs (user has started typing something)
@@ -1003,13 +1003,20 @@ async function checkGoogleSession(){
   const authUid=session.user.id||null;
   const existing=DB.users.find(u=>norm(u.email)===email&&(u.role==='student'||u.role==='company')&&u.status==='approved');
   if(existing){
+    // Real page navigation (every nav click, now that pages are routed)
+    // reruns boot() -> checkGoogleSession() on an already-established
+    // session -- if localStorage already restored this exact user, there's
+    // nothing new to announce. Let boot()'s own session-validation path
+    // (right after this call) handle it silently instead of re-toasting
+    // "Signed in with Google" and re-resetting navTab on every click.
+    if(UI.userId===existing.id)return;
     // Quietly backfill auth_uid for a legacy account the first time it signs in with
     // Google — costs nothing, and means one less account stuck on the old system.
     if(authUid&&!existing.auth_uid){
       try{await updateUser(existing.id,{auth_uid:authUid});}catch(e){console.warn('auth_uid backfill failed:',e);}
     }
     UI.userId=existing.id;
-    UI.navTab=isAdmin(existing)?'admin':existing.role==='company'?'apply':'market';
+    UI.navTab=isAdmin(existing)?'admin':existing.role==='company'?'mystock':'market';
     try{localStorage.setItem(SESSION_KEY,existing.id);}catch(e){}
     subscribeRealtime();
     toast('Signed in with Google as '+existing.name);
@@ -1185,7 +1192,7 @@ async function rejectReg(id){
 }
 function switchLoginTab(role){UI.loginTab=role;UI.loginError=null;render();}
 function finishLogin(u){
-  UI.userId=u.id;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.loginError=null;UI.loginUsername='';
+  UI.userId=u.id;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'mystock':'market';UI.loginView='select';UI.loginError=null;UI.loginUsername='';
   try{localStorage.setItem(SESSION_KEY,u.id);}catch(e){}
   subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();return loadAll();
 }
@@ -3711,7 +3718,7 @@ function renderNav(){
   let tabs;
   if(isChairman(u))tabs=[['admin','Admin'],['market','Market'],['funds','Funds'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
   else if(isAdmin(u))tabs=[['admin','Admin'],['market','Market'],['funds','Funds'],['settings','Settings']];
-  else if(u.role==='company')tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['funds','Funds'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
+  else if(u.role==='company')tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['funds','Funds'],['news','News'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   else tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['funds','Funds'],['leaderboard','Leaderboard'],['orders','Orders'+(()=>{if(!UI.userId)return'';const u=DB.users.find(x=>x.id===UI.userId);if(!u)return'';const open=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='open').length;const ah=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='after_hours').length;const sl=(DB.stopLossOrders||[]).filter(s=>s.user_id===u.id&&s.status==='active').length;const tot=open+ah+sl;return tot?' <span class="badge b-amber" style="font-size:10px">'+tot+'</span>':''})()],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   return `<div class="nav">${tabs.map(([k,v])=>PAGE_ROUTES.has(k)
     ?`<a class="nav-btn ${UI.navTab===k?'active':''}" href="${pageHref(k)}">${v}</a>`
@@ -4694,7 +4701,7 @@ function renderMyStock(){
   // Lead founder or co-founder
   const co=getMyCompany(u.id);
   const isLead=co&&co.owner_id===u.id;
-  if(!co)return`<div class="card"><div class="empty">Not listed yet.<br><br><button class="btn btn-primary" onclick="setTab('apply')">Apply for IPO</button></div></div>`;
+  if(!co)return renderApply();
   const pendingDil=DB.dilApps.find(d=>d.ticker===co.ticker&&d.status==='pending');
   const myDils=DB.dilApps.filter(d=>d.ticker===co.ticker).reverse();
   const myDivs=DB.dividends.filter(d=>d.ticker===co.ticker).reverse();
@@ -5116,7 +5123,7 @@ function renderCompanyNewsTab(co,myNews){
 function renderNewsPage(){
   const u=cu();
   const co=DB.companies.find(c=>c.owner_id===u.id);
-  if(!co)return`<div class="card"><div class="empty">You need a listed company to post news.<br><br><button class="btn btn-primary" onclick="setTab('apply')">Apply for IPO</button></div></div>`;
+  if(!co)return`<div class="card"><div class="empty">You need a listed company to post news.<br><br><button class="btn btn-primary" onclick="setTab('mystock')">Apply for IPO</button></div></div>`;
   const myNews=DB.news.filter(n=>n.ticker===co.ticker);
   return renderCompanyNewsTab(co,myNews);
 }
@@ -6584,7 +6591,6 @@ function getPageContent(){
   if(t==='notifications')return renderNotifications();
   if(t==='exchange')return renderExchangeStats();
   if(t==='trades')return renderTrades(isAdmin(u));
-  if(t==='apply')return renderApply();
   if(t==='mystock')return renderMyStock();
   if(t==='funds')return renderFundsPage();
   if(t==='admin')return renderAdmin();
@@ -6668,7 +6674,7 @@ async function boot(){
     if(UI.userId){
       const u=DB.users.find(u=>u.id===UI.userId);
       if(u){
-        UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'apply':'market';
+        UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'mystock':'market';
         if(isAdmin(u))UI.adminTab='dashboard';
         // Real routed pages (settings.html, etc. -- see PAGE_ROUTES) set
         // window.__JEX_PAGE__ in an inline script before app.js loads, so
