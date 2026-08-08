@@ -656,8 +656,8 @@ function renderSnapshotTab(){
   ${snaps.length?`<div class="card"><div class="section-title">Saved snapshots (${snaps.length})</div>
     <table><thead><tr><th>Name</th><th>Created by</th><th>Time</th><th></th></tr></thead>
     <tbody>${snaps.map(s=>`<tr>
-      <td style="font-weight:500">${s.label}</td>
-      <td style="color:var(--text2)">${s.created_by}</td>
+      <td style="font-weight:500">${esc(s.label)}</td>
+      <td style="color:var(--text2)">${esc(s.created_by)}</td>
       <td style="color:var(--text2)">${s.ts}</td>
       <td><button class="btn btn-sm btn-warning" onclick="restoreSnapshot('${s.id}')">⏪ Restore</button></td>
     </tr>`).join('')}</tbody></table>
@@ -1737,9 +1737,16 @@ async function sendFounderInvite(ownerId,studentId){
   const existing=DB.companyMembers.filter(m=>m.company_user_id===ownerId&&m.status!=='declined');
   if(existing.length>=3)return toast('Maximum 3 founders reached');
   if(existing.find(m=>m.student_id===studentId))return toast(student.name+' is already invited or a member');
+  // Runs server-side (rpc_send_founder_invite), re-checking the same
+  // owner-or-founder rule above -- it was client-side only, so a raw
+  // POST could create a "pending" invite naming yourself as the student
+  // for ANY company, then self-accept it via rpc_respond_to_invite
+  // (which only ever checks the invite is addressed to you) to gain
+  // founder-level rights over a company you have no relationship to.
   const u=cu();
-  const rec={id:uid(),company_user_id:ownerId,student_id:studentId,role:'founder',status:'pending',invited_by:u.name,ts:ts()};
-  await sb.post('jex_company_members',rec);
+  let rec;
+  try{rec=await sb.rpc('rpc_send_founder_invite',{p_owner_id:ownerId,p_student_id:studentId});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.companyMembers.push(rec);
   await pushNotification(
     studentId,'invite',
@@ -1966,13 +1973,16 @@ async function placeStopLoss(ticker,triggerPrice){
   if(triggerPrice>=co.price)return toast('Stop-loss must be below current price ('+fmt(co.price)+')');
   const held=(holdings(u)[ticker])||0;
   if(held<=0)return toast('You don&#39;t hold any '+ticker+' shares');
-  // Cancel existing stop-loss for this ticker
-  const existing=DB.stopLossOrders.find(s=>s.user_id===u.id&&s.ticker===ticker&&s.status==='active');
-  if(existing){
-    try{await sb.rpc('rpc_cancel_stop_loss',{p_id:existing.id});existing.status='cancelled';}catch(e){}
-  }
-  const rec={id:uid(),user_id:u.id,ticker,trigger_price:triggerPrice,shares:held,status:'active',ts:ts()};
-  await sb.post('jex_stop_loss',rec);
+  // Runs server-side (rpc_place_stop_loss), which derives the caller and
+  // their real held shares itself instead of trusting this client-built
+  // { user_id, shares } -- a raw POST here used to let anyone create a
+  // stop-loss order on ANY other user's account with a trigger price at
+  // or above the current price, force-selling their real shares the
+  // instant any client's poll loop checked it, with zero consent.
+  let rec;
+  try{rec=await sb.rpc('rpc_place_stop_loss',{p_ticker:ticker,p_trigger_price:triggerPrice});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.stopLossOrders=DB.stopLossOrders.filter(s=>!(s.user_id===u.id&&s.ticker===ticker&&s.status==='active'));
   DB.stopLossOrders.push(rec);
   toast('Stop-loss set: sell '+held+'×'+ticker+' if price drops to '+fmt(triggerPrice));render();
 }
@@ -3291,9 +3301,17 @@ async function castVote(voteId,choice){
   if(DB.ballots.find(b=>b.vote_id===voteId&&b.voter_id===u.id))return toast('You have already voted');
   const power=getVotingPower(u.id,v.parent_ticker);
   if(power<=0)return toast('You have no voting shares in this company');
-  const ballot={id:uid(),vote_id:voteId,voter_id:u.id,voter_name:u.name,choice,voting_power:power,ts:ts()};
-  await sb.post('jex_vote_ballots',ballot);DB.ballots.push(ballot);
-  toast('Vote cast — '+power+' vote'+(power!==1?'s':'')+' counted');render();
+  // Runs server-side (rpc_cast_vote), which re-derives the caller's real
+  // voting power from their own holdings instead of trusting this
+  // client-computed { voter_id, voting_power } -- a raw POST here used to
+  // let anyone cast unlimited ballots with an arbitrary inflated
+  // voting_power, single-handedly deciding any company's vote regardless
+  // of actual share ownership.
+  let ballot;
+  try{ballot=await sb.rpc('rpc_cast_vote',{p_vote_id:voteId,p_choice:choice});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.ballots.push(ballot);
+  toast('Vote cast — '+ballot.voting_power+' vote'+(ballot.voting_power!==1?'s':'')+' counted');render();
 }
 async function closeVote(voteId){
   const targetV=DB.votes.find(x=>x.id===voteId);if(!targetV)return;
@@ -3822,7 +3840,7 @@ function renderNewsFeed(){
     <div class="news-meta" style="justify-content:space-between">
       <div style="display:flex;align-items:center;gap:10px">
         <span class="news-ticker">${n.ticker}</span>
-        <span>${n.company_name}</span>
+        <span>${esc(n.company_name)}</span>
         <span>${n.ts||''}</span>
       </div>
       ${canDelete?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}
@@ -4251,11 +4269,11 @@ function renderMarket(){
       <tbody id="market-rows">${renderMarketRows(u,listed)}</tbody></table>
     </div>
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
-      +((DB.minutes||[]).filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${m.title}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}</div>`:'')
-    +((DB.minutes||[]).filter(m=>m.type==='minutes').length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.filter(m=>m.type==='minutes').slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${m.title}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}${DB.minutes.filter(m=>m.type==='minutes').length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.filter(m=>m.type==='minutes').length-3} older entries</div>`:''}</div>`:'')
+      +((DB.minutes||[]).filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${esc(m.title)}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${esc(m.body)}</div></div>`).join('')}</div>`:'')
+    +((DB.minutes||[]).filter(m=>m.type==='minutes').length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.filter(m=>m.type==='minutes').slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${esc(m.title)}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${esc(m.author_name)}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${esc(m.body)}</div></div>`).join('')}${DB.minutes.filter(m=>m.type==='minutes').length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.filter(m=>m.type==='minutes').length-3} older entries</div>`:''}</div>`:'')
       +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
       +'</div>':''}
-    ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.news.length} post${DB.news.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${esc(n.headline)}</div>${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${n.company_name}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${DB.news.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${DB.news.length} posts</div>`:''}</div>`:''}
+    ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.news.length} post${DB.news.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${esc(n.headline)}</div>${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${esc(n.company_name)}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${DB.news.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${DB.news.length} posts</div>`:''}</div>`:''}
     <div id="trade-panel"></div>`;
 }
 function buildSparklines(){
@@ -4384,7 +4402,7 @@ function openPanel(ticker){
     <div style="margin-bottom:4px">${buildChartIntervalBar('panel-chart',c)}</div>
     <div style="position:relative;height:160px;margin-bottom:6px"><canvas id="panel-chart"></canvas></div>
     <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2);margin-bottom:10px"><span>${(c.price_history||[]).length} pts | Open: ${fmt((c.price_history||[])[0]?.p||c.price)}</span><span class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</span></div>
-    ${fin?`<div style="font-size:12px;padding:8px 10px;background:var(--bg3);border-radius:var(--radius);margin-bottom:10px">Latest: Rev <strong>${fmt(fin.revenue)}</strong> | Profit <strong>${fmt(fin.profit)}</strong> — <span style="color:var(--text2)">${fin.summary}</span></div>`:''}
+    ${fin?`<div style="font-size:12px;padding:8px 10px;background:var(--bg3);border-radius:var(--radius);margin-bottom:10px">Latest: Rev <strong>${fmt(fin.revenue)}</strong> | Profit <strong>${fmt(fin.profit)}</strong> — <span style="color:var(--text2)">${esc(fin.summary)}</span></div>`:''}
     <hr class="divider">
     <div class="ot-toggle">
       <button class="ot-btn ${mode==='buy'?'ot-buy':''}" onclick="UI.panelMode='buy';openPanel('${ticker}')">Buy</button>
@@ -5248,7 +5266,7 @@ function renderDivTab(co,myDivs){
     <div class="mcard"><div class="mlabel">Shareholders</div><div class="mval" id="div-sh-count">loading...</div></div>
     <div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${totalCirc.toLocaleString()}</div></div></div>
     <div id="div-form"><div style="font-size:12px;color:var(--text2);padding:8px 0">Loading shareholders...</div></div>
-  </div>${myDivs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Per share</th><th>Total</th><th>Recipients</th><th>Note</th></tr></thead><tbody>${myDivs.map(d=>`<tr><td style="color:var(--text2)">${d.ts}</td><td style="font-family:var(--mono)">${fmt(d.per_share)}</td><td style="color:var(--green);font-family:var(--mono)">${fmt(d.total)}</td><td>${(d.payouts||[]).length}</td><td style="font-size:12px;color:var(--text2)">${d.note}</td></tr>`).join('')}</tbody></table></div>`:''}`;
+  </div>${myDivs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Per share</th><th>Total</th><th>Recipients</th><th>Note</th></tr></thead><tbody>${myDivs.map(d=>`<tr><td style="color:var(--text2)">${d.ts}</td><td style="font-family:var(--mono)">${fmt(d.per_share)}</td><td style="color:var(--green);font-family:var(--mono)">${fmt(d.total)}</td><td>${(d.payouts||[]).length}</td><td style="font-size:12px;color:var(--text2)">${esc(d.note)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
 }
 function updateDivPrev(ticker){const co=getCo(ticker);if(!co)return;const ps=parseFloat(get('div-ps')?.value)||0,p=get('div-prev');if(!p)return;if(ps<=0){p.innerHTML='';return;}
   // Use fresh students from DB for preview (may be stale but better than nothing)
@@ -5441,7 +5459,7 @@ function renderAdminSession(students){
     ${isChairman(cu())?`<div style="display:flex;gap:8px"><button class="btn btn-success" onclick="setSession('open')">Open now</button><button class="btn btn-warning" onclick="setSession('paused')">Pause</button><button class="btn btn-danger" onclick="setSession('closed')">Close now</button></div>`:`<div class="ibox ibox-blue">Only the Chairman or President can open, pause, or close trading.</div>`}
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">Stock halts</div>
-    ${DB.halts.length?`<div style="margin-bottom:10px">${DB.halts.map(h=>`<div class="app-row" style="margin-bottom:6px"><div class="app-info"><div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">${h.ticker}</span> <span class="badge b-red">Halted</span></div><div class="app-meta">${h.reason} — by ${h.halted_by} at ${h.ts}</div></div><button class="btn btn-sm btn-success" onclick="resumeStock('${h.ticker}')">Resume</button></div>`).join('')}</div>`:'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">No stocks currently halted.</div>'}
+    ${DB.halts.length?`<div style="margin-bottom:10px">${DB.halts.map(h=>`<div class="app-row" style="margin-bottom:6px"><div class="app-info"><div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">${h.ticker}</span> <span class="badge b-red">Halted</span></div><div class="app-meta">${esc(h.reason)} — by ${esc(h.halted_by)} at ${h.ts}</div></div><button class="btn btn-sm btn-success" onclick="resumeStock('${h.ticker}')">Resume</button></div>`).join('')}</div>`:'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">No stocks currently halted.</div>'}
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Halt a stock</label>
         <select id="halt-ticker"><option value="">— Select ticker —</option>${DB.companies.map(c=>`<option value="${esc(c.ticker)}">${esc(c.ticker)} — ${esc(c.name)}</option>`).join('')}</select>
@@ -5571,7 +5589,7 @@ function renderAdminIPO(pIPO,rIPO){
   return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${esc(a.description||'no desc')}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewIPO('${a.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewIPO('${a.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}`;
 }
 function renderAdminDilution(pDil,rDil){
-  return`<div class="card"><div class="section-title">Pending dilution requests</div>${pDil.length?pDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${d.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span> <span class="badge b-coral">+${d.pct_increase}%</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares — "${d.reason}"</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewDilution('${d.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewDilution('${d.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending dilution requests</div>'}${rDil.length?`<hr class="divider">${rDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${d.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares</div></div><span class="badge ${d.status==='approved'?'b-green':'b-red'}">${d.status}</span></div>`).join('')}`:''}`;
+  return`<div class="card"><div class="section-title">Pending dilution requests</div>${pDil.length?pDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span> <span class="badge b-coral">+${d.pct_increase}%</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares — "${esc(d.reason)}"</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewDilution('${d.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewDilution('${d.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending dilution requests</div>'}${rDil.length?`<hr class="divider">${rDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares</div></div><span class="badge ${d.status==='approved'?'b-green':'b-red'}">${d.status}</span></div>`).join('')}`:''}`;
 }
 function renderAdminBalances(students){
   const rows=students.map(u=>({name:u.name,email:u.email,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pv(u)*100)/100,shortPnl:Math.round(sPnl(u)*100)/100,divs:Math.round(divRec(u)*100)/100,nw:nw(u)})).sort((a,b)=>b.nw-a.nw);
@@ -5778,11 +5796,11 @@ function renderAdminFlags(){
       html+=`<div style="padding:12px;border:1px solid var(--red);border-radius:var(--radius);margin-bottom:10px;background:rgba(255,77,106,0.04)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
           <span style="font-size:16px">🚩</span>
-          <strong>${f.target_name}</strong>
+          <strong>${esc(f.target_name)}</strong>
           <span class="badge b-red">${f.target_type}</span>
-          <span style="font-size:11px;color:var(--text2);margin-left:auto">${f.ts} — flagged by ${f.flagged_by_name}</span>
+          <span style="font-size:11px;color:var(--text2);margin-left:auto">${f.ts} — flagged by ${esc(f.flagged_by_name)}</span>
         </div>
-        <div style="font-size:13px;color:var(--text2);margin-bottom:10px">${f.reason}</div>
+        <div style="font-size:13px;color:var(--text2);margin-bottom:10px">${esc(f.reason)}</div>
         ${isChairPres?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input type="text" id="res-note-${f.id}" placeholder="Resolution note (optional)" style="flex:1;font-size:12px;padding:5px 8px">
           <button class="btn btn-sm btn-success" onclick="resolveFlagForm('${f.id}','resolved')">✓ Resolve</button>
@@ -5798,12 +5816,12 @@ function renderAdminFlags(){
     html+=`<div class="card"><div class="section-title">Resolved / dismissed flags</div>
       <table><thead><tr><th>Target</th><th>Type</th><th>Reason</th><th>Status</th><th>Resolved by</th><th>Note</th><th>Time</th></tr></thead>
       <tbody>${closedFlags.map(f=>`<tr>
-        <td style="font-weight:500">${f.target_name}</td>
+        <td style="font-weight:500">${esc(f.target_name)}</td>
         <td><span class="badge b-gray">${f.target_type}</span></td>
-        <td style="font-size:12px;color:var(--text2);max-width:200px">${f.reason}</td>
+        <td style="font-size:12px;color:var(--text2);max-width:200px">${esc(f.reason)}</td>
         <td><span class="badge ${f.status==='resolved'?'b-green':'b-gray'}">${f.status}</span></td>
-        <td style="font-size:12px;color:var(--text2)">${f.resolved_by||'—'}</td>
-        <td style="font-size:12px;color:var(--text2)">${f.resolution_note||'—'}</td>
+        <td style="font-size:12px;color:var(--text2)">${esc(f.resolved_by)||'—'}</td>
+        <td style="font-size:12px;color:var(--text2)">${esc(f.resolution_note)||'—'}</td>
         <td style="font-size:12px;color:var(--text2)">${f.ts||''}</td>
       </tr>`).join('')}</tbody></table>
     </div>`;
@@ -5946,7 +5964,7 @@ function renderAdminDashboard(){
   </div>
   <div class="card"><div class="section-title">Recent activity</div>
     ${DB.activity.slice(0,10).length?`<table><thead><tr><th>Time</th><th>Type</th><th>Description</th></tr></thead><tbody>
-    ${DB.activity.slice(0,10).map(a=>`<tr><td style="color:var(--text2);white-space:nowrap">${a.ts||''}</td><td><span class="badge b-gray">${a.type}</span></td><td style="font-size:12px">${a.description}</td></tr>`).join('')}
+    ${DB.activity.slice(0,10).map(a=>`<tr><td style="color:var(--text2);white-space:nowrap">${a.ts||''}</td><td><span class="badge b-gray">${a.type}</span></td><td style="font-size:12px">${esc(a.description)}</td></tr>`).join('')}
     </tbody></table>`:'<div class="empty">No activity yet</div>'}
   </div>`;
 }
@@ -5990,7 +6008,7 @@ function renderAdminNews(){
       <div class="news-meta" style="justify-content:space-between">
         <div style="display:flex;align-items:center;gap:10px">
           <span class="news-ticker">${n.ticker}</span>
-          <span>${n.company_name}</span>
+          <span>${esc(n.company_name)}</span>
           <span>${n.ts||''}</span>
         </div>
         <button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>
@@ -6055,7 +6073,7 @@ function renderNotifications(){
     return `<div style="display:flex;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid var(--border);opacity:${n.read?'0.55':'1'}">
       <div style="font-size:18px;min-width:28px">${typeIcon[n.type]||'•'}</div>
       <div style="flex:1">
-        <div style="font-size:13px${n.read?'':';font-weight:500'}">${n.message}</div>
+        <div style="font-size:13px${n.read?'':';font-weight:500'}">${esc(n.message)}</div>
         <div style="font-size:11px;color:var(--text3);margin-top:2px">${n.ts||''}</div>
         ${pendingInvite?`<div style="display:flex;gap:6px;margin-top:8px">
           <button class="btn btn-sm btn-success" onclick="respondToInvite(&quot;${pendingInvite.id}&quot;,true)">✓ Accept</button>
@@ -6182,10 +6200,10 @@ function renderExchangeStats(){
   ${recaps.length?`<div class="card"><div class="section-title">📋 Session recaps</div>
     ${recaps.slice(0,3).map(r=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-        <strong style="font-size:13px">${r.title}</strong>
+        <strong style="font-size:13px">${esc(r.title)}</strong>
         <span style="font-size:11px;color:var(--text2)">${r.ts}</span>
       </div>
-      <div style="font-size:12px;color:var(--text2);white-space:pre-line">${r.body}</div>
+      <div style="font-size:12px;color:var(--text2);white-space:pre-line">${esc(r.body)}</div>
     </div>`).join('')}
   </div>`:''}`;
 }
@@ -6317,13 +6335,13 @@ function renderAdminOfficialNotices(){
   ${notices.length?`<div class="card"><div class="section-title">Posted notices (${notices.length})</div>
     ${notices.map(m=>`<div style="padding:12px 0;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <div><span class="badge b-blue" style="margin-right:6px">Official notice</span><strong>${m.title}</strong></div>
+        <div><span class="badge b-blue" style="margin-right:6px">Official notice</span><strong>${esc(m.title)}</strong></div>
         <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span>
+          <span style="font-size:11px;color:var(--text2)">${m.ts} — ${esc(m.author_name)}</span>
           <button class="btn btn-sm btn-danger" onclick="deleteMinutes('${m.id}')">Delete</button>
         </div>
       </div>
-      <div style="font-size:13px;color:var(--text2);white-space:pre-line">${m.body}</div>
+      <div style="font-size:13px;color:var(--text2);white-space:pre-line">${esc(m.body)}</div>
     </div>`).join('')}
   </div>`:''}`;
 }
@@ -6370,13 +6388,13 @@ function renderAdminMinutes(){
   ${DB.minutes.length?`<div class="card"><div class="section-title">Posted minutes (${DB.minutes.length})</div>
     ${DB.minutes.map(m=>`<div style="padding:12px 0;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <strong>${m.title}</strong>
+        <strong>${esc(m.title)}</strong>
         <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span>
+          <span style="font-size:11px;color:var(--text2)">${m.ts} — ${esc(m.author_name)}</span>
           <button class="btn btn-sm btn-danger" onclick="deleteMinutes('${m.id}')">Delete</button>
         </div>
       </div>
-      <div style="font-size:13px;color:var(--text2);white-space:pre-line">${m.body}</div>
+      <div style="font-size:13px;color:var(--text2);white-space:pre-line">${esc(m.body)}</div>
     </div>`).join('')}
   </div>`:''}`;
 }
@@ -6477,11 +6495,11 @@ function renderTreasurerDividendAudit(){
       const owner=DB.users.find(u=>u.id===DB.companies.find(c=>c.name===d.company_name)?.owner_id);
       return`<tr>
         <td style="color:var(--text2)">${d.ts}</td>
-        <td style="font-weight:500">${d.company_name}</td>
+        <td style="font-weight:500">${esc(d.company_name)}</td>
         <td style="font-family:var(--mono)">${fmt(d.per_share)}</td>
         <td style="font-family:var(--mono);font-weight:500;color:var(--red)">${fmt(d.total)}</td>
         <td>${(d.payouts||[]).length} students</td>
-        <td style="font-size:12px;color:var(--text2)">${d.note}</td>
+        <td style="font-size:12px;color:var(--text2)">${esc(d.note)}</td>
       </tr>`;
     }).join('')}
     </tbody></table>`:'<div class="empty">No dividends paid yet</div>'}
@@ -6573,7 +6591,7 @@ function renderActivityLog(){
     <tbody>${filtered.slice(0,100).map(a=>`<tr>
       <td style="color:var(--text2);white-space:nowrap">${a.ts||''}</td>
       <td><span class="badge ${typeBadge[a.type]||'b-gray'}">${typeIcon[a.type]||''} ${a.type}</span></td>
-      <td style="font-size:12px">${a.description}</td>
+      <td style="font-size:12px">${esc(a.description)}</td>
       <td style="font-family:var(--mono);font-size:12px">${a.amount!=null?(a.amount>=0?'+':'')+fmt(a.amount):''}</td>
       <td title="${a.entry_hash||'no hash'}" style="font-size:9px;color:var(--text3);font-family:var(--mono)">${a.entry_hash?a.entry_hash.slice(-4):'—'}</td>
     </tr>`).join('')}</tbody></table>`:'<div class="empty">No matching activity</div>'}
@@ -6601,9 +6619,9 @@ function renderAdminAnnouncements(){
     ${DB.announcements.map(a=>{
       const lvlColor=a.level==='urgent'?'b-red':a.level==='warning'?'b-amber':'b-blue';
       return`<div class="app-row"><div class="app-info">
-        <div class="app-name">${a.title} <span class="badge ${lvlColor}">${a.level}</span></div>
+        <div class="app-name">${esc(a.title)} <span class="badge ${lvlColor}">${a.level}</span></div>
         ${a.body?`<div class="app-meta">${esc(a.body||"")}</div>`:''}
-        <div class="app-meta">${a.author_name||''} · ${a.ts||''}</div>
+        <div class="app-meta">${esc(a.author_name)||''} · ${a.ts||''}</div>
       </div><button class="btn btn-sm btn-danger" onclick="deleteAnnouncement('${a.id}')">Delete</button></div>`;
     }).join('')}</div>`:''}`;
 }
