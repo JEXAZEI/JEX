@@ -4194,6 +4194,12 @@ function openCompanyPage(ticker){
   window.scrollTo({top:0,behavior:'smooth'});
   // Set up swipe navigation after render
   setTimeout(setupCompanyPageSwipe,100);
+  // Reflect the open company in the URL (market.html?ticker=X, i.e. today
+  // index.html since market has no page file of its own) so the address
+  // bar is an actual shareable link, not just in-memory UI state. Only
+  // called from the market page's ticker list/table, so no page-identity
+  // check needed here.
+  if(typeof history!=='undefined')history.pushState({ticker},'','?ticker='+encodeURIComponent(ticker));
 }
 function setupCompanyPageSwipe(){
   const el=document.getElementById('company-page-content');
@@ -4262,6 +4268,7 @@ function setupCoSwipe(){
 }
 function closeCompanyPage(){
   UI.companyPage=null;destroyCharts();render();
+  if(typeof history!=='undefined')history.replaceState({},'',location.pathname);
 }
 function openPanel(ticker){
   // Trade actions call this after an async round-trip (placeBuy/placeSell/
@@ -6680,6 +6687,14 @@ async function boot(){
         // a stable navTab to fire against.
         render();
         subscribeRealtime();
+        // Deep link: index.html?ticker=ACME (the market page) opens straight
+        // to that company's page -- the one concrete "share a link" capability
+        // the multi-page conversion was for. Unknown/invalid tickers are
+        // ignored quietly rather than erroring.
+        if(UI.navTab==='market'&&typeof location!=='undefined'){
+          const deepTicker=new URLSearchParams(location.search).get('ticker');
+          if(deepTicker&&getCo(deepTicker.toUpperCase()))openCompanyPage(deepTicker.toUpperCase());
+        }
       } else {
         UI.userId=null; // session invalid
       }
