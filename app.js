@@ -398,10 +398,13 @@ function computeJXI(){
 async function snapshotJXI(){
   const idx=computeJXI();
   if(!idx.constituents.length)return;
+  // Runs server-side (rpc_snapshot_jxi), which recomputes the index value
+  // itself from real company prices -- a raw POST here used to let
+  // anyone insert an arbitrary fabricated value, distorting the market-
+  // index chart shown on the market page to every user.
   try{
-    const rec={id:uid(),value:idx.value,ts:isoNow()};
-    await sb.post('jex_index_history',rec);
-    DB.indexHistory.push(rec);
+    const rec=await sb.rpc('rpc_snapshot_jxi',{});
+    if(rec)DB.indexHistory.push(rec);
   }catch(e){console.warn('JXI snapshot failed:',e);}
 }
 function jxiPriceHistory(){return(DB.indexHistory||[]).map(h=>({p:h.value,t:h.ts}));}
