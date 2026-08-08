@@ -104,7 +104,7 @@ async function hashPw(pw){
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
-  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],contactMessages:[],indexHistory:[],
+  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],contactMessages:[],indexHistory:[],snapshots:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
     weekly_schedule:{sun:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},mon:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},tue:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},wed:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},thu:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},fri:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},sat:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}}},
     weekly_active:false,weekly_override:false}};
@@ -273,7 +273,7 @@ async function loadAll(){
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
     activity,shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds,contactMessages,indexHistory]=await Promise.all([
+    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds,contactMessages,indexHistory,snapshots]=await Promise.all([
     sb.get('jex_pending','order=created_at.asc&select='+JEX_PENDING_SAFE_SELECT),
     sb.get('jex_news','order=created_at.desc&limit=50'),
     sb.get('jex_ipo_applications','order=created_at.asc'),
@@ -302,12 +302,13 @@ async function loadAll(){
     sb.get('jex_funds','order=created_at.asc'),
     sb.get('jex_contact_messages','order=created_at.desc&limit=100'),
     sb.get('jex_index_history','order=created_at.asc&limit=500'),
+    sb.get('jex_snapshots','order=created_at.desc&limit=50'),
   ]);
   Object.assign(DB,{pending,news,ipoApps,dilApps,
     trades,dividends,buybacks,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds,contactMessages,indexHistory});
+    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds,contactMessages,indexHistory,snapshots});
   render(); // re-render with full data
 }
 
@@ -611,40 +612,31 @@ async function saveSnapshot(label){
   toast('✓ Snapshot saved: '+label.trim());render();
 }
 async function doSaveSnapshot(label){
-  const snap={
-    id:uid(),
-    label,
-    ts:ts(),
-    created_by:cu()?.name||'Admin',
-    data:{
-      users:DB.users.map(u=>({id:u.id,name:u.name,role:u.role,cash:u.cash,holdings:u.holdings,shorts:u.shorts})),
-      companies:DB.companies.map(c=>({id:c.id,ticker:c.ticker,name:c.name,price:c.price,shares:c.shares,shares_avail:c.shares_avail,status:c.status,owner_id:c.owner_id})),
-      session:{status:DB.session.status,starting_cash:DB.session.starting_cash},
-    }
-  };
-  // Store in jex_activity with type='snapshot' and description as JSON
-  const rec={id:snap.id,type:'snapshot',description:JSON.stringify({label:snap.label,created_by:snap.created_by,data:snap.data}),amount:null,ts:snap.ts};
-  await sb.post('jex_activity',rec);
-  DB.activity.unshift(rec);
-  return snap.id;
+  // The snapshot's contents (users/companies/session state) are built
+  // entirely server-side from the RPC's own reads -- the client only
+  // supplies the label. This closes the forgery path where a client could
+  // previously POST an arbitrary data payload (see jex_snapshots table).
+  let row;
+  try{row=await sb.rpc('rpc_admin_save_snapshot',{p_label:label});}
+  catch(e){toast(rpcErrorMessage(e));return null;}
+  DB.snapshots.unshift(row);
+  return row.id;
 }
-async function restoreSnapshot(activityId){
+async function restoreSnapshot(snapshotId){
   if(!isAdmin(cu()))return toast('Admin access required');
   if(!confirm('Restore this snapshot? All current holdings, prices, and cash will be overwritten.'))return;
-  await doRestoreSnapshot(activityId);
+  await doRestoreSnapshot(snapshotId);
 }
-async function doRestoreSnapshot(activityId){
+async function doRestoreSnapshot(snapshotId){
   if(!isAdmin(cu()))return toast('Admin access required');
-  const rec=DB.activity.find(a=>a.id===activityId);if(!rec)return toast('Snapshot not found');
-  let snap;
-  try{snap=JSON.parse(rec.description);}catch{return toast('Snapshot data is corrupted');}
+  const snap=DB.snapshots.find(s=>s.id===snapshotId);if(!snap)return toast('Snapshot not found');
   toast('Restoring snapshot...');
   // Restoring cash/holdings/shorts/price/shares_avail runs server-side
-  // (rpc_admin_restore_snapshot) -- the client can no longer PATCH those
-  // columns directly for every user/company in the snapshot at once.
-  // Clearing active orders and stop-loss now happens inside the same RPC
-  // transaction above instead of two separate direct client DELETEs.
-  try{await sb.rpc('rpc_admin_restore_snapshot',{p_activity_id:activityId});}
+  // (rpc_admin_restore_snapshot), reading the snapshot's data from
+  // jex_snapshots (RPC-written only) instead of a client-writable row.
+  // Clearing active orders and stop-loss happens inside the same RPC
+  // transaction instead of two separate direct client DELETEs.
+  try{await sb.rpc('rpc_admin_restore_snapshot',{p_activity_id:snapshotId});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.limitOrders=DB.limitOrders.filter(o=>o.status!=='open'&&o.status!=='after_hours');
   DB.stopLossOrders=[];
@@ -653,10 +645,7 @@ async function doRestoreSnapshot(activityId){
   toast('✓ Snapshot restored: '+snap.label);
 }
 function renderSnapshotTab(){
-  const snaps=DB.activity.filter(a=>a.type==='snapshot').map(a=>{
-    try{const d=JSON.parse(a.description);return{id:a.id,label:d.label,ts:a.ts,created_by:d.created_by};}
-    catch{return null;}
-  }).filter(Boolean);
+  const snaps=DB.snapshots;
   return`<div class="card"><div class="section-title">Save snapshot</div>
     <div class="ibox ibox-blue">Saves current prices, holdings, and cash for all users. Restore any snapshot to roll back the exchange state — useful for practice rounds.</div>
     <div class="row" style="align-items:flex-end">
@@ -2265,7 +2254,7 @@ async function resetExchange(){
     // jex_vote_ballots, jex_companies, jex_users, jex_classrooms.
     await sb.rpc('rpc_admin_full_reset',{});
     // Clear local DB state entirely
-    DB.users=DB.users.filter(u=>adminRoles.includes(u.role));
+    DB.users=DB.users.filter(isAdmin);
     DB.users.forEach(u=>{u.cash=0;u.holdings={};u.shorts={};u.watchlist=[];});
     DB.companies=[];DB.trades=[];DB.dividends=[];DB.buybacks=[];
     DB.limitOrders=[];DB.stopLossOrders=[];DB.notifications=[];
