@@ -3312,10 +3312,14 @@ async function postVote(parentTicker,question,optA,optB,closesAt){
   const co=getCo(parentTicker);if(!co)return;
   const u=cu();
   if(!canManageCompany(co))return toast('Only this company\'s owner or founders can post a vote');
-  const v={id:uid(),parent_ticker:parentTicker,company_name:co.name,
-    question:question.trim(),option_a:optA.trim(),option_b:optB.trim(),
-    status:'open',created_by:u.id,ts:ts(),closes_at:closesAt||null};
-  await sb.post('jex_votes',v);DB.votes.push(v);
+  // Runs server-side (rpc_post_vote), re-checking the same owner-or-
+  // founder rule above -- it was client-side only, so a raw POST could
+  // impersonate any company's governance action, posting a fake vote
+  // shown to every shareholder exactly like a real one.
+  let v;
+  try{v=await sb.rpc('rpc_post_vote',{p_ticker:parentTicker,p_question:question.trim(),p_option_a:optA.trim(),p_option_b:optB.trim(),p_closes_at:closesAt||null});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.votes.push(v);
   await logActivity('vote',co.name+' posted vote: '+question.trim(),{ticker:parentTicker,userId:u.id,userName:u.name});
   await pushNotificationToHolders(parentTicker,'vote','🗳️ '+co.name+' posted a vote: '+question.trim());
   toast('Vote posted');UI.companyTab='votes';render();
