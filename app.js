@@ -687,8 +687,12 @@ async function generateSessionRecap(u){
     '',
     'Next session: TBD',
   ].filter(Boolean).join('\n');
-  const rec={id:uid(),title:'Session recap — '+new Date().toLocaleDateString(),body:recapBody,type:'official_notice',author_id:u?.id,author_name:u?.name||'System',ts:ts()};
-  await sb.post('jex_minutes',rec);
+  const title='Session recap — '+new Date().toLocaleDateString();
+  // Runs server-side (rpc_post_session_recap) -- a raw POST to jex_minutes
+  // is no longer possible for anyone (see minutes_announcements_forgery_fix_migration.sql).
+  let rec;
+  try{rec=await sb.rpc('rpc_post_session_recap',{p_title:title,p_body:recapBody});}
+  catch(e){console.warn('Session recap post failed:',e);return;}
   DB.minutes=DB.minutes||[];
   DB.minutes.unshift(rec);
 }
@@ -1523,8 +1527,13 @@ async function logActivity(type,description,extras={}){
 async function postAnnouncement(title,body,level){
   if(!title||title.trim().length<3)return toast('Enter a title');
   const u=cu();
-  const rec={id:uid(),title:title.trim(),body:(body||'').trim(),level:level||'info',author_id:u.id,author_name:u.name,ts:ts()};
-  await sb.post('jex_announcements',rec);
+  // Runs server-side (rpc_post_announcement) -- this function had NO role
+  // check at all before, not even client-side, so anyone who found it in
+  // devtools could plant a fake "urgent" banner announcement, the
+  // highest-visibility surface in the app (pinned at the top for every user).
+  let rec;
+  try{rec=await sb.rpc('rpc_post_announcement',{p_title:title.trim(),p_body:(body||'').trim(),p_level:level||'info'});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.announcements.unshift(rec);
   await logActivity('announcement','Announcement posted: '+title.trim(),{userId:u.id,userName:u.name});
   toast('Announcement posted');render();
@@ -4284,9 +4293,9 @@ function renderMarket(){
       <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${(u.role==='student'||u.role==='company')?'<th>Watch</th><th>Health'+infoBubble('A 0-100 score combining price stability (up to ±20), the companys cash cushion relative to its market cap (up to +15), short-seller interest against it (up to -15), and dividend history (+5 to +10). Starts from a baseline of 50.')+'</th><th></th>':''}</tr></thead>
       <tbody id="market-rows">${renderMarketRows(u,listed)}</tbody></table>
     </div>
+    ${(DB.minutes||[]).filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${esc(m.title)}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${esc(m.body)}</div></div>`).join('')}</div>`:''}
+    ${(DB.minutes||[]).filter(m=>m.type==='minutes').length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.filter(m=>m.type==='minutes').slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${esc(m.title)}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${esc(m.author_name)}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${esc(m.body)}</div></div>`).join('')}${DB.minutes.filter(m=>m.type==='minutes').length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.filter(m=>m.type==='minutes').length-3} older entries</div>`:''}</div>`:''}
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
-      +((DB.minutes||[]).filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${esc(m.title)}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${esc(m.body)}</div></div>`).join('')}</div>`:'')
-    +((DB.minutes||[]).filter(m=>m.type==='minutes').length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.filter(m=>m.type==='minutes').slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${esc(m.title)}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${esc(m.author_name)}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${esc(m.body)}</div></div>`).join('')}${DB.minutes.filter(m=>m.type==='minutes').length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.filter(m=>m.type==='minutes').length-3} older entries</div>`:''}</div>`:'')
       +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
       +'</div>':''}
     ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.news.length} post${DB.news.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${esc(n.headline)}</div>${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${esc(n.company_name)}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${DB.news.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${DB.news.length} posts</div>`:''}</div>`:''}
@@ -6340,7 +6349,11 @@ function renderTradingHistory(){
 // SECRETARY FEATURES
 // ═══════════════════════════════════════════════
 function renderAdminOfficialNotices(){
-  const notices=DB.minutes.filter(m=>m.type==='official_notice');
+  // postOfficialNotice() actually writes to jex_announcements (a styled
+  // announcement), not jex_minutes -- this list used to filter jex_minutes
+  // for type==='official_notice', which no writer ever set, so it always
+  // rendered empty regardless of how many notices were posted.
+  const notices=DB.announcements.filter(a=>a.title&&a.title.startsWith('📋 OFFICIAL NOTICE: '));
   const u=cu();
   return`<div class="card"><div class="section-title">Post an official notice</div>
     <div class="ibox ibox-blue">Official notices appear on the market page with a formal styling, distinct from regular announcements. Use for procedural communications like session schedules or deadlines.</div>
@@ -6349,15 +6362,15 @@ function renderAdminOfficialNotices(){
     <button class="btn btn-primary" onclick="postOfficialNotice(get('notice-title')?.value,get('notice-body')?.value)">Post official notice</button>
   </div>
   ${notices.length?`<div class="card"><div class="section-title">Posted notices (${notices.length})</div>
-    ${notices.map(m=>`<div style="padding:12px 0;border-bottom:1px solid var(--border)">
+    ${notices.map(a=>`<div style="padding:12px 0;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <div><span class="badge b-blue" style="margin-right:6px">Official notice</span><strong>${esc(m.title)}</strong></div>
+        <div><span class="badge b-blue" style="margin-right:6px">Official notice</span><strong>${esc(a.title)}</strong></div>
         <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:11px;color:var(--text2)">${m.ts} — ${esc(m.author_name)}</span>
-          <button class="btn btn-sm btn-danger" onclick="deleteMinutes('${m.id}')">Delete</button>
+          <span style="font-size:11px;color:var(--text2)">${a.ts} — ${esc(a.author_name)}</span>
+          <button class="btn btn-sm btn-danger" onclick="deleteAnnouncement('${a.id}')">Delete</button>
         </div>
       </div>
-      <div style="font-size:13px;color:var(--text2);white-space:pre-line">${esc(m.body)}</div>
+      <div style="font-size:13px;color:var(--text2);white-space:pre-line">${esc(a.body)}</div>
     </div>`).join('')}
   </div>`:''}`;
 }
@@ -6365,8 +6378,12 @@ async function postMinutes(title,body){
   const u=cu();
   if(!title||title.trim().length<3)return toast('Enter a title');
   if(!body||body.trim().length<10)return toast('Enter meeting notes (at least 10 characters)');
-  const rec={id:uid(),title:title.trim(),body:body.trim(),author_id:u.id,author_name:u.name,ts:ts()};
-  await sb.post('jex_minutes',rec);
+  // Runs server-side (rpc_post_minutes), re-checking that the caller is
+  // actually Secretary -- this had NO check at all before, client-side or
+  // otherwise, and minutes show on the market page noticeboard to every user.
+  let rec;
+  try{rec=await sb.rpc('rpc_post_minutes',{p_title:title.trim(),p_body:body.trim()});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.minutes.unshift(rec);
   await logActivity('minutes','Meeting minutes posted: '+title.trim(),{userId:u.id,userName:u.name});
   await pushNotificationToAll('minutes','📋 New meeting minutes posted: '+title.trim());
@@ -6383,10 +6400,14 @@ async function deleteMinutes(id){
 }
 async function postOfficialNotice(title,body){
   // Official notice = styled announcement from Secretary
-  const u=cu();
   if(!title||!body)return toast('Enter title and body');
-  const rec={id:uid(),title:'📋 OFFICIAL NOTICE: '+title.trim(),body:body.trim(),level:'info',author_id:u.id,author_name:u.name,ts:ts()};
-  await sb.post('jex_announcements',rec);
+  // Runs server-side (rpc_post_official_notice), re-checking that the
+  // caller is actually Secretary -- this had NO check at all before,
+  // client-side or otherwise, and it posts to the pinned top banner
+  // every user sees on login.
+  let rec;
+  try{rec=await sb.rpc('rpc_post_official_notice',{p_title:title,p_body:body});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.announcements.unshift(rec);
   toast('Official notice posted');render();
 }
