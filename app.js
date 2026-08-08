@@ -982,7 +982,6 @@ function secQSelect(prefix){return `<select id="${prefix}-secq"><option value=""
 
 // ── Email verification (registration) ────────────────────
 const emailjsReady=()=>!!(DB.session.emailjs_service_id&&DB.session.emailjs_template_id&&DB.session.emailjs_public_key&&typeof emailjs!=='undefined');
-function genVerifyCode(){return String(Math.floor(100000+Math.random()*900000));}
 function openRegisterView(){UI.regVerify={reg:{status:'idle',email:'',resendAt:0},'reg-co':{status:'idle',email:'',resendAt:0}};UI.googleAuth=null;UI.loginView='register';render();}
 
 // ── Google Sign-In (real Supabase Auth) ───────────────────
@@ -1066,14 +1065,19 @@ async function sendRegVerificationCode(prefix){
   if(!validEmail(email))return toast('Enter a valid email first');
   if(!emailjsReady())return toast('Email verification is not available right now');
   const name=(get(prefix==='reg'?'reg-name':'reg-co-name')?.value||'').trim()||'there';
-  const code=genVerifyCode();
+  // Runs server-side (rpc_request_verification_code), which generates and
+  // stores the code itself -- a raw POST here used to let anyone insert
+  // their own self-chosen code for an email they don't own, "verifying"
+  // it without any real email round-trip. The code is only ever returned
+  // to this immediate caller, since it's needed here to embed in the
+  // EmailJS send just below.
   try{
-    await sb.post('jex_email_verifications',{id:uid(),email,code,used:false,expires_at:Date.now()+15*60000,created_at:new Date().toISOString()});
+    const r=await sb.rpc('rpc_request_verification_code',{p_email:email});
     emailjs.init({publicKey:DB.session.emailjs_public_key});
     await emailjs.send(DB.session.emailjs_service_id,DB.session.emailjs_template_id,{
       to_email:email,to_name:name,
       subject:'Your JEX verification code',
-      message:'Your JEX email verification code is '+code+'. It expires in 15 minutes.',
+      message:'Your JEX email verification code is '+r.code+'. It expires in 15 minutes.',
       ticker:'',app_url:window.location.origin+window.location.pathname
     });
   }catch(e){return toast('Failed to send verification code: '+(e.message||e));}
@@ -1086,14 +1090,14 @@ async function confirmRegVerificationCode(prefix){
   if(!state||state.status!=='sent')return;
   const code=(get(prefix+'-verify-code')?.value||'').trim();
   if(!/^\d{6}$/.test(code))return toast('Enter the 6-digit code from your email');
-  let rows;
-  try{
-    rows=await sb.get('jex_email_verifications','email=eq.'+encodeURIComponent(state.email)+'&code=eq.'+code+'&used=eq.false&order=created_at.desc&limit=1');
-  }catch(e){return toast('Verification failed, please try again');}
-  const row=rows&&rows[0];
-  if(!row)return toast('Incorrect or expired code');
-  if(Date.now()>row.expires_at)return toast('This code has expired — send a new one');
-  await sb.patch('jex_email_verifications','id=eq.'+row.id,{used:true});
+  // Runs server-side (rpc_confirm_verification_code), which checks the
+  // match itself and never returns the stored code -- a raw GET here used
+  // to let anyone read out any email's real verification code directly,
+  // completely defeating the point of email verification.
+  let ok;
+  try{ok=await sb.rpc('rpc_confirm_verification_code',{p_email:state.email,p_code:code});}
+  catch(e){return toast('Verification failed, please try again');}
+  if(!ok)return toast('Incorrect or expired code');
   UI.regVerify[prefix]={status:'verified',email:state.email,resendAt:0};
   renderRegEmailVerify(prefix);
   toast('Email verified');
@@ -2601,9 +2605,16 @@ async function createFund(name,feePct){
   if(!name||name.trim().length<3)return toast('Enter a fund name (at least 3 characters)');
   feePct=parseFloat(feePct);
   if(isNaN(feePct)||feePct<0||feePct>MAX_FUND_FEE_PCT)return toast('Performance fee must be between 0 and '+MAX_FUND_FEE_PCT+'%');
-  const rec={id:uid(),manager_id:u.id,manager_name:u.name,name:name.trim(),units_outstanding:0,cash:0,holdings:{},shorts:{},
-    fee_pct:Math.round(feePct*100)/100,status:'active',created_at:new Date().toISOString(),ts:ts()};
-  await sb.post('jex_funds',rec);DB.funds.push(rec);
+  // Runs server-side (rpc_create_fund), which always initializes
+  // cash/units_outstanding/holdings/shorts to zero/empty itself -- a raw
+  // POST here used to let anyone create a fund with an arbitrary
+  // fabricated starting cash balance, then spend it on real shares via
+  // the legitimate rpc_fund_buy, crediting real money to a real company
+  // owner out of nothing.
+  let rec;
+  try{rec=await sb.rpc('rpc_create_fund',{p_name:name.trim(),p_fee_pct:feePct});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.funds.push(rec);
   await logActivity('fund_create',u.name+' launched a new fund: '+rec.name+' ('+rec.fee_pct+'% performance fee)',{userId:u.id,userName:u.name});
   toast('Fund launched');UI.fundPage=rec.id;render();
 }
