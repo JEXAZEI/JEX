@@ -627,12 +627,11 @@ async function doRestoreSnapshot(activityId){
   // Restoring cash/holdings/shorts/price/shares_avail runs server-side
   // (rpc_admin_restore_snapshot) -- the client can no longer PATCH those
   // columns directly for every user/company in the snapshot at once.
+  // Clearing active orders and stop-loss now happens inside the same RPC
+  // transaction above instead of two separate direct client DELETEs.
   try{await sb.rpc('rpc_admin_restore_snapshot',{p_activity_id:activityId});}
   catch(e){return toast(rpcErrorMessage(e));}
-  // Clear active orders and stop-loss
-  await sb.del('jex_limit_orders',"status=in.(open,after_hours)");
   DB.limitOrders=DB.limitOrders.filter(o=>o.status!=='open'&&o.status!=='after_hours');
-  await sb.del('jex_stop_loss',"status=eq.active");
   DB.stopLossOrders=[];
   await logActivity('snapshot','Snapshot restored: '+snap.label,{userId:cu()?.id,userName:cu()?.name});
   await loadAll();
@@ -703,11 +702,15 @@ async function deleteClassroom(id){
   if(!isAdmin(cu()))return toast('Admin access required');
   const affected=DB.users.filter(u=>u.classroom_id===id);
   if(!confirm('Delete this classroom?'+(affected.length?' '+affected.length+' assigned user(s) will become unassigned.':'')))return;
-  await sb.del('jex_classrooms','id=eq.'+id);
-  await Promise.all(affected.map(u=>sb.patch('jex_users','id=eq.'+u.id,{classroom_id:null})));
+  // Runs server-side (rpc_admin_delete_classroom) -- deletes the classroom
+  // and unassigns every affected user in one atomic transaction instead of
+  // two separate direct client writes.
+  let r;
+  try{r=await sb.rpc('rpc_admin_delete_classroom',{p_id:id});}
+  catch(e){return toast(rpcErrorMessage(e));}
   affected.forEach(u=>u.classroom_id=null);
   DB.classrooms=DB.classrooms.filter(c=>c.id!==id);
-  toast('Classroom deleted'+(affected.length?' — '+affected.length+' user(s) unassigned':''));render();
+  toast('Classroom deleted'+(r.affected_users?' — '+r.affected_users+' user(s) unassigned':''));render();
 }
 function getClassroomName(id){
   if(!id)return null;
@@ -1171,7 +1174,15 @@ async function approveReg(id,startCash){
 
   toast(r.name+' approved with '+fmt(startCash));render();
 }
-async function rejectReg(id){const r=DB.pending.find(x=>x.id===id);await sb.del('jex_pending','id=eq.'+id);DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');render();}
+async function rejectReg(id){
+  const r=DB.pending.find(x=>x.id===id);
+  // Runs server-side (rpc_admin_reject_registration) -- this function had
+  // NO check at all before, client-side or otherwise, only being reachable
+  // from an admin-only UI.
+  try{await sb.rpc('rpc_admin_reject_registration',{p_pending_id:id});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.pending=DB.pending.filter(x=>x.id!==id);toast((r?.name||'Registration')+' rejected');render();
+}
 function switchLoginTab(role){UI.loginTab=role;UI.loginError=null;render();}
 function finishLogin(u){
   UI.userId=u.id;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'apply':'market';UI.loginView='select';UI.loginError=null;UI.loginUsername='';
@@ -1418,7 +1429,11 @@ async function deleteNews(id){
   const targetCo=getCo(n0.ticker);
   if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can delete its news');
   if(!confirm('Delete this news post?'))return;
-  await sb.del('jex_news','id=eq.'+id);
+  // Runs server-side (rpc_delete_news), re-checking the same owner-or-
+  // founder rule above -- canManageCompany() was client-side only, so a
+  // raw DELETE on jex_news could remove any company's news post.
+  try{await sb.rpc('rpc_delete_news',{p_news_id:id});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.news=DB.news.filter(n=>n.id!==id);
   toast('News deleted');render();
 }
@@ -1451,7 +1466,10 @@ async function postAnnouncement(title,body,level){
 }
 async function deleteAnnouncement(id){
   if(!confirm('Delete this announcement?'))return;
-  await sb.del('jex_announcements','id=eq.'+id);
+  // Runs server-side (rpc_admin_delete_announcement) -- this function had
+  // NO check at all before, client-side or otherwise.
+  try{await sb.rpc('rpc_admin_delete_announcement',{p_id:id});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.announcements=DB.announcements.filter(a=>a.id!==id);
   toast('Announcement deleted');render();
 }
@@ -1957,7 +1975,11 @@ async function addPriceAlert(ticker,targetPrice,direction){
 async function deletePriceAlert(id){
   const a0=DB.priceAlerts.find(x=>x.id===id);
   if(!a0||a0.user_id!==cu()?.id)return toast('You can only remove your own price alerts');
-  await sb.del('jex_price_alerts','id=eq.'+id);
+  // Runs server-side (rpc_delete_price_alert), re-checking the same
+  // ownership rule above -- it was client-side only, so a raw DELETE on
+  // jex_price_alerts could remove any user's alert.
+  try{await sb.rpc('rpc_delete_price_alert',{p_alert_id:id});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.priceAlerts=DB.priceAlerts.filter(a=>a.id!==id);
   toast('Alert removed');render();
 }
@@ -2142,69 +2164,22 @@ async function resetExchange(){
 
   toast('Resetting... please wait');
   try{
-    // Step 1: Wipe all transactional tables in parallel
-    await Promise.all([
-      sb.del('jex_trades','id=gt.0'),
-      sb.del('jex_dividends','id=neq.x'),
-      sb.del('jex_buybacks','id=neq.x'),
-      sb.del('jex_limit_orders','id=neq.x'),
-      sb.del('jex_stop_loss','id=neq.x'),
-      sb.del('jex_notifications','id=neq.x'),
-      sb.del('jex_halts','ticker=neq.x'),
-      sb.del('jex_activity','id=neq.x'),
-      sb.del('jex_news','id=neq.x'),
-      sb.del('jex_announcements','id=neq.x'),
-      sb.del('jex_minutes','id=neq.x'),
-      sb.del('jex_flags','id=neq.x'),
-      sb.del('jex_pending','id=neq.x'),
-      sb.del('jex_bug_reports','id=neq.x'),
-      sb.del('jex_email_verifications','id=neq.x'),
-      sb.del('jex_funds','id=neq.x'),
-      sb.del('jex_contact_messages','id=neq.x'),
-      sb.del('jex_index_history','id=neq.x'),
-    ]);
-    // Step 2: Wipe IPO/dilution/share class related tables
-    await Promise.all([
-      sb.del('jex_ipo_applications','id=neq.x'),
-      sb.del('jex_dilution_applications','id=neq.x'),
-      sb.del('jex_share_classes','id=neq.x'),
-      sb.del('jex_class_applications','id=neq.x'),
-      sb.del('jex_founder_allocations','id=neq.x'),
-      sb.del('jex_company_members','id=neq.x'),
-      sb.del('jex_price_adjustments','id=neq.x'),
-      sb.del('jex_price_alerts','id=neq.x'),
-      sb.del('jex_nw_history','id=neq.x'),
-      sb.del('jex_dividend_approvals','id=neq.x'),
-    ]);
-    // Step 3: Wipe votes (cascades to ballots automatically)
-    await sb.del('jex_votes','id=neq.x');
-    // Step 4: Wipe companies
-    await sb.del('jex_companies','id=neq.x');
-    // Step 5: Delete ALL non-admin users (students and companies)
-    await sb.del('jex_users','role=in.(student,company)');
-    // Step 5b: Wipe classrooms (after users/pending are gone, since both can
-    // reference a classroom_id)
-    await sb.del('jex_classrooms','id=neq.x');
-    // Step 6: Reset officer cash to 0 (admins keep their accounts but not cash).
-    // Runs server-side (rpc_admin_reset_officer_cash), same admin-role check
-    // as everywhere else -- resetExchange's isAdmin() gate above is
-    // client-side only, same as this whole function's many direct DELETEs
-    // (a separate, much larger finding: table-level DELETE grants on nearly
-    // every jex_* table are just as wide open as the UPDATE grants this
-    // migration closes, and this function relies on that for every step but
-    // this one -- flagged, not fixed, here).
-    await sb.rpc('rpc_admin_reset_officer_cash',{});
-    // Step 7: Reset session to clean defaults
-    await sb.patch('jex_session','id=eq.1',{
-      status:'closed',label:'Session closed',
-      ends_at:null,scheduled_open:null,scheduled_close:null,
-      sheets_url:null,session_open_prices:{},
-      circuit_breaker_pct:20,price_band_pct:30,
-      earnings_surprise_pct:10,order_rate_limit:10,
-      budget_warning_threshold:500,dividend_approval_threshold:1000,
-      starting_cash:10000
-    });
-    // Step 8: Clear local DB state entirely
+    // The entire wipe (every table below, officer cash reset, session
+    // reset) now runs server-side in one transaction (rpc_admin_full_reset)
+    // instead of ~28 separate direct client DELETEs -- those relied on
+    // table-level DELETE grants that were just as wide open as the UPDATE
+    // grants final_revoke_migration.sql closed, for every table:
+    // jex_trades, jex_dividends, jex_buybacks, jex_limit_orders,
+    // jex_stop_loss, jex_notifications, jex_halts, jex_activity, jex_news,
+    // jex_announcements, jex_minutes, jex_flags, jex_pending,
+    // jex_bug_reports, jex_email_verifications, jex_funds,
+    // jex_contact_messages, jex_index_history, jex_ipo_applications,
+    // jex_dilution_applications, jex_share_classes, jex_class_applications,
+    // jex_founder_allocations, jex_company_members, jex_price_adjustments,
+    // jex_price_alerts, jex_nw_history, jex_dividend_approvals, jex_votes,
+    // jex_vote_ballots, jex_companies, jex_users, jex_classrooms.
+    await sb.rpc('rpc_admin_full_reset',{});
+    // Clear local DB state entirely
     DB.users=DB.users.filter(u=>adminRoles.includes(u.role));
     DB.users.forEach(u=>{u.cash=0;u.holdings={};u.shorts={};u.watchlist=[];});
     DB.companies=[];DB.trades=[];DB.dividends=[];DB.buybacks=[];
@@ -2232,17 +2207,24 @@ async function resetExchange(){
 async function haltStock(ticker,reason,systemTriggered=false){
   if(!systemTriggered&&!isAdmin(cu()))return toast('Admin access required');
   if(!ticker)return toast('Select a ticker');
-  if(!reason||reason.trim().length<3)return toast('Enter a reason');
+  if(!systemTriggered&&(!reason||reason.trim().length<3))return toast('Enter a reason');
   if(isHalted(ticker))return toast(ticker+' is already halted');
   const u=cu();
-  const rec={ticker,reason:reason.trim(),halted_by:systemTriggered?'System (Circuit Breaker)':u.name,ts:ts()};
-  await sb.post('jex_halts',rec);
+  // Runs server-side (rpc_admin_halt_stock) -- the systemTriggered path
+  // used to just skip the admin check client-side, so any account could
+  // call haltStock(ticker,'fake reason',true) directly and halt anything.
+  // The RPC re-validates the circuit-breaker condition itself instead of
+  // trusting this boolean.
+  let r;
+  try{r=await sb.rpc('rpc_admin_halt_stock',{p_ticker:ticker,p_reason:reason||null,p_system_triggered:!!systemTriggered});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  const rec=r.halt;
   DB.halts.push(rec);
-  await logActivity('halt',ticker+' trading halted — '+reason.trim(),{ticker,userId:u?.id,userName:systemTriggered?'System (Circuit Breaker)':u.name});
+  await logActivity('halt',ticker+' trading halted — '+rec.reason,{ticker,userId:u?.id,userName:rec.halted_by});
   // Notify all students who hold this stock
   const haltedHolderIds=DB.users.filter(hu=>hu.role==='student'&&(holdings(hu)[ticker]||0)>0).map(hu=>hu.id);
-  await pushNotificationToHolders(ticker,'halt','⚠️ Trading halted on '+ticker+': '+reason.trim());
-  await pushNotificationToAll('halt','⚠️ '+ticker+' trading has been halted: '+reason.trim(),haltedHolderIds);
+  await pushNotificationToHolders(ticker,'halt','⚠️ Trading halted on '+ticker+': '+rec.reason);
+  await pushNotificationToAll('halt','⚠️ '+ticker+' trading has been halted: '+rec.reason,haltedHolderIds);
   toast(ticker+' halted');render();
 }
 async function resumeStock(ticker,systemTriggered=false){
@@ -2252,7 +2234,12 @@ async function resumeStock(ticker,systemTriggered=false){
     if(u.role==='compliance_officer')return toast('Only Chairman or President can resume a halted stock');
     if(!confirm('Resume trading on '+ticker+'?'))return;
   }
-  await sb.del('jex_halts','ticker=eq.'+ticker);
+  // Runs server-side (rpc_admin_resume_stock) -- same systemTriggered gap
+  // as haltStock above: the RPC requires the halt to actually be a
+  // circuit-breaker halt with at least 5 real minutes elapsed before
+  // honoring a systemTriggered auto-resume, instead of trusting the flag.
+  try{await sb.rpc('rpc_admin_resume_stock',{p_ticker:ticker,p_system_triggered:!!systemTriggered});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.halts=DB.halts.filter(h=>h.ticker!==ticker);
   await logActivity('resume',ticker+' trading resumed',{ticker,userId:u?.id,userName:systemTriggered?'System (Circuit Breaker)':u.name});
   await pushNotificationToAll('resume','✅ '+ticker+' trading has resumed');
@@ -2847,7 +2834,12 @@ async function removeUser(uid2){
   }
   if(['secretary','treasurer','compliance_officer'].includes(u.role))return toast('Officer accounts cannot be removed');
   if(!confirm('Remove '+u.name+'? This cannot be undone.'))return;
-  await sb.del('jex_users','id=eq.'+uid2);
+  // Runs server-side (rpc_admin_remove_user), re-checking the same
+  // officer-protection and Chairman-only rules above -- those were
+  // client-side only before, so a raw DELETE on jex_users could remove ANY
+  // account, including a Chairman's.
+  try{await sb.rpc('rpc_admin_remove_user',{p_user_id:uid2});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.users=DB.users.filter(x=>x.id!==uid2);
   DB.dividends.forEach(d=>{d.payouts=(d.payouts||[]).filter(p=>p.userId!==uid2);});
   toast(u.name+' removed');render();
@@ -2858,7 +2850,11 @@ async function removeCompany(uid2){
   const listedCo=DB.companies.find(c=>c.owner_id===uid2);
   if(!confirm('Remove '+u.name+'?'+(listedCo?'\n\nListed stock '+listedCo.ticker+' will also be delisted.':'')+'\n\nThis cannot be undone.'))return;
   if(listedCo)await delistCompany(listedCo.ticker,true);
-  await sb.del('jex_users','id=eq.'+uid2);
+  // Same rpc_admin_remove_user as removeUser() above -- a company account's
+  // role falls through its officer/chairman branches unaffected, matching
+  // this function's original plain-admin-only check exactly.
+  try{await sb.rpc('rpc_admin_remove_user',{p_user_id:uid2});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.users=DB.users.filter(x=>x.id!==uid2);
   DB.ipoApps=DB.ipoApps.filter(a=>a.user_id!==uid2);
   DB.dilApps=DB.dilApps.filter(d=>d.user_id!==uid2);
@@ -2873,20 +2869,19 @@ async function removeShareClass(ticker){
     ?'Remove Class '+meta.class+' classification from '+ticker+'? This strips the class metadata but keeps the stock listed and trading. This cannot be undone.'
     :'Remove share class '+ticker+' (Class '+(meta?.class||'?')+')? This will delist the stock and remove all class metadata. This cannot be undone.';
   if(!confirm(msg))return;
-  // Remove class metadata
-  await sb.del('jex_share_classes','ticker=eq.'+ticker);
+  // Runs server-side (rpc_admin_remove_share_class) -- deletes the class
+  // metadata, and (if it's a new class rather than a conversion) the
+  // trading entry, dilution applications, and news, plus any pending class
+  // applications, all in one atomic transaction instead of up to 4
+  // separate direct client DELETEs.
+  try{await sb.rpc('rpc_admin_remove_share_class',{p_ticker:ticker});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.shareClasses=DB.shareClasses.filter(c=>c.ticker!==ticker);
-  // If it's a new class (not a conversion), also delist the trading entry
   if(!isConversion&&co){
-    await sb.del('jex_companies','ticker=eq.'+ticker);
-    await sb.del('jex_dilution_applications','ticker=eq.'+ticker);
-    await sb.del('jex_news','ticker=eq.'+ticker);
     DB.companies=DB.companies.filter(c=>c.ticker!==ticker);
     DB.dilApps=DB.dilApps.filter(d=>d.ticker!==ticker);
     DB.news=DB.news.filter(n=>n.ticker!==ticker);
   }
-  // Remove any pending class applications for this ticker
-  await sb.del('jex_class_applications','proposed_ticker=eq.'+ticker);
   DB.classApps=DB.classApps.filter(a=>a.proposed_ticker!==ticker);
   await logActivity('class_removed',(isConversion?'Class '+meta.class+' stripped from':'Share class '+ticker+' removed from')+' '+meta?.company_name,{ticker});
   toast(isConversion?ticker+' class stripped — stock remains listed':ticker+' class removed and delisted');
@@ -3246,8 +3241,11 @@ async function deleteVote(voteId){
   const targetCo=getCo(targetV.parent_ticker);
   if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can delete its vote');
   if(!confirm('Delete this vote and all ballots?'))return;
-  await sb.del('jex_votes','id=eq.'+voteId);
-  await sb.del('jex_vote_ballots','vote_id=eq.'+voteId);
+  // Runs server-side (rpc_delete_vote), re-checking the same owner-or-
+  // founder rule above -- canManageCompany() was client-side only, so a
+  // raw DELETE on jex_votes could remove any company's vote.
+  try{await sb.rpc('rpc_delete_vote',{p_vote_id:voteId});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.votes=DB.votes.filter(x=>x.id!==voteId);
   DB.ballots=DB.ballots.filter(b=>b.vote_id!==voteId);
   toast('Vote deleted');render();
@@ -6240,7 +6238,10 @@ async function postMinutes(title,body){
 }
 async function deleteMinutes(id){
   if(!confirm('Delete these minutes?'))return;
-  await sb.del('jex_minutes','id=eq.'+id);
+  // Runs server-side (rpc_admin_delete_minutes) -- this function had NO
+  // check at all before, client-side or otherwise.
+  try{await sb.rpc('rpc_admin_delete_minutes',{p_id:id});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.minutes=DB.minutes.filter(m=>m.id!==id);
   toast('Minutes deleted');render();
 }
