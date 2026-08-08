@@ -245,7 +245,10 @@ let charts={},sessionTimer=null;
 // an in-app UI.navTab switch rendered by getPageContent(). renderNav()
 // links a routed page with a real <a href>; every other tab stays an
 // onclick="setTab(...)" button. Grows one entry at a time as pages convert.
-const PAGE_ROUTES=new Set(['settings','admin','exchange','leaderboard','trades','apply','mystock','news','notifications']);
+const PAGE_ROUTES=new Set(['settings','admin','exchange','leaderboard','trades','apply','mystock','news','notifications','funds','orders','portfolio','market']);
+// market has no market.html -- index.html IS the market page (old root
+// bookmarks/links keep working), so its route target is the root file.
+const pageHref=k=>k==='market'?'index.html':k+'.html';
 
 async function loadAll(){
   // ── Phase 1: critical data needed to render login ──────
@@ -3713,7 +3716,7 @@ function renderNav(){
   else if(u.role==='company')tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['funds','Funds'],['news','News'],['apply','IPO'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   else tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['funds','Funds'],['leaderboard','Leaderboard'],['orders','Orders'+(()=>{if(!UI.userId)return'';const u=DB.users.find(x=>x.id===UI.userId);if(!u)return'';const open=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='open').length;const ah=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='after_hours').length;const sl=(DB.stopLossOrders||[]).filter(s=>s.user_id===u.id&&s.status==='active').length;const tot=open+ah+sl;return tot?' <span class="badge b-amber" style="font-size:10px">'+tot+'</span>':''})()],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   return `<div class="nav">${tabs.map(([k,v])=>PAGE_ROUTES.has(k)
-    ?`<a class="nav-btn ${UI.navTab===k?'active':''}" href="${k}.html">${v}</a>`
+    ?`<a class="nav-btn ${UI.navTab===k?'active':''}" href="${pageHref(k)}">${v}</a>`
     :`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
 }
 
@@ -6589,11 +6592,11 @@ function render(){
   const _isMobileStudent=_cu&&(_cu.role==='student'||_cu.role==='company')&&window.innerWidth<=640;
   const _unread=myUnreadCount();
   const _bnav=_isMobileStudent?`<div class="mobile-bottom-nav">
-    <button class="mbn-btn ${UI.navTab==='market'?'active':''}" onclick="setTab('market')"><span class="mbn-icon">📈</span>Market</button>
-    <button class="mbn-btn ${UI.navTab==='exchange'?'active':''}" onclick="setTab('exchange')"><span class="mbn-icon">🏛</span>Exchange</button>
-    <button class="mbn-btn ${UI.navTab==='portfolio'?'active':''}" onclick="setTab('portfolio')"><span class="mbn-icon">💼</span>Portfolio</button>
-    <button class="mbn-btn ${UI.navTab==='orders'?'active':''}" onclick="setTab('orders')"><span class="mbn-icon">📋</span>Orders</button>
-    <button class="mbn-btn ${UI.navTab==='notifications'?'active':''}" onclick="setTab('notifications')"><span class="mbn-icon">🔔</span><span>${_unread?'<span style="color:var(--red)">'+_unread+'</span>':'Alerts'}</span></button>
+    <a class="mbn-btn ${UI.navTab==='market'?'active':''}" href="${pageHref('market')}"><span class="mbn-icon">📈</span>Market</a>
+    <a class="mbn-btn ${UI.navTab==='exchange'?'active':''}" href="${pageHref('exchange')}"><span class="mbn-icon">🏛</span>Exchange</a>
+    <a class="mbn-btn ${UI.navTab==='portfolio'?'active':''}" href="${pageHref('portfolio')}"><span class="mbn-icon">💼</span>Portfolio</a>
+    <a class="mbn-btn ${UI.navTab==='orders'?'active':''}" href="${pageHref('orders')}"><span class="mbn-icon">📋</span>Orders</a>
+    <a class="mbn-btn ${UI.navTab==='notifications'?'active':''}" href="${pageHref('notifications')}"><span class="mbn-icon">🔔</span><span>${_unread?'<span style="color:var(--red)">'+_unread+'</span>':'Alerts'}</span></a>
   </div>`:'';
   app.innerHTML=`${renderTopbar()}${renderBanner()}${renderNav()}<div class="content${_isMobileStudent?' content-bnav':''}">${getPageContent()}${renderLegalFooter()}</div>${_bnav}`;
   if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
