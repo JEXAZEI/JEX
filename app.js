@@ -104,7 +104,7 @@ async function hashPw(pw){
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
-  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],contactMessages:[],indexHistory:[],
+  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],contactMessages:[],indexHistory:[],snapshots:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
     weekly_schedule:{sun:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},mon:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},tue:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},wed:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},thu:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},fri:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},sat:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}}},
     weekly_active:false,weekly_override:false}};
@@ -273,7 +273,7 @@ async function loadAll(){
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
     activity,shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds,contactMessages,indexHistory]=await Promise.all([
+    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds,contactMessages,indexHistory,snapshots]=await Promise.all([
     sb.get('jex_pending','order=created_at.asc&select='+JEX_PENDING_SAFE_SELECT),
     sb.get('jex_news','order=created_at.desc&limit=50'),
     sb.get('jex_ipo_applications','order=created_at.asc'),
@@ -302,12 +302,13 @@ async function loadAll(){
     sb.get('jex_funds','order=created_at.asc'),
     sb.get('jex_contact_messages','order=created_at.desc&limit=100'),
     sb.get('jex_index_history','order=created_at.asc&limit=500'),
+    sb.get('jex_snapshots','order=created_at.desc&limit=50'),
   ]);
   Object.assign(DB,{pending,news,ipoApps,dilApps,
     trades,dividends,buybacks,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds,contactMessages,indexHistory});
+    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds,contactMessages,indexHistory,snapshots});
   render(); // re-render with full data
 }
 
@@ -397,10 +398,13 @@ function computeJXI(){
 async function snapshotJXI(){
   const idx=computeJXI();
   if(!idx.constituents.length)return;
+  // Runs server-side (rpc_snapshot_jxi), which recomputes the index value
+  // itself from real company prices -- a raw POST here used to let
+  // anyone insert an arbitrary fabricated value, distorting the market-
+  // index chart shown on the market page to every user.
   try{
-    const rec={id:uid(),value:idx.value,ts:isoNow()};
-    await sb.post('jex_index_history',rec);
-    DB.indexHistory.push(rec);
+    const rec=await sb.rpc('rpc_snapshot_jxi',{});
+    if(rec)DB.indexHistory.push(rec);
   }catch(e){console.warn('JXI snapshot failed:',e);}
 }
 function jxiPriceHistory(){return(DB.indexHistory||[]).map(h=>({p:h.value,t:h.ts}));}
@@ -498,7 +502,19 @@ function destroyCharts(){Object.keys(charts).forEach(k=>destroyChart(k));charts=
 const pad=n=>n<10?'0'+n:String(n);
 function getAZTime(){return new Date(new Date().toLocaleString('en-US',{timeZone:'America/Phoenix'}));}
 function fmtAZTime(d){return d.toLocaleString('en-US',{timeZone:'America/Phoenix',weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true})+' MST';}
-async function saveSession(data){Object.assign(DB.session,data);await sb.patch('jex_session','id=eq.1',data);}
+// Runs server-side (rpc_admin_save_session) -- saveSession() itself had no
+// auth check at all, and neither did most of its callers (saveBudgetThreshold,
+// saveDivThreshold, savePriceBand, saveCBPct, saveEmailJSConfig, startTimer,
+// scheduleSession, clearSchedule, saveWeeklySchedule -- not even client-side).
+// The RPC requires Chairman/President, matching setSession's existing check
+// (the only caller that already had one) and the fact that the entire Session
+// admin tab these all live in is only ever rendered for those two roles.
+async function saveSession(data){
+  let r;
+  try{r=await sb.rpc('rpc_admin_save_session',{p_data:data});}
+  catch(e){toast(rpcErrorMessage(e));throw e;}
+  Object.assign(DB.session,r.session);
+}
 function adjStockForm(){
   adjustStockPrice(
     document.getElementById('adj-ticker')?.value,
@@ -524,9 +540,12 @@ async function reviewDivApproval(id,approve){
   const da=DB.divApprovals.find(x=>x.id===id);if(!da)return;
   const u=cu();
   if(!approve){
-    // Rejecting doesn't move money -- stays a simple claimed status patch.
-    const claimed=await sb.patch('jex_dividend_approvals','id=eq.'+id+'&status=eq.pending',{status:'rejected',reviewed_by:u.name});
-    if(!claimed.length)return toast('This request was already reviewed');
+    // Rejecting doesn't move money, but runs server-side now too
+    // (rpc_reject_dividend_approval) -- this had NO check at all before.
+    let r;
+    try{r=await sb.rpc('rpc_reject_dividend_approval',{p_id:id});}
+    catch(e){return toast(rpcErrorMessage(e));}
+    if(!r.rejected)return toast('This request was already reviewed');
     da.status='rejected';da.approved_by=u.name;
     await pushNotification(da.requested_by,'div_approval','❌ Your dividend request for '+da.company_name+' was rejected by the Treasurer.',da.ticker);
     toast('Dividend rejected');render();return;
@@ -596,40 +615,31 @@ async function saveSnapshot(label){
   toast('✓ Snapshot saved: '+label.trim());render();
 }
 async function doSaveSnapshot(label){
-  const snap={
-    id:uid(),
-    label,
-    ts:ts(),
-    created_by:cu()?.name||'Admin',
-    data:{
-      users:DB.users.map(u=>({id:u.id,name:u.name,role:u.role,cash:u.cash,holdings:u.holdings,shorts:u.shorts})),
-      companies:DB.companies.map(c=>({id:c.id,ticker:c.ticker,name:c.name,price:c.price,shares:c.shares,shares_avail:c.shares_avail,status:c.status,owner_id:c.owner_id})),
-      session:{status:DB.session.status,starting_cash:DB.session.starting_cash},
-    }
-  };
-  // Store in jex_activity with type='snapshot' and description as JSON
-  const rec={id:snap.id,type:'snapshot',description:JSON.stringify({label:snap.label,created_by:snap.created_by,data:snap.data}),amount:null,ts:snap.ts};
-  await sb.post('jex_activity',rec);
-  DB.activity.unshift(rec);
-  return snap.id;
+  // The snapshot's contents (users/companies/session state) are built
+  // entirely server-side from the RPC's own reads -- the client only
+  // supplies the label. This closes the forgery path where a client could
+  // previously POST an arbitrary data payload (see jex_snapshots table).
+  let row;
+  try{row=await sb.rpc('rpc_admin_save_snapshot',{p_label:label});}
+  catch(e){toast(rpcErrorMessage(e));return null;}
+  DB.snapshots.unshift(row);
+  return row.id;
 }
-async function restoreSnapshot(activityId){
+async function restoreSnapshot(snapshotId){
   if(!isAdmin(cu()))return toast('Admin access required');
   if(!confirm('Restore this snapshot? All current holdings, prices, and cash will be overwritten.'))return;
-  await doRestoreSnapshot(activityId);
+  await doRestoreSnapshot(snapshotId);
 }
-async function doRestoreSnapshot(activityId){
+async function doRestoreSnapshot(snapshotId){
   if(!isAdmin(cu()))return toast('Admin access required');
-  const rec=DB.activity.find(a=>a.id===activityId);if(!rec)return toast('Snapshot not found');
-  let snap;
-  try{snap=JSON.parse(rec.description);}catch{return toast('Snapshot data is corrupted');}
+  const snap=DB.snapshots.find(s=>s.id===snapshotId);if(!snap)return toast('Snapshot not found');
   toast('Restoring snapshot...');
   // Restoring cash/holdings/shorts/price/shares_avail runs server-side
-  // (rpc_admin_restore_snapshot) -- the client can no longer PATCH those
-  // columns directly for every user/company in the snapshot at once.
-  // Clearing active orders and stop-loss now happens inside the same RPC
-  // transaction above instead of two separate direct client DELETEs.
-  try{await sb.rpc('rpc_admin_restore_snapshot',{p_activity_id:activityId});}
+  // (rpc_admin_restore_snapshot), reading the snapshot's data from
+  // jex_snapshots (RPC-written only) instead of a client-writable row.
+  // Clearing active orders and stop-loss happens inside the same RPC
+  // transaction instead of two separate direct client DELETEs.
+  try{await sb.rpc('rpc_admin_restore_snapshot',{p_activity_id:snapshotId});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.limitOrders=DB.limitOrders.filter(o=>o.status!=='open'&&o.status!=='after_hours');
   DB.stopLossOrders=[];
@@ -638,10 +648,7 @@ async function doRestoreSnapshot(activityId){
   toast('✓ Snapshot restored: '+snap.label);
 }
 function renderSnapshotTab(){
-  const snaps=DB.activity.filter(a=>a.type==='snapshot').map(a=>{
-    try{const d=JSON.parse(a.description);return{id:a.id,label:d.label,ts:a.ts,created_by:d.created_by};}
-    catch{return null;}
-  }).filter(Boolean);
+  const snaps=DB.snapshots;
   return`<div class="card"><div class="section-title">Save snapshot</div>
     <div class="ibox ibox-blue">Saves current prices, holdings, and cash for all users. Restore any snapshot to roll back the exchange state — useful for practice rounds.</div>
     <div class="row" style="align-items:flex-end">
@@ -652,8 +659,8 @@ function renderSnapshotTab(){
   ${snaps.length?`<div class="card"><div class="section-title">Saved snapshots (${snaps.length})</div>
     <table><thead><tr><th>Name</th><th>Created by</th><th>Time</th><th></th></tr></thead>
     <tbody>${snaps.map(s=>`<tr>
-      <td style="font-weight:500">${s.label}</td>
-      <td style="color:var(--text2)">${s.created_by}</td>
+      <td style="font-weight:500">${esc(s.label)}</td>
+      <td style="color:var(--text2)">${esc(s.created_by)}</td>
       <td style="color:var(--text2)">${s.ts}</td>
       <td><button class="btn btn-sm btn-warning" onclick="restoreSnapshot('${s.id}')">⏪ Restore</button></td>
     </tr>`).join('')}</tbody></table>
@@ -683,8 +690,12 @@ async function generateSessionRecap(u){
     '',
     'Next session: TBD',
   ].filter(Boolean).join('\n');
-  const rec={id:uid(),title:'Session recap — '+new Date().toLocaleDateString(),body:recapBody,type:'official_notice',author_id:u?.id,author_name:u?.name||'System',ts:ts()};
-  await sb.post('jex_minutes',rec);
+  const title='Session recap — '+new Date().toLocaleDateString();
+  // Runs server-side (rpc_post_session_recap) -- a raw POST to jex_minutes
+  // is no longer possible for anyone (see minutes_announcements_forgery_fix_migration.sql).
+  let rec;
+  try{rec=await sb.rpc('rpc_post_session_recap',{p_title:title,p_body:recapBody});}
+  catch(e){console.warn('Session recap post failed:',e);return;}
   DB.minutes=DB.minutes||[];
   DB.minutes.unshift(rec);
 }
@@ -722,15 +733,20 @@ async function reassignClassroom(){
   const rawId=get('reassign-uid')?.value;
   const cid=get('reassign-cid-select')?.value||null;
   if(!rawId)return toast('Select a user or company');
-  await sb.patch('jex_users','id=eq.'+rawId,{classroom_id:cid});
+  try{await sb.rpc('rpc_admin_reassign_classroom',{p_user_id:rawId,p_classroom_id:cid});}
+  catch(e){return toast(rpcErrorMessage(e));}
   const u=getUser(rawId);if(u)u.classroom_id=cid;
   toast('Reassigned to classroom: '+(cid||'unassigned'));
   render();
 }
 async function saveSheetsUrl(url){
   url=(url||'').trim();
+  // Runs server-side (rpc_admin_save_sheets_url) -- this had NO check at
+  // all before, and the URL controls where real student balance/activity
+  // data gets synced to.
+  try{await sb.rpc('rpc_admin_save_sheets_url',{p_url:url});}
+  catch(e){return toast(rpcErrorMessage(e));}
   SHEETS_URL=url||null;
-  await sb.patch('jex_session','id=eq.1',{sheets_url:url||null});
   DB.session.sheets_url=url||null;
   toast(url?'Google Sheets sync URL saved ✓':'Sheets sync URL cleared');
   render();
@@ -817,10 +833,14 @@ async function setSession(status){
   render();
 }
 async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null,weekly_active:false});sessionTimer=setInterval(tickTimer,500);render();}
-function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
+// Countdown display only -- purely local, no write. The actual "has it
+// expired, should it close" decision now belongs entirely to
+// rpc_session_tick() (see sessionAutoTick below), so a display that's
+// briefly stale for up to one 15s poll is the accepted trade-off for not
+// trusting this 500ms client timer to decide anything real anymore.
+function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0)return;const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
 async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
 async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();}
-function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('Trading session is now open!');});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended.');});}}
 // ── Weekly recurring schedule (different hours per day of week, repeats every week) ──
 const WEEKDAY_KEYS=['sun','mon','tue','wed','thu','fri','sat'];
 const WEEKDAY_LABELS={sun:'Sunday',mon:'Monday',tue:'Tuesday',wed:'Wednesday',thu:'Thursday',fri:'Friday',sat:'Saturday'};
@@ -838,27 +858,31 @@ function saveWeeklySchedule(){
   }
   saveSession({weekly_schedule:ws}).then(()=>{toast('Weekly schedule saved');render();});
 }
-function checkWeeklySchedule(){
-  const ws=DB.session.weekly_schedule;if(!ws)return;
-  const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();
-  const today=ws[WEEKDAY_KEYS[az.getDay()]];
-  const openMin=today?today.open.h*60+today.open.m:-1,closeMin=today?today.close.h*60+today.close.m:-1;
-  const inWindow=today&&today.enabled&&nowMin>=openMin&&nowMin<closeMin;
-  if(!inWindow){
-    if(DB.session.weekly_active&&DB.session.status==='open'){
-      saveSession({status:'closed',label:'Session closed',ends_at:null,weekly_active:false,weekly_override:false}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('🔴 Trading session closed (weekly schedule)');});
-    } else if(DB.session.weekly_override){
-      saveSession({weekly_override:false});
-    }
-    return;
+// Replaces checkSchedule()/checkWeeklySchedule() -- every connected
+// client still polls every 15s, but the actual decision (is a timer
+// expired, has a one-time or weekly window opened/closed) is now made
+// entirely server-side by rpc_session_tick(), which re-derives it from
+// jex_session's own stored fields and the real server clock rather than
+// trusting each client's local Date.now()/timezone math. This function
+// just applies whatever the server decided.
+async function sessionAutoTick(){
+  if(!UI.userId)return;
+  const wasOpen=DB.session.status==='open';
+  let r;
+  try{r=await sb.rpc('rpc_session_tick',{});}catch(e){return;}
+  if(!r.changed)return;
+  Object.assign(DB.session,r.session);
+  const nowOpen=DB.session.status==='open';
+  if(nowOpen&&!wasOpen){
+    sessionTimer=setInterval(tickTimer,500);
+    toast(DB.session.label.includes('weekly')?'🟢 Trading session opened (weekly schedule)':'Trading session is now open!');
+  } else if(!nowOpen&&wasOpen){
+    clearInterval(sessionTimer);sessionTimer=null;
+    toast(DB.session.label&&DB.session.label.includes('weekly')?'🔴 Trading session closed (weekly schedule)':'Session ended.');
   }
-  if(DB.session.weekly_override)return; // admin manually overrode this window — don't fight them
-  if(DB.session.status!=='open'){
-    const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;
-    saveSession({status:'open',label:'Open until '+pad(today.close.h)+':'+pad(today.close.m)+' MST (weekly schedule)',ends_at:Date.now()+msUntilEnd,weekly_active:true}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('🟢 Trading session opened (weekly schedule)');});
-  }
+  render();
 }
-setInterval(()=>{checkSchedule();checkWeeklySchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
+setInterval(()=>{sessionAutoTick();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
 
 // ── Auto-refresh: pull latest data every 20 seconds ──────
 let _lastRefresh=0;
@@ -965,7 +989,6 @@ function secQSelect(prefix){return `<select id="${prefix}-secq"><option value=""
 
 // ── Email verification (registration) ────────────────────
 const emailjsReady=()=>!!(DB.session.emailjs_service_id&&DB.session.emailjs_template_id&&DB.session.emailjs_public_key&&typeof emailjs!=='undefined');
-function genVerifyCode(){return String(Math.floor(100000+Math.random()*900000));}
 function openRegisterView(){UI.regVerify={reg:{status:'idle',email:'',resendAt:0},'reg-co':{status:'idle',email:'',resendAt:0}};UI.googleAuth=null;UI.loginView='register';render();}
 
 // ── Google Sign-In (real Supabase Auth) ───────────────────
@@ -1012,8 +1035,11 @@ async function checkGoogleSession(){
     if(UI.userId===existing.id)return;
     // Quietly backfill auth_uid for a legacy account the first time it signs in with
     // Google — costs nothing, and means one less account stuck on the old system.
+    // Runs server-side (rpc_link_own_auth_uid), which independently checks the
+    // caller's own live-session email (from the JWT, not client-supplied)
+    // against this row's stored email before linking.
     if(authUid&&!existing.auth_uid){
-      try{await updateUser(existing.id,{auth_uid:authUid});}catch(e){console.warn('auth_uid backfill failed:',e);}
+      try{await sb.rpc('rpc_link_own_auth_uid',{p_user_id:existing.id});existing.auth_uid=authUid;}catch(e){console.warn('auth_uid backfill failed:',e);}
     }
     UI.userId=existing.id;
     UI.navTab=isAdmin(existing)?'admin':existing.role==='company'?'mystock':'market';
@@ -1046,14 +1072,19 @@ async function sendRegVerificationCode(prefix){
   if(!validEmail(email))return toast('Enter a valid email first');
   if(!emailjsReady())return toast('Email verification is not available right now');
   const name=(get(prefix==='reg'?'reg-name':'reg-co-name')?.value||'').trim()||'there';
-  const code=genVerifyCode();
+  // Runs server-side (rpc_request_verification_code), which generates and
+  // stores the code itself -- a raw POST here used to let anyone insert
+  // their own self-chosen code for an email they don't own, "verifying"
+  // it without any real email round-trip. The code is only ever returned
+  // to this immediate caller, since it's needed here to embed in the
+  // EmailJS send just below.
   try{
-    await sb.post('jex_email_verifications',{id:uid(),email,code,used:false,expires_at:Date.now()+15*60000,created_at:new Date().toISOString()});
+    const r=await sb.rpc('rpc_request_verification_code',{p_email:email});
     emailjs.init({publicKey:DB.session.emailjs_public_key});
     await emailjs.send(DB.session.emailjs_service_id,DB.session.emailjs_template_id,{
       to_email:email,to_name:name,
       subject:'Your JEX verification code',
-      message:'Your JEX email verification code is '+code+'. It expires in 15 minutes.',
+      message:'Your JEX email verification code is '+r.code+'. It expires in 15 minutes.',
       ticker:'',app_url:window.location.origin+window.location.pathname
     });
   }catch(e){return toast('Failed to send verification code: '+(e.message||e));}
@@ -1066,14 +1097,14 @@ async function confirmRegVerificationCode(prefix){
   if(!state||state.status!=='sent')return;
   const code=(get(prefix+'-verify-code')?.value||'').trim();
   if(!/^\d{6}$/.test(code))return toast('Enter the 6-digit code from your email');
-  let rows;
-  try{
-    rows=await sb.get('jex_email_verifications','email=eq.'+encodeURIComponent(state.email)+'&code=eq.'+code+'&used=eq.false&order=created_at.desc&limit=1');
-  }catch(e){return toast('Verification failed, please try again');}
-  const row=rows&&rows[0];
-  if(!row)return toast('Incorrect or expired code');
-  if(Date.now()>row.expires_at)return toast('This code has expired — send a new one');
-  await sb.patch('jex_email_verifications','id=eq.'+row.id,{used:true});
+  // Runs server-side (rpc_confirm_verification_code), which checks the
+  // match itself and never returns the stored code -- a raw GET here used
+  // to let anyone read out any email's real verification code directly,
+  // completely defeating the point of email verification.
+  let ok;
+  try{ok=await sb.rpc('rpc_confirm_verification_code',{p_email:state.email,p_code:code});}
+  catch(e){return toast('Verification failed, please try again');}
+  if(!ok)return toast('Incorrect or expired code');
   UI.regVerify[prefix]={status:'verified',email:state.email,resendAt:0};
   renderRegEmailVerify(prefix);
   toast('Email verified');
@@ -1250,7 +1281,10 @@ async function loginByForm(){
         const signInRes=await supaAuth.auth.signInWithPassword({email:u.email,password:pw});
         if(!signInRes.error&&signInRes.data&&signInRes.data.session)authUid=signInRes.data.session.user.id;
       }
-      if(authUid)await updateUser(u.id,{auth_uid:authUid});
+      // Runs server-side (rpc_link_own_auth_uid) -- same JWT-email check as
+      // the Google backfill above, now backed by the fresh Supabase Auth
+      // session signUp/signInWithPassword just established for this email.
+      if(authUid){await sb.rpc('rpc_link_own_auth_uid',{p_user_id:u.id});u.auth_uid=authUid;}
     }catch(e){console.warn('legacy account auth migration failed:',e);}
   }
   return finishLogin(u);
@@ -1260,12 +1294,13 @@ async function changeEmail(uid2,newEmail,pw){
   const u=getUser(uid2);if(!u)return;
   if(!newEmail||!newEmail.includes('@'))return toast('Enter a valid email address');
   if(!pw)return toast('Enter your current password');
-  let okEm=false;
-  try{okEm=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:pw});}catch(e){okEm=false;}
-  if(!okEm)return toast('Incorrect password');
   const norm_email=newEmail.trim().toLowerCase();
-  if(DB.users.find(x=>x.id!==uid2&&x.email===norm_email))return toast('That email is already in use');
-  await updateUser(uid2,{email:norm_email});
+  // Runs server-side (rpc_change_email), re-verifying the password itself
+  // (same verify_legacy_password check, now authoritative instead of just
+  // gating a separate client-trusted write) and the email-uniqueness check.
+  try{await sb.rpc('rpc_change_email',{p_user_id:uid2,p_cur_pw:pw,p_new_email:norm_email});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.email=norm_email;
   toast('✓ Email updated to '+norm_email);render();
 }
 // For migrated (real Supabase Auth) accounts — identity is proven by the live signed-in
@@ -1274,30 +1309,30 @@ async function changeEmail(uid2,newEmail,pw){
 // the two never drift out of sync with each other.
 async function changeEmailSupa(uid2,newEmail){
   if(!supaAuth)return toast('Not available right now');
-  // Unlike the legacy changeEmail (whose current-password check is itself tied to
-  // uid2), identity here comes from the live session alone — so uid2 must be pinned
-  // to whoever that session actually belongs to, or a caller could pass someone
-  // else's id and overwrite THEIR jex_users.email while only re-authenticating their
-  // own real Auth account, leaving the victim's row pointing at an email their real
-  // credential no longer matches.
   if(!cu()||uid2!==cu().id)return toast('You can only change your own email');
-  if(['secretary','treasurer','compliance_officer'].includes(cu().role))return toast('This account cannot change its email');
   if(!newEmail||!newEmail.includes('@'))return toast('Enter a valid email address');
   const norm_email=newEmail.trim().toLowerCase();
-  if(DB.users.find(x=>x.id!==uid2&&x.email===norm_email))return toast('That email is already in use');
   try{
     const{error}=await supaAuth.auth.updateUser({email:norm_email},{emailRedirectTo:window.location.origin+window.location.pathname});
     if(error)return toast('Failed to update email: '+error.message);
   }catch(e){return toast('Failed to update email: '+(e.message||e));}
-  await updateUser(uid2,{email:norm_email});
+  // Runs server-side (rpc_change_email_supa) -- operates only on
+  // auth.uid()'s own row (no target id accepted at all), so a spoofed uid2
+  // can no longer overwrite someone else's jex_users.email.
+  try{await sb.rpc('rpc_change_email_supa',{p_new_email:norm_email});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  cu().email=norm_email;
   toast('✓ Email updated to '+norm_email);render();
 }
 async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;
-  let okPw=false;
-  try{okPw=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:cur});}catch(e){okPw=false;}
-  if(!okPw)return toast('Current password incorrect');
   if(!nw2||nw2.length<6)return toast('Minimum 6 characters required');if(nw2!==conf)return toast('Passwords do not match');
-  const h=await hashPw(nw2);await sb.patch('jex_users','id=eq.'+uid2,{password:h});toast('Password changed');render();}
+  // Runs server-side (rpc_change_password), re-verifying the current
+  // password itself instead of trusting this client-side check alone --
+  // jex_users.password was never column-revoked before this, so a raw
+  // PATCH could overwrite ANY row's actual credential.
+  try{await sb.rpc('rpc_change_password',{p_user_id:uid2,p_cur_pw:cur,p_new_pw:nw2});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  toast('Password changed');render();}
 // For migrated (real Supabase Auth) accounts — no stored local password to check
 // against, so identity is proven by the live signed-in session instead.
 async function changePwSupa(nw2,conf){
@@ -1319,7 +1354,11 @@ async function adminResetPw(uid2,pw){
   // while telling the officer it worked. Route those through a real reset email instead.
   if(u.auth_provider==='google'||u.auth_uid)return toast('This account uses real sign-in — use "Send password reset email" instead');
   if(!pw||pw.length<4)return toast('Min 4 characters');
-  const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+uid2,{password:h});toast(u.name+"'s password reset");render();
+  // Runs server-side (rpc_admin_reset_password), re-checking every rule
+  // above -- they were client-side only.
+  try{await sb.rpc('rpc_admin_reset_password',{p_user_id:uid2,p_new_pw:pw});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  toast(u.name+"'s password reset");render();
 }
 async function adminSendResetEmail(uid2){
   if(!isAdmin(cu()))return toast('Admin access required');
@@ -1335,7 +1374,9 @@ async function adminSendResetEmail(uid2){
 async function toggleEmailNotifications(enabled){
   const u=cu();if(!u)return;
   if(['secretary','treasurer','compliance_officer'].includes(u.role))return toast('Email notifications are not available for this account');
-  await updateUser(u.id,{email_notifications:enabled});
+  try{await sb.rpc('rpc_toggle_email_notifications',{p_enabled:!!enabled});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.email_notifications=!!enabled;
   toast(enabled?'Email notifications enabled':'Email notifications disabled');
   render();
 }
@@ -1344,7 +1385,9 @@ async function saveNotifEmail(){
   if(['secretary','treasurer','compliance_officer'].includes(u.role))return toast('Email notifications are not available for this account');
   const email=(get('notif-email')?.value||'').trim().toLowerCase();
   if(!email||!email.includes('@'))return toast('Enter a valid email address');
-  await updateUser(u.id,{notification_email:email});
+  try{await sb.rpc('rpc_save_notification_email',{p_email:email});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.notification_email=email;
   toast('✓ Notification email saved: '+email);render();
 }
 async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)return;
@@ -1359,7 +1402,16 @@ async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)retu
   }else{
     try{okSq=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:curPw});}catch(e){okSq=false;}
   }
-  if(!okSq)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');await sb.patch('jex_users','id=eq.'+uid2,{sec_q:newQ,sec_a:norm(newA)});u.sec_q=newQ;toast('Security question updated');render();}
+  if(!okSq)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');
+  // The actual write runs server-side (rpc_update_security_question), which
+  // re-verifies identity itself (current password for legacy accounts, an
+  // actual live Supabase Auth session for migrated ones) instead of
+  // trusting the client-side check above alone. Closes a real
+  // account-takeover path: sec_a (the answer "Forgot password" checks) was
+  // directly PATCH-able on ANY row with no verification at all before this.
+  try{await sb.rpc('rpc_update_security_question',{p_user_id:uid2,p_cur_pw:curPw,p_new_q:newQ,p_new_a:newA});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.sec_q=newQ;toast('Security question updated');render();}
 async function forgotStep1(email){
   const u=DB.users.find(u=>u.email&&norm(u.email)===norm(email)&&u.status==='approved');
   if(!u)return toast('No account found with that email');
@@ -1401,7 +1453,15 @@ async function forgotStep3(pw,conf){
     toast('Password reset');UI.loginView='select';UI.forgotUserId=null;UI.forgotAnswer=null;render();
     return;
   }
-  const fpH=await hashPw(pw);await sb.patch('jex_users','id=eq.'+u.id,{password:fpH});
+  // Runs server-side (rpc_reset_legacy_password), re-verifying the
+  // security answer itself -- same reasoning as reset_migrated_password
+  // above: this function is directly reachable, so it can't trust that
+  // forgotStep2's check already happened. The previous raw PATCH here had
+  // NO server-side check of any kind, making it callable with any
+  // UI.forgotUserId to reset ANY account's password outright.
+  let ok=false;
+  try{ok=await sb.rpc('rpc_reset_legacy_password',{p_user_id:u.id,p_answer:UI.forgotAnswer,p_new_pw:pw});}catch(e){ok=false;}
+  if(!ok)return toast('Could not reset password — start over from Forgot Password');
   toast('Password reset');UI.loginView='select';UI.forgotUserId=null;UI.forgotAnswer=null;render();
 }
 async function finishPasswordRecovery(pw,conf){
@@ -1425,8 +1485,13 @@ async function postNews(ticker,headline,body){
   if(!headline||headline.trim().length<3)return toast('Enter a headline');
   const co=getCo(ticker);if(!co)return;
   if(!canManageCompany(co))return toast('Only this company\'s owner or founders can post news for it');
-  const rec={id:uid(),ticker,company_name:co.name,headline:headline.trim(),body:(body||'').trim(),author_id:UI.userId,ts:ts()};
-  await sb.post('jex_news',rec);
+  // Runs server-side (rpc_post_news), re-checking the same owner-or-
+  // founder rule above -- it was client-side only, so a raw POST could
+  // fabricate market-moving "news" for any company, indistinguishable
+  // from a real company-posted headline.
+  let rec;
+  try{rec=await sb.rpc('rpc_post_news',{p_ticker:ticker,p_headline:headline.trim(),p_body:(body||'').trim()});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.news.unshift(rec);
   if(document.getElementById('news-notify')?.checked)await pushNotificationToHolders(ticker,'news','📰 '+co.name+': '+headline.trim());
   toast('News posted');UI.companyTab='news';render();
@@ -1465,8 +1530,13 @@ async function logActivity(type,description,extras={}){
 async function postAnnouncement(title,body,level){
   if(!title||title.trim().length<3)return toast('Enter a title');
   const u=cu();
-  const rec={id:uid(),title:title.trim(),body:(body||'').trim(),level:level||'info',author_id:u.id,author_name:u.name,ts:ts()};
-  await sb.post('jex_announcements',rec);
+  // Runs server-side (rpc_post_announcement) -- this function had NO role
+  // check at all before, not even client-side, so anyone who found it in
+  // devtools could plant a fake "urgent" banner announcement, the
+  // highest-visibility surface in the app (pinned at the top for every user).
+  let rec;
+  try{rec=await sb.rpc('rpc_post_announcement',{p_title:title.trim(),p_body:(body||'').trim(),p_level:level||'info'});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.announcements.unshift(rec);
   await logActivity('announcement','Announcement posted: '+title.trim(),{userId:u.id,userName:u.name});
   toast('Announcement posted');render();
@@ -1518,8 +1588,12 @@ async function respondToInvite(memberId,accept){
   if(m.student_id!==cu()?.id)return toast('This invitation is not addressed to you');
   if(!confirm(accept?'Accept this founder invitation?':'Decline this founder invitation?'))return;
 
-  // Update jex_company_members status
-  await sb.patch('jex_company_members','id=eq.'+memberId,{status:accept?'accepted':'declined'});
+  // Update jex_company_members status. Runs server-side
+  // (rpc_respond_to_invite), re-checking the same "addressed to you" rule
+  // above -- it was client-side only, so a raw PATCH could accept/decline
+  // any invitation on someone else's behalf.
+  try{await sb.rpc('rpc_respond_to_invite',{p_member_id:memberId,p_accept:!!accept});}
+  catch(e){return toast(rpcErrorMessage(e));}
   m.status=accept?'accepted':'declined';
 
   const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
@@ -1662,7 +1736,10 @@ async function removeFounder(memberId,name){
   const targetCo=DB.companies.find(c=>c.owner_id===m.company_user_id);
   if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can remove a founder');
   if(!confirm('Remove '+name+' as a founder? They will lose access to manage this company.'))return;
-  await sb.patch('jex_company_members','id=eq.'+memberId,{status:'removed'});
+  // Runs server-side (rpc_remove_founder), re-checking the same
+  // owner-or-founder rule above -- it was client-side only.
+  try{await sb.rpc('rpc_remove_founder',{p_member_id:memberId});}
+  catch(e){return toast(rpcErrorMessage(e));}
   m.status='removed';
   const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
   const u=cu();
@@ -1681,9 +1758,16 @@ async function sendFounderInvite(ownerId,studentId){
   const existing=DB.companyMembers.filter(m=>m.company_user_id===ownerId&&m.status!=='declined');
   if(existing.length>=3)return toast('Maximum 3 founders reached');
   if(existing.find(m=>m.student_id===studentId))return toast(student.name+' is already invited or a member');
+  // Runs server-side (rpc_send_founder_invite), re-checking the same
+  // owner-or-founder rule above -- it was client-side only, so a raw
+  // POST could create a "pending" invite naming yourself as the student
+  // for ANY company, then self-accept it via rpc_respond_to_invite
+  // (which only ever checks the invite is addressed to you) to gain
+  // founder-level rights over a company you have no relationship to.
   const u=cu();
-  const rec={id:uid(),company_user_id:ownerId,student_id:studentId,role:'founder',status:'pending',invited_by:u.name,ts:ts()};
-  await sb.post('jex_company_members',rec);
+  let rec;
+  try{rec=await sb.rpc('rpc_send_founder_invite',{p_owner_id:ownerId,p_student_id:studentId});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.companyMembers.push(rec);
   await pushNotification(
     studentId,'invite',
@@ -1722,8 +1806,12 @@ async function flagAccount(targetId,targetName,targetType,reason){
 async function resolveFlag(flagId,action,note){
   const f=DB.flags.find(x=>x.id===flagId);if(!f)return;
   const u=cu();
-  const claimed=await sb.patch('jex_flags','id=eq.'+flagId+'&status=eq.open',{status:action,resolution_note:(note||'').trim(),resolved_by:u.name});
-  if(!claimed.length)return toast('This flag was already resolved');
+  // Runs server-side (rpc_admin_resolve_flag) -- this had NO check at all
+  // before (compliance flags could be resolved/dismissed by anyone).
+  let r;
+  try{r=await sb.rpc('rpc_admin_resolve_flag',{p_flag_id:flagId,p_action:action,p_note:note||''});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  if(!r.resolved)return toast('This flag was already resolved');
   f.status=action;f.resolution_note=(note||'').trim();f.resolved_by=u.name;
   await logActivity('flag_resolve',u.name+' '+(action==='resolved'?'resolved':'dismissed')+' flag on '+f.target_name+(note?' — '+note:''),{userId:u.id,userName:u.name});
   toast('Flag '+(action==='resolved'?'resolved':'dismissed'));render();
@@ -1906,14 +1994,16 @@ async function placeStopLoss(ticker,triggerPrice){
   if(triggerPrice>=co.price)return toast('Stop-loss must be below current price ('+fmt(co.price)+')');
   const held=(holdings(u)[ticker])||0;
   if(held<=0)return toast('You don&#39;t hold any '+ticker+' shares');
-  // Cancel existing stop-loss for this ticker
-  const existing=DB.stopLossOrders.find(s=>s.user_id===u.id&&s.ticker===ticker&&s.status==='active');
-  if(existing){
-    await sb.patch('jex_stop_loss','id=eq.'+existing.id,{status:'cancelled'});
-    existing.status='cancelled';
-  }
-  const rec={id:uid(),user_id:u.id,ticker,trigger_price:triggerPrice,shares:held,status:'active',ts:ts()};
-  await sb.post('jex_stop_loss',rec);
+  // Runs server-side (rpc_place_stop_loss), which derives the caller and
+  // their real held shares itself instead of trusting this client-built
+  // { user_id, shares } -- a raw POST here used to let anyone create a
+  // stop-loss order on ANY other user's account with a trigger price at
+  // or above the current price, force-selling their real shares the
+  // instant any client's poll loop checked it, with zero consent.
+  let rec;
+  try{rec=await sb.rpc('rpc_place_stop_loss',{p_ticker:ticker,p_trigger_price:triggerPrice});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.stopLossOrders=DB.stopLossOrders.filter(s=>!(s.user_id===u.id&&s.ticker===ticker&&s.status==='active'));
   DB.stopLossOrders.push(rec);
   toast('Stop-loss set: sell '+held+'×'+ticker+' if price drops to '+fmt(triggerPrice));render();
 }
@@ -1923,7 +2013,10 @@ function doPlaceStopLoss(ticker){
 async function cancelStopLoss(id){
   const s0=DB.stopLossOrders.find(x=>x.id===id);
   if(!s0||s0.user_id!==cu()?.id)return toast('You can only cancel your own stop-loss orders');
-  await sb.patch('jex_stop_loss','id=eq.'+id,{status:'cancelled'});
+  // Runs server-side (rpc_cancel_stop_loss), re-checking the same
+  // ownership rule above -- it was client-side only.
+  try{await sb.rpc('rpc_cancel_stop_loss',{p_id:id});}
+  catch(e){return toast(rpcErrorMessage(e));}
   const s=DB.stopLossOrders.find(x=>x.id===id);if(s)s.status='cancelled';
   toast('Stop-loss cancelled');render();
 }
@@ -1974,8 +2067,14 @@ async function addPriceAlert(ticker,targetPrice,direction){
   targetPrice=parseFloat(targetPrice);
   if(isNaN(targetPrice)||targetPrice<=0)return toast('Enter a valid price');
   if(!direction)return toast('Select above or below');
-  const rec={id:uid(),user_id:u.id,ticker,target_price:targetPrice,direction,triggered:false,ts:ts()};
-  await sb.post('jex_price_alerts',rec);
+  // Runs server-side (rpc_add_price_alert), which derives the caller from
+  // their own session instead of trusting this client-supplied user_id --
+  // a raw POST here used to let anyone plant a spoofed price-alert
+  // notification in ANY other real account (confirmed live: the foreign
+  // key on user_id only checks the id is real, not that it's yours).
+  let rec;
+  try{rec=await sb.rpc('rpc_add_price_alert',{p_ticker:ticker,p_target_price:targetPrice,p_direction:direction});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.priceAlerts.push(rec);
   toast('Alert set: '+ticker+' '+direction+' '+fmt(targetPrice));render();
 }
@@ -1996,13 +2095,18 @@ async function checkPriceAlerts(){
     const co=getCo(a.ticker);if(!co)continue;
     const triggered=(a.direction==='above'&&co.price>=a.target_price)||(a.direction==='below'&&co.price<=a.target_price);
     if(!triggered)continue;
-    // Atomic claim, same reasoning as stop-loss orders: without it, two clients
-    // polling at the same moment could both fire this alert's notification.
-    const claimed=await sb.patch('jex_price_alerts','id=eq.'+a.id+'&triggered=eq.false',{triggered:true});
-    if(!claimed.length){a.triggered=true;continue;}
+    // The actual claim + condition re-check both run server-side now
+    // (rpc_trigger_price_alert) -- the local check above is just a cheap
+    // filter so an obviously-not-due alert doesn't round-trip on every
+    // poll, same as the stop-loss/circuit-breaker polling loops. The RPC
+    // re-validates price vs target itself rather than trusting this
+    // client-side match.
+    let r;
+    try{r=await sb.rpc('rpc_trigger_price_alert',{p_id:a.id});}catch(e){continue;}
+    if(!r.triggered){if(r.reason==='already_triggered_or_missing')a.triggered=true;continue;}
     a.triggered=true;
-    await pushNotification(a.user_id,'price_alert','🎯 Price alert: '+a.ticker+' is '+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0)+' (now '+fmt(co.price)+')',a.ticker);
-    toast('Price alert triggered: '+a.ticker+' '+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0));
+    await pushNotification(r.user_id,'price_alert','🎯 Price alert: '+r.ticker+' is '+r.direction+' '+fmt(r.target_price)+' (now '+fmt(r.price)+')',r.ticker);
+    toast('Price alert triggered: '+r.ticker+' '+r.direction+' '+fmt(r.target_price));
   }
 }
 
@@ -2141,10 +2245,10 @@ async function pushNotificationToAll(type,message,excludeIds=[]){
 }
 async function markAllRead(){
   const unread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read);
-  for(const n of unread){
-    await sb.patch('jex_notifications','id=eq.'+n.id,{read:true});
-    n.read=true;
-  }
+  // Runs server-side (rpc_mark_notifications_read), scoped to the
+  // caller's own rows via auth.uid() rather than a client-supplied id.
+  try{await sb.rpc('rpc_mark_notifications_read',{});}catch(e){return;}
+  for(const n of unread)n.read=true;
   render();
 }
 function myUnreadCount(){
@@ -2187,7 +2291,7 @@ async function resetExchange(){
     // jex_vote_ballots, jex_companies, jex_users, jex_classrooms.
     await sb.rpc('rpc_admin_full_reset',{});
     // Clear local DB state entirely
-    DB.users=DB.users.filter(u=>adminRoles.includes(u.role));
+    DB.users=DB.users.filter(isAdmin);
     DB.users.forEach(u=>{u.cash=0;u.holdings={};u.shorts={};u.watchlist=[];});
     DB.companies=[];DB.trades=[];DB.dividends=[];DB.buybacks=[];
     DB.limitOrders=[];DB.stopLossOrders=[];DB.notifications=[];
@@ -2417,8 +2521,6 @@ setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();await
 // ═══════════════════════════════════════════════
 // TRADING
 // ═══════════════════════════════════════════════
-async function updateUser(uid2,data){const u=getUser(uid2);if(!u)return;Object.assign(u,data);await sb.patch('jex_users','id=eq.'+uid2,data);}
-async function updateCo(ticker,data){const co=getCo(ticker);if(!co)return;Object.assign(co,data);await sb.patch('jex_companies','ticker=eq.'+ticker,data);}
 // Market buy/sell/short/cover are executed server-side (rpc_trade_* —
 // see trade_engine_migration.sql) so cash/holdings/shares/price can't be
 // fabricated by a raw REST call — the client can no longer PATCH those
@@ -2497,7 +2599,15 @@ async function coverShort(ticker,qty){
   applyTradeResult(ticker,r);
   toast('Covered '+qty+' × '+ticker+' | P&L: '+(r.pnl>=0?'+':'')+fmt(r.pnl));if(UI.companyPage)render();else openPanel(ticker);
 }
-async function toggleWatch(ticker){const u=cu();if(!u)return;const wl=[...watchlist(u)];const i=wl.indexOf(ticker);if(i>=0){wl.splice(i,1);toast(ticker+' removed from watchlist');}else{wl.push(ticker);toast(ticker+' added to watchlist');}await updateUser(u.id,{watchlist:wl});render();}
+async function toggleWatch(ticker){
+  const u=cu();if(!u)return;
+  const wasWatched=watchlist(u).includes(ticker);
+  toast(wasWatched?ticker+' removed from watchlist':ticker+' added to watchlist');
+  let r;
+  try{r=await sb.rpc('rpc_toggle_watchlist',{p_ticker:ticker});}catch(e){return;}
+  u.watchlist=r.watchlist;
+  render();
+}
 
 // ═══════════════════════════════════════════════
 // FUNDS
@@ -2512,16 +2622,22 @@ function currentFundNav(f){
   const totalValue=Math.round((f.cash+holdingsValue+fundShortPnl(f))*100)/100;
   return f.units_outstanding>0?Math.round((totalValue/f.units_outstanding)*10000)/10000:10;
 }
-async function updateFund(fundId,data){const f=getFund(fundId);if(!f)return;Object.assign(f,data);await sb.patch('jex_funds','id=eq.'+fundId,data);}
 
 async function createFund(name,feePct){
   const u=cu();if(!u||u.role!=='company')return toast('Only company accounts can create a fund');
   if(!name||name.trim().length<3)return toast('Enter a fund name (at least 3 characters)');
   feePct=parseFloat(feePct);
   if(isNaN(feePct)||feePct<0||feePct>MAX_FUND_FEE_PCT)return toast('Performance fee must be between 0 and '+MAX_FUND_FEE_PCT+'%');
-  const rec={id:uid(),manager_id:u.id,manager_name:u.name,name:name.trim(),units_outstanding:0,cash:0,holdings:{},shorts:{},
-    fee_pct:Math.round(feePct*100)/100,status:'active',created_at:new Date().toISOString(),ts:ts()};
-  await sb.post('jex_funds',rec);DB.funds.push(rec);
+  // Runs server-side (rpc_create_fund), which always initializes
+  // cash/units_outstanding/holdings/shorts to zero/empty itself -- a raw
+  // POST here used to let anyone create a fund with an arbitrary
+  // fabricated starting cash balance, then spend it on real shares via
+  // the legitimate rpc_fund_buy, crediting real money to a real company
+  // owner out of nothing.
+  let rec;
+  try{rec=await sb.rpc('rpc_create_fund',{p_name:name.trim(),p_fee_pct:feePct});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.funds.push(rec);
   await logActivity('fund_create',u.name+' launched a new fund: '+rec.name+' ('+rec.fee_pct+'% performance fee)',{userId:u.id,userName:u.name});
   toast('Fund launched');UI.fundPage=rec.id;render();
 }
@@ -2529,7 +2645,11 @@ async function closeFund(fundId){
   const f=getFund(fundId);if(!f)return;
   if(!canManageFund(f))return toast('Only this fund\'s manager or the Chairman can close it');
   if(f.status!=='active')return;
-  await updateFund(fundId,{status:'closed'});
+  // Runs server-side (rpc_close_fund), re-checking the same
+  // manager-or-Chairman rule above -- it was client-side only.
+  try{await sb.rpc('rpc_close_fund',{p_fund_id:fundId});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  f.status='closed';
   toast('Fund closed to new deposits — existing depositors can still withdraw');render();
 }
 // Fund deposit/withdraw run server-side (rpc_fund_deposit/rpc_fund_withdraw)
@@ -2660,11 +2780,14 @@ async function postFinancials(ticker,period,revenue,profit,summary){
   if(isNaN(revenue)||revenue<0)return toast('Enter a valid revenue amount');
   if(isNaN(profit))return toast('Enter a valid profit amount (can be negative for a loss)');
   if(!summary||summary.trim().length<10)return toast('Add a short summary (at least 10 characters)');
-  const entry={id:uid(),period:period.trim(),revenue,profit,summary:summary.trim(),ts:ts()};
-  const newFinancials=[entry,...(co.financials||[])];
-  await updateCo(ticker,{financials:newFinancials});
-  await pushNotificationToHolders(ticker,'financials','📊 '+co.name+' ('+ticker+') posted financial results for '+entry.period+': Revenue '+fmt(revenue)+', Profit '+fmt(profit));
-  await logActivity('financials',co.name+' posted financials for '+entry.period+' — Rev '+fmt(revenue)+', Profit '+fmt(profit),{ticker,amount:revenue});
+  // Runs server-side (rpc_post_financials), re-checking the same
+  // owner-only rule above -- it was client-side only.
+  let r;
+  try{r=await sb.rpc('rpc_post_financials',{p_ticker:ticker,p_period:period.trim(),p_revenue:revenue,p_profit:profit,p_summary:summary.trim()});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  co.financials=r.financials;
+  await pushNotificationToHolders(ticker,'financials','📊 '+co.name+' ('+ticker+') posted financial results for '+r.entry.period+': Revenue '+fmt(revenue)+', Profit '+fmt(profit));
+  await logActivity('financials',co.name+' posted financials for '+r.entry.period+' — Rev '+fmt(revenue)+', Profit '+fmt(profit),{ticker,amount:revenue});
   toast('Financial report posted');render();
 }
 async function updateFundingGoal(ticker,goal,useOfFunds){
@@ -2677,7 +2800,11 @@ async function updateFundingGoal(ticker,goal,useOfFunds){
     g=Math.round(g*100)/100;
   }
   const uof=(useOfFunds||'').trim().slice(0,1000)||null;
-  await updateCo(ticker,{funding_goal:g,use_of_funds:uof});
+  // Runs server-side (rpc_update_funding_goal), re-checking the same
+  // owner-or-founder rule above -- it was client-side only.
+  try{await sb.rpc('rpc_update_funding_goal',{p_ticker:ticker,p_goal:g,p_use_of_funds:uof});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  co.funding_goal=g;co.use_of_funds=uof;
   toast('Funding goal updated');render();
 }
 // Buybacks are executed server-side (rpc_buyback) -- besides closing the
@@ -2771,31 +2898,33 @@ async function submitIPO(name,ticker,price,shares,desc){
   const app={id:uid(),user_id:UI.userId,name:name.trim(),ticker,price:p,shares:s,description:(desc||'').trim(),status:'pending',ts:ts()};
   await sb.post('jex_ipo_applications',app);
   DB.ipoApps.push(app);
-  await updateUser(UI.userId,{app_status:'pending'});
+  try{await sb.rpc('rpc_set_own_app_status',{p_status:'pending'});}catch(e){}
+  const self=cu();if(self)self.app_status='pending';
   toast('✓ IPO application submitted! Awaiting Chairman approval.');
   UI.appTab='status';
   render();
 }
 async function reviewIPO(id,approve){
   const app=DB.ipoApps.find(a=>a.id===id);if(!app)return;
-  if(approve&&DB.companies.find(c=>c.ticker===app.ticker))return toast('Ticker "'+app.ticker+'" is already listed — reject this application or have the applicant resubmit with a different ticker.');
-  // Atomically claim this application before listing — otherwise a double-click or
-  // two admins reviewing it at once could both pass the (stale) ticker check above
-  // and both list a company under the same ticker.
-  const claimed=await sb.patch('jex_ipo_applications','id=eq.'+id+'&status=eq.pending',{status:approve?'approved':'rejected'});
-  if(!claimed.length)return toast('This application was already reviewed');
+  // Runs server-side (rpc_review_ipo) -- this had NO auth check at all
+  // before, not even client-side: any authenticated caller could create a
+  // fully fabricated listed company (or silently reject someone else's
+  // real application). The RPC requires Chairman/President and does the
+  // same atomic pending-claim + ticker-uniqueness check the client used to
+  // do unsafely, entirely inside the database.
+  let r;
+  try{r=await sb.rpc('rpc_review_ipo',{p_id:id,p_approve:!!approve});}
+  catch(e){return toast(rpcErrorMessage(e));}
   app.status=approve?'approved':'rejected';
-  if(approve){
-    const owner=getUser(app.user_id);
-    const co={id:uid(),name:app.name,ticker:app.ticker,price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',owner_id:app.user_id,description:app.description,price_history:[{p:app.price,t:'IPO'}],financials:[],classroom_id:owner?.classroom_id||null};
-    await sb.post('jex_companies',co);DB.companies.push(co);
-    await updateUser(app.user_id,{app_status:'approved'});
-    await logActivity('ipo',app.name+' ('+app.ticker+') listed on JEX @ '+fmt(app.price),{ticker:app.ticker,userId:app.user_id,amount:app.price});
-    await pushNotification(app.user_id,'ipo','🎉 Your IPO has been approved! '+app.name+' ('+app.ticker+') is now listed on JEX.',app.ticker);
-    toast('✓ '+app.name+' ('+app.ticker+') is now listed on JEX!');
+  if(r.approved){
+    DB.companies.push(r.company);
+    const owner=getUser(r.user_id);if(owner)owner.app_status='approved';
+    await logActivity('ipo',r.name+' ('+r.ticker+') listed on JEX @ '+fmt(r.price),{ticker:r.ticker,userId:r.user_id,amount:r.price});
+    await pushNotification(r.user_id,'ipo','🎉 Your IPO has been approved! '+r.name+' ('+r.ticker+') is now listed on JEX.',r.ticker);
+    toast('✓ '+r.name+' ('+r.ticker+') is now listed on JEX!');
   } else {
-    await updateUser(app.user_id,{app_status:'rejected'});
-    await pushNotification(app.user_id,'ipo','❌ Your IPO application for '+app.name+' was rejected.');
+    const owner=getUser(r.user_id);if(owner)owner.app_status='rejected';
+    await pushNotification(r.user_id,'ipo','❌ Your IPO application for '+r.name+' was rejected.');
     toast('IPO application rejected');
   }
   render();
@@ -2898,19 +3027,20 @@ async function delistCompany(ticker,silent=false){
   if(!isAdmin(cu()))return toast('Admin access required');
   const co=DB.companies.find(c=>c.ticker===ticker);if(!co)return;
   if(!silent&&!confirm('Delist '+co.name+' ('+ticker+')? The company can reapply for IPO later.'))return;
-  // Soft delist — keep the record so the company can reapply
-  await sb.patch('jex_companies','ticker=eq.'+ticker,{status:'delisted'});
+  // Soft delist + cancelling open orders now all run server-side in one
+  // transaction (rpc_admin_delist_company) instead of 3 separate direct
+  // client writes.
+  let r;
+  try{r=await sb.rpc('rpc_admin_delist_company',{p_ticker:ticker});}
+  catch(e){return toast(rpcErrorMessage(e));}
   co.status='delisted';
-  // Cancel all open limit orders for this ticker
-  const openOrders=DB.limitOrders.filter(o=>o.ticker===ticker&&(o.status==='open'||o.status==='after_hours'));
-  for(const o of openOrders){
-    await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'cancelled'});
-    o.status='cancelled';
-    await pushNotification(o.user_id,'halt','📋 Limit order cancelled — '+ticker+' has been delisted.',ticker);
+  for(const {id,user_id} of r.cancelled_orders){
+    const o=DB.limitOrders.find(x=>x.id===id);if(o)o.status='cancelled';
+    await pushNotification(user_id,'halt','📋 Limit order cancelled — '+ticker+' has been delisted.',ticker);
   }
-  // Cancel stop-loss orders
-  const slOrders=(DB.stopLossOrders||[]).filter(s=>s.ticker===ticker&&s.status==='active');
-  for(const s of slOrders){await sb.patch('jex_stop_loss','id=eq.'+s.id,{status:'cancelled'});s.status='cancelled';}
+  for(const id of r.cancelled_stop_loss){
+    const s=(DB.stopLossOrders||[]).find(x=>x.id===id);if(s)s.status='cancelled';
+  }
   // Notify shareholders
   await pushNotificationToHolders(ticker,'halt','⚠️ '+co.name+' ('+ticker+') has been delisted from JEX.');
   await logActivity('ipo',co.name+' ('+ticker+') delisted',{ticker});
@@ -3159,35 +3289,22 @@ async function submitClassApplication(parentTicker,classType,votesPerShare,share
 // ── Chairman: approve / reject class application ─────────
 async function reviewClassApp(id,approve){
   const app=DB.classApps.find(a=>a.id===id);if(!app)return;
-  const isConversion=app.reason&&app.reason.startsWith('[CONVERT]');
-  if(approve&&!isConversion&&DB.companies.find(c=>c.ticker===app.proposed_ticker))return toast('Ticker "'+app.proposed_ticker+'" is already listed — reject this application instead.');
-  // Atomically claim before listing/converting — otherwise a double-click or two
-  // admins reviewing this at once could both pass the (stale) ticker check above.
-  const claimed=await sb.patch('jex_class_applications','id=eq.'+id+'&status=eq.pending',{status:approve?'approved':'rejected'});
-  if(!claimed.length)return toast('This application was already reviewed');
+  // Runs server-side (rpc_review_class_application) -- this had NO auth
+  // check at all before, not even client-side: any authenticated caller
+  // could create a fake share class or listed company. The RPC requires
+  // Chairman/President and does the same atomic pending-claim +
+  // ticker-uniqueness check the client used to do unsafely.
+  let r;
+  try{r=await sb.rpc('rpc_review_class_application',{p_id:id,p_approve:!!approve});}
+  catch(e){return toast(rpcErrorMessage(e));}
   app.status=approve?'approved':'rejected';
-  if(approve){
-    if(isConversion){
-      // Convert existing stock — just add metadata, don't create new company entry
-      const meta={id:uid(),parent_ticker:app.parent_ticker,ticker:app.proposed_ticker,
-        class:app.class,label:'Class '+app.class,votes_per_share:app.votes_per_share,
-        restricted:app.restricted,whitelist:app.whitelist||[],
-        company_name:app.company_name,owner_id:app.owner_id};
-      await sb.post('jex_share_classes',meta);DB.shareClasses.push(meta);
+  if(r.approved){
+    DB.shareClasses.push(r.share_class);
+    if(r.is_conversion){
       await logActivity('class_approved',app.company_name+' '+app.proposed_ticker+' converted to Class '+app.class,{ticker:app.proposed_ticker});
       toast(app.company_name+' ('+app.proposed_ticker+') converted to Class '+app.class+'!');
     } else {
-      // New class — create a new company listing
-      const co={id:uid(),name:app.company_name+' (Class '+app.class+')',ticker:app.proposed_ticker,
-        price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',
-        owner_id:app.owner_id,description:'Class '+app.class+' shares of '+app.company_name,
-        price_history:[{p:app.price,t:'Class '+app.class+' IPO'}],financials:[]};
-      await sb.post('jex_companies',co);DB.companies.push(co);
-      const meta={id:uid(),parent_ticker:app.parent_ticker,ticker:app.proposed_ticker,
-        class:app.class,label:'Class '+app.class,votes_per_share:app.votes_per_share,
-        restricted:app.restricted,whitelist:app.whitelist||[],
-        company_name:app.company_name,owner_id:app.owner_id};
-      await sb.post('jex_share_classes',meta);DB.shareClasses.push(meta);
+      DB.companies.push(r.company);
       await logActivity('class_approved',app.company_name+' Class '+app.class+' ('+app.proposed_ticker+') listed',{ticker:app.proposed_ticker});
       toast(app.company_name+' Class '+app.class+' listed as '+app.proposed_ticker+'!');
     }
@@ -3204,10 +3321,14 @@ async function postVote(parentTicker,question,optA,optB,closesAt){
   const co=getCo(parentTicker);if(!co)return;
   const u=cu();
   if(!canManageCompany(co))return toast('Only this company\'s owner or founders can post a vote');
-  const v={id:uid(),parent_ticker:parentTicker,company_name:co.name,
-    question:question.trim(),option_a:optA.trim(),option_b:optB.trim(),
-    status:'open',created_by:u.id,ts:ts(),closes_at:closesAt||null};
-  await sb.post('jex_votes',v);DB.votes.push(v);
+  // Runs server-side (rpc_post_vote), re-checking the same owner-or-
+  // founder rule above -- it was client-side only, so a raw POST could
+  // impersonate any company's governance action, posting a fake vote
+  // shown to every shareholder exactly like a real one.
+  let v;
+  try{v=await sb.rpc('rpc_post_vote',{p_ticker:parentTicker,p_question:question.trim(),p_option_a:optA.trim(),p_option_b:optB.trim(),p_closes_at:closesAt||null});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.votes.push(v);
   await logActivity('vote',co.name+' posted vote: '+question.trim(),{ticker:parentTicker,userId:u.id,userName:u.name});
   await pushNotificationToHolders(parentTicker,'vote','🗳️ '+co.name+' posted a vote: '+question.trim());
   toast('Vote posted');UI.companyTab='votes';render();
@@ -3218,16 +3339,27 @@ async function castVote(voteId,choice){
   if(DB.ballots.find(b=>b.vote_id===voteId&&b.voter_id===u.id))return toast('You have already voted');
   const power=getVotingPower(u.id,v.parent_ticker);
   if(power<=0)return toast('You have no voting shares in this company');
-  const ballot={id:uid(),vote_id:voteId,voter_id:u.id,voter_name:u.name,choice,voting_power:power,ts:ts()};
-  await sb.post('jex_vote_ballots',ballot);DB.ballots.push(ballot);
-  toast('Vote cast — '+power+' vote'+(power!==1?'s':'')+' counted');render();
+  // Runs server-side (rpc_cast_vote), which re-derives the caller's real
+  // voting power from their own holdings instead of trusting this
+  // client-computed { voter_id, voting_power } -- a raw POST here used to
+  // let anyone cast unlimited ballots with an arbitrary inflated
+  // voting_power, single-handedly deciding any company's vote regardless
+  // of actual share ownership.
+  let ballot;
+  try{ballot=await sb.rpc('rpc_cast_vote',{p_vote_id:voteId,p_choice:choice});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.ballots.push(ballot);
+  toast('Vote cast — '+ballot.voting_power+' vote'+(ballot.voting_power!==1?'s':'')+' counted');render();
 }
 async function closeVote(voteId){
   const targetV=DB.votes.find(x=>x.id===voteId);if(!targetV)return;
   const targetCo=getCo(targetV.parent_ticker);
   if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can close its vote');
   if(!confirm('Close this vote?'))return;
-  await sb.patch('jex_votes','id=eq.'+voteId,{status:'closed'});
+  // Runs server-side (rpc_close_vote), re-checking the same owner-or-
+  // founder rule above -- it was client-side only.
+  try{await sb.rpc('rpc_close_vote',{p_vote_id:voteId});}
+  catch(e){return toast(rpcErrorMessage(e));}
   const v=DB.votes.find(x=>x.id===voteId);if(v){
     v.status='closed';
     // Notify all who voted
@@ -3565,8 +3697,12 @@ async function submitBugReport(){
 async function resolveBugReport(reportId){
   const r=DB.bugReports.find(x=>x.id===reportId);if(!r)return;
   const u=cu();
-  const claimed=await sb.patch('jex_bug_reports','id=eq.'+reportId+'&status=eq.open',{status:'resolved',resolved_by:u.name});
-  if(!claimed.length)return toast('This report was already resolved');
+  // Runs server-side (rpc_admin_resolve_bug_report) -- this had NO check
+  // at all before.
+  let res;
+  try{res=await sb.rpc('rpc_admin_resolve_bug_report',{p_report_id:reportId});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  if(!res.resolved)return toast('This report was already resolved');
   r.status='resolved';r.resolved_by=u.name;
   toast('Bug report marked resolved');render();
 }
@@ -3600,8 +3736,12 @@ function renderContactAdminModalHTML(){
 async function resolveContactMessage(msgId){
   const m=DB.contactMessages.find(x=>x.id===msgId);if(!m)return;
   const u=cu();
-  const claimed=await sb.patch('jex_contact_messages','id=eq.'+msgId+'&status=eq.open',{status:'resolved',resolved_by:u.name});
-  if(!claimed.length)return toast('This message was already resolved');
+  // Runs server-side (rpc_admin_resolve_contact_message) -- this had NO
+  // check at all before.
+  let r;
+  try{r=await sb.rpc('rpc_admin_resolve_contact_message',{p_msg_id:msgId});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  if(!r.resolved)return toast('This message was already resolved');
   m.status='resolved';m.resolved_by=u.name;
   toast('Message marked resolved');render();
 }
@@ -3738,7 +3878,7 @@ function renderNewsFeed(){
     <div class="news-meta" style="justify-content:space-between">
       <div style="display:flex;align-items:center;gap:10px">
         <span class="news-ticker">${n.ticker}</span>
-        <span>${n.company_name}</span>
+        <span>${esc(n.company_name)}</span>
         <span>${n.ts||''}</span>
       </div>
       ${canDelete?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}
@@ -4166,12 +4306,12 @@ function renderMarket(){
       <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Chart</th><th>Shares</th>${(u.role==='student'||u.role==='company')?'<th>Watch</th><th>Health'+infoBubble('A 0-100 score combining price stability (up to ±20), the companys cash cushion relative to its market cap (up to +15), short-seller interest against it (up to -15), and dividend history (+5 to +10). Starts from a baseline of 50.')+'</th><th></th>':''}</tr></thead>
       <tbody id="market-rows">${renderMarketRows(u,listed)}</tbody></table>
     </div>
+    ${(DB.minutes||[]).filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${esc(m.title)}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${esc(m.body)}</div></div>`).join('')}</div>`:''}
+    ${(DB.minutes||[]).filter(m=>m.type==='minutes').length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.filter(m=>m.type==='minutes').slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${esc(m.title)}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${esc(m.author_name)}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${esc(m.body)}</div></div>`).join('')}${DB.minutes.filter(m=>m.type==='minutes').length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.filter(m=>m.type==='minutes').length-3} older entries</div>`:''}</div>`:''}
     ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
-      +((DB.minutes||[]).filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${m.title}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}</div>`:'')
-    +((DB.minutes||[]).filter(m=>m.type==='minutes').length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.filter(m=>m.type==='minutes').slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${m.title}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${m.body}</div></div>`).join('')}${DB.minutes.filter(m=>m.type==='minutes').length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.filter(m=>m.type==='minutes').length-3} older entries</div>`:''}</div>`:'')
       +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
       +'</div>':''}
-    ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.news.length} post${DB.news.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${esc(n.headline)}</div>${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${n.company_name}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${DB.news.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${DB.news.length} posts</div>`:''}</div>`:''}
+    ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.news.length} post${DB.news.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${esc(n.headline)}</div>${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${esc(n.company_name)}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${DB.news.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${DB.news.length} posts</div>`:''}</div>`:''}
     <div id="trade-panel"></div>`;
 }
 function buildSparklines(){
@@ -4300,7 +4440,7 @@ function openPanel(ticker){
     <div style="margin-bottom:4px">${buildChartIntervalBar('panel-chart',c)}</div>
     <div style="position:relative;height:160px;margin-bottom:6px"><canvas id="panel-chart"></canvas></div>
     <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2);margin-bottom:10px"><span>${(c.price_history||[]).length} pts | Open: ${fmt((c.price_history||[])[0]?.p||c.price)}</span><span class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</span></div>
-    ${fin?`<div style="font-size:12px;padding:8px 10px;background:var(--bg3);border-radius:var(--radius);margin-bottom:10px">Latest: Rev <strong>${fmt(fin.revenue)}</strong> | Profit <strong>${fmt(fin.profit)}</strong> — <span style="color:var(--text2)">${fin.summary}</span></div>`:''}
+    ${fin?`<div style="font-size:12px;padding:8px 10px;background:var(--bg3);border-radius:var(--radius);margin-bottom:10px">Latest: Rev <strong>${fmt(fin.revenue)}</strong> | Profit <strong>${fmt(fin.profit)}</strong> — <span style="color:var(--text2)">${esc(fin.summary)}</span></div>`:''}
     <hr class="divider">
     <div class="ot-toggle">
       <button class="ot-btn ${mode==='buy'?'ot-buy':''}" onclick="UI.panelMode='buy';openPanel('${ticker}')">Buy</button>
@@ -4690,7 +4830,15 @@ function renderAppStatus(app){
     ${app.status==='rejected'?`<button class="btn btn-primary" onclick="reapply()">Submit new application</button>`:''}
   </div>`;
 }
-async function reapply(){const idx=DB.ipoApps.findIndex(a=>a.user_id===UI.userId);if(idx>=0){await sb.patch('jex_ipo_applications','id=eq.'+DB.ipoApps[idx].id,{status:'withdrawn'});DB.ipoApps.splice(idx,1);}await updateUser(UI.userId,{app_status:'none'});UI.appTab='apply';render();}
+async function reapply(){
+  // Runs server-side (rpc_set_own_app_status) -- withdraws any pending IPO
+  // application and resets app_status, both scoped to the caller's own row
+  // via auth.uid() rather than a client-supplied id.
+  try{await sb.rpc('rpc_set_own_app_status',{p_status:'none'});}catch(e){return toast(rpcErrorMessage(e));}
+  const idx=DB.ipoApps.findIndex(a=>a.user_id===UI.userId);if(idx>=0)DB.ipoApps.splice(idx,1);
+  const self=cu();if(self)self.app_status='none';
+  UI.appTab='apply';render();
+}
 function renderAppForm(app){
   if(app&&app.status==='pending')return`<div class="card"><div class="empty">Application under review.</div></div>`;
   if(app&&app.status==='approved')return`<div class="card"><div class="empty">Your company is already listed!</div></div>`;
@@ -5056,7 +5204,10 @@ function previewLogo(input){
 async function saveLogo(){
   const logo=window._pendingLogo;if(!logo)return toast('Select an image first');
   const u=cu();const co=DB.companies.find(c=>c.owner_id===u.id);if(!co)return;
-  await updateCo(co.ticker,{logo});
+  // Runs server-side (rpc_save_company_logo), re-checking ownership.
+  try{await sb.rpc('rpc_save_company_logo',{p_ticker:co.ticker,p_logo:logo});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  co.logo=logo;
   window._pendingLogo=null;
   toast('Logo saved');render();
 }
@@ -5153,7 +5304,7 @@ function renderDivTab(co,myDivs){
     <div class="mcard"><div class="mlabel">Shareholders</div><div class="mval" id="div-sh-count">loading...</div></div>
     <div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${totalCirc.toLocaleString()}</div></div></div>
     <div id="div-form"><div style="font-size:12px;color:var(--text2);padding:8px 0">Loading shareholders...</div></div>
-  </div>${myDivs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Per share</th><th>Total</th><th>Recipients</th><th>Note</th></tr></thead><tbody>${myDivs.map(d=>`<tr><td style="color:var(--text2)">${d.ts}</td><td style="font-family:var(--mono)">${fmt(d.per_share)}</td><td style="color:var(--green);font-family:var(--mono)">${fmt(d.total)}</td><td>${(d.payouts||[]).length}</td><td style="font-size:12px;color:var(--text2)">${d.note}</td></tr>`).join('')}</tbody></table></div>`:''}`;
+  </div>${myDivs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Per share</th><th>Total</th><th>Recipients</th><th>Note</th></tr></thead><tbody>${myDivs.map(d=>`<tr><td style="color:var(--text2)">${d.ts}</td><td style="font-family:var(--mono)">${fmt(d.per_share)}</td><td style="color:var(--green);font-family:var(--mono)">${fmt(d.total)}</td><td>${(d.payouts||[]).length}</td><td style="font-size:12px;color:var(--text2)">${esc(d.note)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
 }
 function updateDivPrev(ticker){const co=getCo(ticker);if(!co)return;const ps=parseFloat(get('div-ps')?.value)||0,p=get('div-prev');if(!p)return;if(ps<=0){p.innerHTML='';return;}
   // Use fresh students from DB for preview (may be stale but better than nothing)
@@ -5346,7 +5497,7 @@ function renderAdminSession(students){
     ${isChairman(cu())?`<div style="display:flex;gap:8px"><button class="btn btn-success" onclick="setSession('open')">Open now</button><button class="btn btn-warning" onclick="setSession('paused')">Pause</button><button class="btn btn-danger" onclick="setSession('closed')">Close now</button></div>`:`<div class="ibox ibox-blue">Only the Chairman or President can open, pause, or close trading.</div>`}
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">Stock halts</div>
-    ${DB.halts.length?`<div style="margin-bottom:10px">${DB.halts.map(h=>`<div class="app-row" style="margin-bottom:6px"><div class="app-info"><div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">${h.ticker}</span> <span class="badge b-red">Halted</span></div><div class="app-meta">${h.reason} — by ${h.halted_by} at ${h.ts}</div></div><button class="btn btn-sm btn-success" onclick="resumeStock('${h.ticker}')">Resume</button></div>`).join('')}</div>`:'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">No stocks currently halted.</div>'}
+    ${DB.halts.length?`<div style="margin-bottom:10px">${DB.halts.map(h=>`<div class="app-row" style="margin-bottom:6px"><div class="app-info"><div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">${h.ticker}</span> <span class="badge b-red">Halted</span></div><div class="app-meta">${esc(h.reason)} — by ${esc(h.halted_by)} at ${h.ts}</div></div><button class="btn btn-sm btn-success" onclick="resumeStock('${h.ticker}')">Resume</button></div>`).join('')}</div>`:'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">No stocks currently halted.</div>'}
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Halt a stock</label>
         <select id="halt-ticker"><option value="">— Select ticker —</option>${DB.companies.map(c=>`<option value="${esc(c.ticker)}">${esc(c.ticker)} — ${esc(c.name)}</option>`).join('')}</select>
@@ -5476,7 +5627,7 @@ function renderAdminIPO(pIPO,rIPO){
   return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${esc(a.description||'no desc')}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewIPO('${a.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewIPO('${a.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}`;
 }
 function renderAdminDilution(pDil,rDil){
-  return`<div class="card"><div class="section-title">Pending dilution requests</div>${pDil.length?pDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${d.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span> <span class="badge b-coral">+${d.pct_increase}%</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares — "${d.reason}"</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewDilution('${d.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewDilution('${d.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending dilution requests</div>'}${rDil.length?`<hr class="divider">${rDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${d.company_name} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares</div></div><span class="badge ${d.status==='approved'?'b-green':'b-red'}">${d.status}</span></div>`).join('')}`:''}`;
+  return`<div class="card"><div class="section-title">Pending dilution requests</div>${pDil.length?pDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span> <span class="badge b-coral">+${d.pct_increase}%</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares — "${esc(d.reason)}"</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewDilution('${d.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewDilution('${d.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending dilution requests</div>'}${rDil.length?`<hr class="divider">${rDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares</div></div><span class="badge ${d.status==='approved'?'b-green':'b-red'}">${d.status}</span></div>`).join('')}`:''}`;
 }
 function renderAdminBalances(students){
   const rows=students.map(u=>({name:u.name,email:u.email,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pv(u)*100)/100,shortPnl:Math.round(sPnl(u)*100)/100,divs:Math.round(divRec(u)*100)/100,nw:nw(u)})).sort((a,b)=>b.nw-a.nw);
@@ -5683,11 +5834,11 @@ function renderAdminFlags(){
       html+=`<div style="padding:12px;border:1px solid var(--red);border-radius:var(--radius);margin-bottom:10px;background:rgba(255,77,106,0.04)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
           <span style="font-size:16px">🚩</span>
-          <strong>${f.target_name}</strong>
+          <strong>${esc(f.target_name)}</strong>
           <span class="badge b-red">${f.target_type}</span>
-          <span style="font-size:11px;color:var(--text2);margin-left:auto">${f.ts} — flagged by ${f.flagged_by_name}</span>
+          <span style="font-size:11px;color:var(--text2);margin-left:auto">${f.ts} — flagged by ${esc(f.flagged_by_name)}</span>
         </div>
-        <div style="font-size:13px;color:var(--text2);margin-bottom:10px">${f.reason}</div>
+        <div style="font-size:13px;color:var(--text2);margin-bottom:10px">${esc(f.reason)}</div>
         ${isChairPres?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input type="text" id="res-note-${f.id}" placeholder="Resolution note (optional)" style="flex:1;font-size:12px;padding:5px 8px">
           <button class="btn btn-sm btn-success" onclick="resolveFlagForm('${f.id}','resolved')">✓ Resolve</button>
@@ -5703,12 +5854,12 @@ function renderAdminFlags(){
     html+=`<div class="card"><div class="section-title">Resolved / dismissed flags</div>
       <table><thead><tr><th>Target</th><th>Type</th><th>Reason</th><th>Status</th><th>Resolved by</th><th>Note</th><th>Time</th></tr></thead>
       <tbody>${closedFlags.map(f=>`<tr>
-        <td style="font-weight:500">${f.target_name}</td>
+        <td style="font-weight:500">${esc(f.target_name)}</td>
         <td><span class="badge b-gray">${f.target_type}</span></td>
-        <td style="font-size:12px;color:var(--text2);max-width:200px">${f.reason}</td>
+        <td style="font-size:12px;color:var(--text2);max-width:200px">${esc(f.reason)}</td>
         <td><span class="badge ${f.status==='resolved'?'b-green':'b-gray'}">${f.status}</span></td>
-        <td style="font-size:12px;color:var(--text2)">${f.resolved_by||'—'}</td>
-        <td style="font-size:12px;color:var(--text2)">${f.resolution_note||'—'}</td>
+        <td style="font-size:12px;color:var(--text2)">${esc(f.resolved_by)||'—'}</td>
+        <td style="font-size:12px;color:var(--text2)">${esc(f.resolution_note)||'—'}</td>
         <td style="font-size:12px;color:var(--text2)">${f.ts||''}</td>
       </tr>`).join('')}</tbody></table>
     </div>`;
@@ -5851,7 +6002,7 @@ function renderAdminDashboard(){
   </div>
   <div class="card"><div class="section-title">Recent activity</div>
     ${DB.activity.slice(0,10).length?`<table><thead><tr><th>Time</th><th>Type</th><th>Description</th></tr></thead><tbody>
-    ${DB.activity.slice(0,10).map(a=>`<tr><td style="color:var(--text2);white-space:nowrap">${a.ts||''}</td><td><span class="badge b-gray">${a.type}</span></td><td style="font-size:12px">${a.description}</td></tr>`).join('')}
+    ${DB.activity.slice(0,10).map(a=>`<tr><td style="color:var(--text2);white-space:nowrap">${a.ts||''}</td><td><span class="badge b-gray">${a.type}</span></td><td style="font-size:12px">${esc(a.description)}</td></tr>`).join('')}
     </tbody></table>`:'<div class="empty">No activity yet</div>'}
   </div>`;
 }
@@ -5895,7 +6046,7 @@ function renderAdminNews(){
       <div class="news-meta" style="justify-content:space-between">
         <div style="display:flex;align-items:center;gap:10px">
           <span class="news-ticker">${n.ticker}</span>
-          <span>${n.company_name}</span>
+          <span>${esc(n.company_name)}</span>
           <span>${n.ts||''}</span>
         </div>
         <button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>
@@ -5960,7 +6111,7 @@ function renderNotifications(){
     return `<div style="display:flex;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid var(--border);opacity:${n.read?'0.55':'1'}">
       <div style="font-size:18px;min-width:28px">${typeIcon[n.type]||'•'}</div>
       <div style="flex:1">
-        <div style="font-size:13px${n.read?'':';font-weight:500'}">${n.message}</div>
+        <div style="font-size:13px${n.read?'':';font-weight:500'}">${esc(n.message)}</div>
         <div style="font-size:11px;color:var(--text3);margin-top:2px">${n.ts||''}</div>
         ${pendingInvite?`<div style="display:flex;gap:6px;margin-top:8px">
           <button class="btn btn-sm btn-success" onclick="respondToInvite(&quot;${pendingInvite.id}&quot;,true)">✓ Accept</button>
@@ -6087,10 +6238,10 @@ function renderExchangeStats(){
   ${recaps.length?`<div class="card"><div class="section-title">📋 Session recaps</div>
     ${recaps.slice(0,3).map(r=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-        <strong style="font-size:13px">${r.title}</strong>
+        <strong style="font-size:13px">${esc(r.title)}</strong>
         <span style="font-size:11px;color:var(--text2)">${r.ts}</span>
       </div>
-      <div style="font-size:12px;color:var(--text2);white-space:pre-line">${r.body}</div>
+      <div style="font-size:12px;color:var(--text2);white-space:pre-line">${esc(r.body)}</div>
     </div>`).join('')}
   </div>`:''}`;
 }
@@ -6211,7 +6362,11 @@ function renderTradingHistory(){
 // SECRETARY FEATURES
 // ═══════════════════════════════════════════════
 function renderAdminOfficialNotices(){
-  const notices=DB.minutes.filter(m=>m.type==='official_notice');
+  // postOfficialNotice() actually writes to jex_announcements (a styled
+  // announcement), not jex_minutes -- this list used to filter jex_minutes
+  // for type==='official_notice', which no writer ever set, so it always
+  // rendered empty regardless of how many notices were posted.
+  const notices=DB.announcements.filter(a=>a.title&&a.title.startsWith('📋 OFFICIAL NOTICE: '));
   const u=cu();
   return`<div class="card"><div class="section-title">Post an official notice</div>
     <div class="ibox ibox-blue">Official notices appear on the market page with a formal styling, distinct from regular announcements. Use for procedural communications like session schedules or deadlines.</div>
@@ -6220,15 +6375,15 @@ function renderAdminOfficialNotices(){
     <button class="btn btn-primary" onclick="postOfficialNotice(get('notice-title')?.value,get('notice-body')?.value)">Post official notice</button>
   </div>
   ${notices.length?`<div class="card"><div class="section-title">Posted notices (${notices.length})</div>
-    ${notices.map(m=>`<div style="padding:12px 0;border-bottom:1px solid var(--border)">
+    ${notices.map(a=>`<div style="padding:12px 0;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <div><span class="badge b-blue" style="margin-right:6px">Official notice</span><strong>${m.title}</strong></div>
+        <div><span class="badge b-blue" style="margin-right:6px">Official notice</span><strong>${esc(a.title)}</strong></div>
         <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span>
-          <button class="btn btn-sm btn-danger" onclick="deleteMinutes('${m.id}')">Delete</button>
+          <span style="font-size:11px;color:var(--text2)">${a.ts} — ${esc(a.author_name)}</span>
+          <button class="btn btn-sm btn-danger" onclick="deleteAnnouncement('${a.id}')">Delete</button>
         </div>
       </div>
-      <div style="font-size:13px;color:var(--text2);white-space:pre-line">${m.body}</div>
+      <div style="font-size:13px;color:var(--text2);white-space:pre-line">${esc(a.body)}</div>
     </div>`).join('')}
   </div>`:''}`;
 }
@@ -6236,8 +6391,12 @@ async function postMinutes(title,body){
   const u=cu();
   if(!title||title.trim().length<3)return toast('Enter a title');
   if(!body||body.trim().length<10)return toast('Enter meeting notes (at least 10 characters)');
-  const rec={id:uid(),title:title.trim(),body:body.trim(),author_id:u.id,author_name:u.name,ts:ts()};
-  await sb.post('jex_minutes',rec);
+  // Runs server-side (rpc_post_minutes), re-checking that the caller is
+  // actually Secretary -- this had NO check at all before, client-side or
+  // otherwise, and minutes show on the market page noticeboard to every user.
+  let rec;
+  try{rec=await sb.rpc('rpc_post_minutes',{p_title:title.trim(),p_body:body.trim()});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.minutes.unshift(rec);
   await logActivity('minutes','Meeting minutes posted: '+title.trim(),{userId:u.id,userName:u.name});
   await pushNotificationToAll('minutes','📋 New meeting minutes posted: '+title.trim());
@@ -6254,10 +6413,14 @@ async function deleteMinutes(id){
 }
 async function postOfficialNotice(title,body){
   // Official notice = styled announcement from Secretary
-  const u=cu();
   if(!title||!body)return toast('Enter title and body');
-  const rec={id:uid(),title:'📋 OFFICIAL NOTICE: '+title.trim(),body:body.trim(),level:'info',author_id:u.id,author_name:u.name,ts:ts()};
-  await sb.post('jex_announcements',rec);
+  // Runs server-side (rpc_post_official_notice), re-checking that the
+  // caller is actually Secretary -- this had NO check at all before,
+  // client-side or otherwise, and it posts to the pinned top banner
+  // every user sees on login.
+  let rec;
+  try{rec=await sb.rpc('rpc_post_official_notice',{p_title:title,p_body:body});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.announcements.unshift(rec);
   toast('Official notice posted');render();
 }
@@ -6275,13 +6438,13 @@ function renderAdminMinutes(){
   ${DB.minutes.length?`<div class="card"><div class="section-title">Posted minutes (${DB.minutes.length})</div>
     ${DB.minutes.map(m=>`<div style="padding:12px 0;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <strong>${m.title}</strong>
+        <strong>${esc(m.title)}</strong>
         <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:11px;color:var(--text2)">${m.ts} — ${m.author_name}</span>
+          <span style="font-size:11px;color:var(--text2)">${m.ts} — ${esc(m.author_name)}</span>
           <button class="btn btn-sm btn-danger" onclick="deleteMinutes('${m.id}')">Delete</button>
         </div>
       </div>
-      <div style="font-size:13px;color:var(--text2);white-space:pre-line">${m.body}</div>
+      <div style="font-size:13px;color:var(--text2);white-space:pre-line">${esc(m.body)}</div>
     </div>`).join('')}
   </div>`:''}`;
 }
@@ -6382,11 +6545,11 @@ function renderTreasurerDividendAudit(){
       const owner=DB.users.find(u=>u.id===DB.companies.find(c=>c.name===d.company_name)?.owner_id);
       return`<tr>
         <td style="color:var(--text2)">${d.ts}</td>
-        <td style="font-weight:500">${d.company_name}</td>
+        <td style="font-weight:500">${esc(d.company_name)}</td>
         <td style="font-family:var(--mono)">${fmt(d.per_share)}</td>
         <td style="font-family:var(--mono);font-weight:500;color:var(--red)">${fmt(d.total)}</td>
         <td>${(d.payouts||[]).length} students</td>
-        <td style="font-size:12px;color:var(--text2)">${d.note}</td>
+        <td style="font-size:12px;color:var(--text2)">${esc(d.note)}</td>
       </tr>`;
     }).join('')}
     </tbody></table>`:'<div class="empty">No dividends paid yet</div>'}
@@ -6478,7 +6641,7 @@ function renderActivityLog(){
     <tbody>${filtered.slice(0,100).map(a=>`<tr>
       <td style="color:var(--text2);white-space:nowrap">${a.ts||''}</td>
       <td><span class="badge ${typeBadge[a.type]||'b-gray'}">${typeIcon[a.type]||''} ${a.type}</span></td>
-      <td style="font-size:12px">${a.description}</td>
+      <td style="font-size:12px">${esc(a.description)}</td>
       <td style="font-family:var(--mono);font-size:12px">${a.amount!=null?(a.amount>=0?'+':'')+fmt(a.amount):''}</td>
       <td title="${a.entry_hash||'no hash'}" style="font-size:9px;color:var(--text3);font-family:var(--mono)">${a.entry_hash?a.entry_hash.slice(-4):'—'}</td>
     </tr>`).join('')}</tbody></table>`:'<div class="empty">No matching activity</div>'}
@@ -6506,9 +6669,9 @@ function renderAdminAnnouncements(){
     ${DB.announcements.map(a=>{
       const lvlColor=a.level==='urgent'?'b-red':a.level==='warning'?'b-amber':'b-blue';
       return`<div class="app-row"><div class="app-info">
-        <div class="app-name">${a.title} <span class="badge ${lvlColor}">${a.level}</span></div>
+        <div class="app-name">${esc(a.title)} <span class="badge ${lvlColor}">${a.level}</span></div>
         ${a.body?`<div class="app-meta">${esc(a.body||"")}</div>`:''}
-        <div class="app-meta">${a.author_name||''} · ${a.ts||''}</div>
+        <div class="app-meta">${esc(a.author_name)||''} · ${a.ts||''}</div>
       </div><button class="btn btn-sm btn-danger" onclick="deleteAnnouncement('${a.id}')">Delete</button></div>`;
     }).join('')}</div>`:''}`;
 }
