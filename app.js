@@ -498,7 +498,19 @@ function destroyCharts(){Object.keys(charts).forEach(k=>destroyChart(k));charts=
 const pad=n=>n<10?'0'+n:String(n);
 function getAZTime(){return new Date(new Date().toLocaleString('en-US',{timeZone:'America/Phoenix'}));}
 function fmtAZTime(d){return d.toLocaleString('en-US',{timeZone:'America/Phoenix',weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true})+' MST';}
-async function saveSession(data){Object.assign(DB.session,data);await sb.patch('jex_session','id=eq.1',data);}
+// Runs server-side (rpc_admin_save_session) -- saveSession() itself had no
+// auth check at all, and neither did most of its callers (saveBudgetThreshold,
+// saveDivThreshold, savePriceBand, saveCBPct, saveEmailJSConfig, startTimer,
+// scheduleSession, clearSchedule, saveWeeklySchedule -- not even client-side).
+// The RPC requires Chairman/President, matching setSession's existing check
+// (the only caller that already had one) and the fact that the entire Session
+// admin tab these all live in is only ever rendered for those two roles.
+async function saveSession(data){
+  let r;
+  try{r=await sb.rpc('rpc_admin_save_session',{p_data:data});}
+  catch(e){toast(rpcErrorMessage(e));throw e;}
+  Object.assign(DB.session,r.session);
+}
 function adjStockForm(){
   adjustStockPrice(
     document.getElementById('adj-ticker')?.value,
@@ -524,9 +536,12 @@ async function reviewDivApproval(id,approve){
   const da=DB.divApprovals.find(x=>x.id===id);if(!da)return;
   const u=cu();
   if(!approve){
-    // Rejecting doesn't move money -- stays a simple claimed status patch.
-    const claimed=await sb.patch('jex_dividend_approvals','id=eq.'+id+'&status=eq.pending',{status:'rejected',reviewed_by:u.name});
-    if(!claimed.length)return toast('This request was already reviewed');
+    // Rejecting doesn't move money, but runs server-side now too
+    // (rpc_reject_dividend_approval) -- this had NO check at all before.
+    let r;
+    try{r=await sb.rpc('rpc_reject_dividend_approval',{p_id:id});}
+    catch(e){return toast(rpcErrorMessage(e));}
+    if(!r.rejected)return toast('This request was already reviewed');
     da.status='rejected';da.approved_by=u.name;
     await pushNotification(da.requested_by,'div_approval','❌ Your dividend request for '+da.company_name+' was rejected by the Treasurer.',da.ticker);
     toast('Dividend rejected');render();return;
@@ -722,15 +737,20 @@ async function reassignClassroom(){
   const rawId=get('reassign-uid')?.value;
   const cid=get('reassign-cid-select')?.value||null;
   if(!rawId)return toast('Select a user or company');
-  await sb.patch('jex_users','id=eq.'+rawId,{classroom_id:cid});
+  try{await sb.rpc('rpc_admin_reassign_classroom',{p_user_id:rawId,p_classroom_id:cid});}
+  catch(e){return toast(rpcErrorMessage(e));}
   const u=getUser(rawId);if(u)u.classroom_id=cid;
   toast('Reassigned to classroom: '+(cid||'unassigned'));
   render();
 }
 async function saveSheetsUrl(url){
   url=(url||'').trim();
+  // Runs server-side (rpc_admin_save_sheets_url) -- this had NO check at
+  // all before, and the URL controls where real student balance/activity
+  // data gets synced to.
+  try{await sb.rpc('rpc_admin_save_sheets_url',{p_url:url});}
+  catch(e){return toast(rpcErrorMessage(e));}
   SHEETS_URL=url||null;
-  await sb.patch('jex_session','id=eq.1',{sheets_url:url||null});
   DB.session.sheets_url=url||null;
   toast(url?'Google Sheets sync URL saved ✓':'Sheets sync URL cleared');
   render();
@@ -817,10 +837,14 @@ async function setSession(status){
   render();
 }
 async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;const endsAt=Date.now()+mins*60000;await saveSession({status:'open',label:'Session — '+mins+'min',ends_at:endsAt,scheduled_open:null,scheduled_close:null,weekly_active:false});sessionTimer=setInterval(tickTimer,500);render();}
-function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0){saveSession({status:'closed',label:'Session ended',ends_at:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended!');});return;}const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
+// Countdown display only -- purely local, no write. The actual "has it
+// expired, should it close" decision now belongs entirely to
+// rpc_session_tick() (see sessionAutoTick below), so a display that's
+// briefly stale for up to one 15s poll is the accepted trade-off for not
+// trusting this 500ms client timer to decide anything real anymore.
+function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0)return;const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
 async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
 async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();}
-function checkSchedule(){if(!DB.session.scheduled_open&&!DB.session.scheduled_close)return;const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(DB.session.scheduled_open){const openMin=DB.session.scheduled_open.h*60+DB.session.scheduled_open.m,closeMin=DB.session.scheduled_close.h*60+DB.session.scheduled_close.m;if(nowMin>=openMin&&nowMin<closeMin&&DB.session.status!=='open'){const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;saveSession({status:'open',label:'Open until '+pad(DB.session.scheduled_close.h)+':'+pad(DB.session.scheduled_close.m)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('Trading session is now open!');});}}if(DB.session.scheduled_close&&DB.session.status==='open'&&DB.session.ends_at&&Date.now()>=DB.session.ends_at){saveSession({status:'closed',label:'Session ended',ends_at:null,scheduled_close:null}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('Session ended.');});}}
 // ── Weekly recurring schedule (different hours per day of week, repeats every week) ──
 const WEEKDAY_KEYS=['sun','mon','tue','wed','thu','fri','sat'];
 const WEEKDAY_LABELS={sun:'Sunday',mon:'Monday',tue:'Tuesday',wed:'Wednesday',thu:'Thursday',fri:'Friday',sat:'Saturday'};
@@ -838,27 +862,31 @@ function saveWeeklySchedule(){
   }
   saveSession({weekly_schedule:ws}).then(()=>{toast('Weekly schedule saved');render();});
 }
-function checkWeeklySchedule(){
-  const ws=DB.session.weekly_schedule;if(!ws)return;
-  const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();
-  const today=ws[WEEKDAY_KEYS[az.getDay()]];
-  const openMin=today?today.open.h*60+today.open.m:-1,closeMin=today?today.close.h*60+today.close.m:-1;
-  const inWindow=today&&today.enabled&&nowMin>=openMin&&nowMin<closeMin;
-  if(!inWindow){
-    if(DB.session.weekly_active&&DB.session.status==='open'){
-      saveSession({status:'closed',label:'Session closed',ends_at:null,weekly_active:false,weekly_override:false}).then(()=>{clearInterval(sessionTimer);sessionTimer=null;render();toast('🔴 Trading session closed (weekly schedule)');});
-    } else if(DB.session.weekly_override){
-      saveSession({weekly_override:false});
-    }
-    return;
+// Replaces checkSchedule()/checkWeeklySchedule() -- every connected
+// client still polls every 15s, but the actual decision (is a timer
+// expired, has a one-time or weekly window opened/closed) is now made
+// entirely server-side by rpc_session_tick(), which re-derives it from
+// jex_session's own stored fields and the real server clock rather than
+// trusting each client's local Date.now()/timezone math. This function
+// just applies whatever the server decided.
+async function sessionAutoTick(){
+  if(!UI.userId)return;
+  const wasOpen=DB.session.status==='open';
+  let r;
+  try{r=await sb.rpc('rpc_session_tick',{});}catch(e){return;}
+  if(!r.changed)return;
+  Object.assign(DB.session,r.session);
+  const nowOpen=DB.session.status==='open';
+  if(nowOpen&&!wasOpen){
+    sessionTimer=setInterval(tickTimer,500);
+    toast(DB.session.label.includes('weekly')?'🟢 Trading session opened (weekly schedule)':'Trading session is now open!');
+  } else if(!nowOpen&&wasOpen){
+    clearInterval(sessionTimer);sessionTimer=null;
+    toast(DB.session.label&&DB.session.label.includes('weekly')?'🔴 Trading session closed (weekly schedule)':'Session ended.');
   }
-  if(DB.session.weekly_override)return; // admin manually overrode this window — don't fight them
-  if(DB.session.status!=='open'){
-    const msUntilEnd=(closeMin-nowMin)*60*1000-az.getSeconds()*1000;
-    saveSession({status:'open',label:'Open until '+pad(today.close.h)+':'+pad(today.close.m)+' MST (weekly schedule)',ends_at:Date.now()+msUntilEnd,weekly_active:true}).then(()=>{sessionTimer=setInterval(tickTimer,500);render();toast('🟢 Trading session opened (weekly schedule)');});
-  }
+  render();
 }
-setInterval(()=>{checkSchedule();checkWeeklySchedule();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
+setInterval(()=>{sessionAutoTick();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
 
 // ── Auto-refresh: pull latest data every 20 seconds ──────
 let _lastRefresh=0;
@@ -1005,8 +1033,11 @@ async function checkGoogleSession(){
   if(existing){
     // Quietly backfill auth_uid for a legacy account the first time it signs in with
     // Google — costs nothing, and means one less account stuck on the old system.
+    // Runs server-side (rpc_link_own_auth_uid), which independently checks the
+    // caller's own live-session email (from the JWT, not client-supplied)
+    // against this row's stored email before linking.
     if(authUid&&!existing.auth_uid){
-      try{await updateUser(existing.id,{auth_uid:authUid});}catch(e){console.warn('auth_uid backfill failed:',e);}
+      try{await sb.rpc('rpc_link_own_auth_uid',{p_user_id:existing.id});existing.auth_uid=authUid;}catch(e){console.warn('auth_uid backfill failed:',e);}
     }
     UI.userId=existing.id;
     UI.navTab=isAdmin(existing)?'admin':existing.role==='company'?'apply':'market';
@@ -1243,7 +1274,10 @@ async function loginByForm(){
         const signInRes=await supaAuth.auth.signInWithPassword({email:u.email,password:pw});
         if(!signInRes.error&&signInRes.data&&signInRes.data.session)authUid=signInRes.data.session.user.id;
       }
-      if(authUid)await updateUser(u.id,{auth_uid:authUid});
+      // Runs server-side (rpc_link_own_auth_uid) -- same JWT-email check as
+      // the Google backfill above, now backed by the fresh Supabase Auth
+      // session signUp/signInWithPassword just established for this email.
+      if(authUid){await sb.rpc('rpc_link_own_auth_uid',{p_user_id:u.id});u.auth_uid=authUid;}
     }catch(e){console.warn('legacy account auth migration failed:',e);}
   }
   return finishLogin(u);
@@ -1253,12 +1287,13 @@ async function changeEmail(uid2,newEmail,pw){
   const u=getUser(uid2);if(!u)return;
   if(!newEmail||!newEmail.includes('@'))return toast('Enter a valid email address');
   if(!pw)return toast('Enter your current password');
-  let okEm=false;
-  try{okEm=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:pw});}catch(e){okEm=false;}
-  if(!okEm)return toast('Incorrect password');
   const norm_email=newEmail.trim().toLowerCase();
-  if(DB.users.find(x=>x.id!==uid2&&x.email===norm_email))return toast('That email is already in use');
-  await updateUser(uid2,{email:norm_email});
+  // Runs server-side (rpc_change_email), re-verifying the password itself
+  // (same verify_legacy_password check, now authoritative instead of just
+  // gating a separate client-trusted write) and the email-uniqueness check.
+  try{await sb.rpc('rpc_change_email',{p_user_id:uid2,p_cur_pw:pw,p_new_email:norm_email});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.email=norm_email;
   toast('✓ Email updated to '+norm_email);render();
 }
 // For migrated (real Supabase Auth) accounts — identity is proven by the live signed-in
@@ -1267,30 +1302,30 @@ async function changeEmail(uid2,newEmail,pw){
 // the two never drift out of sync with each other.
 async function changeEmailSupa(uid2,newEmail){
   if(!supaAuth)return toast('Not available right now');
-  // Unlike the legacy changeEmail (whose current-password check is itself tied to
-  // uid2), identity here comes from the live session alone — so uid2 must be pinned
-  // to whoever that session actually belongs to, or a caller could pass someone
-  // else's id and overwrite THEIR jex_users.email while only re-authenticating their
-  // own real Auth account, leaving the victim's row pointing at an email their real
-  // credential no longer matches.
   if(!cu()||uid2!==cu().id)return toast('You can only change your own email');
-  if(['secretary','treasurer','compliance_officer'].includes(cu().role))return toast('This account cannot change its email');
   if(!newEmail||!newEmail.includes('@'))return toast('Enter a valid email address');
   const norm_email=newEmail.trim().toLowerCase();
-  if(DB.users.find(x=>x.id!==uid2&&x.email===norm_email))return toast('That email is already in use');
   try{
     const{error}=await supaAuth.auth.updateUser({email:norm_email},{emailRedirectTo:window.location.origin+window.location.pathname});
     if(error)return toast('Failed to update email: '+error.message);
   }catch(e){return toast('Failed to update email: '+(e.message||e));}
-  await updateUser(uid2,{email:norm_email});
+  // Runs server-side (rpc_change_email_supa) -- operates only on
+  // auth.uid()'s own row (no target id accepted at all), so a spoofed uid2
+  // can no longer overwrite someone else's jex_users.email.
+  try{await sb.rpc('rpc_change_email_supa',{p_new_email:norm_email});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  cu().email=norm_email;
   toast('✓ Email updated to '+norm_email);render();
 }
 async function changePw(uid2,cur,nw2,conf){const u=getUser(uid2);if(!u)return;
-  let okPw=false;
-  try{okPw=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:cur});}catch(e){okPw=false;}
-  if(!okPw)return toast('Current password incorrect');
   if(!nw2||nw2.length<6)return toast('Minimum 6 characters required');if(nw2!==conf)return toast('Passwords do not match');
-  const h=await hashPw(nw2);await sb.patch('jex_users','id=eq.'+uid2,{password:h});toast('Password changed');render();}
+  // Runs server-side (rpc_change_password), re-verifying the current
+  // password itself instead of trusting this client-side check alone --
+  // jex_users.password was never column-revoked before this, so a raw
+  // PATCH could overwrite ANY row's actual credential.
+  try{await sb.rpc('rpc_change_password',{p_user_id:uid2,p_cur_pw:cur,p_new_pw:nw2});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  toast('Password changed');render();}
 // For migrated (real Supabase Auth) accounts — no stored local password to check
 // against, so identity is proven by the live signed-in session instead.
 async function changePwSupa(nw2,conf){
@@ -1312,7 +1347,11 @@ async function adminResetPw(uid2,pw){
   // while telling the officer it worked. Route those through a real reset email instead.
   if(u.auth_provider==='google'||u.auth_uid)return toast('This account uses real sign-in — use "Send password reset email" instead');
   if(!pw||pw.length<4)return toast('Min 4 characters');
-  const h=await hashPw(pw);await sb.patch('jex_users','id=eq.'+uid2,{password:h});toast(u.name+"'s password reset");render();
+  // Runs server-side (rpc_admin_reset_password), re-checking every rule
+  // above -- they were client-side only.
+  try{await sb.rpc('rpc_admin_reset_password',{p_user_id:uid2,p_new_pw:pw});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  toast(u.name+"'s password reset");render();
 }
 async function adminSendResetEmail(uid2){
   if(!isAdmin(cu()))return toast('Admin access required');
@@ -1328,7 +1367,9 @@ async function adminSendResetEmail(uid2){
 async function toggleEmailNotifications(enabled){
   const u=cu();if(!u)return;
   if(['secretary','treasurer','compliance_officer'].includes(u.role))return toast('Email notifications are not available for this account');
-  await updateUser(u.id,{email_notifications:enabled});
+  try{await sb.rpc('rpc_toggle_email_notifications',{p_enabled:!!enabled});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.email_notifications=!!enabled;
   toast(enabled?'Email notifications enabled':'Email notifications disabled');
   render();
 }
@@ -1337,7 +1378,9 @@ async function saveNotifEmail(){
   if(['secretary','treasurer','compliance_officer'].includes(u.role))return toast('Email notifications are not available for this account');
   const email=(get('notif-email')?.value||'').trim().toLowerCase();
   if(!email||!email.includes('@'))return toast('Enter a valid email address');
-  await updateUser(u.id,{notification_email:email});
+  try{await sb.rpc('rpc_save_notification_email',{p_email:email});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.notification_email=email;
   toast('✓ Notification email saved: '+email);render();
 }
 async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)return;
@@ -1352,7 +1395,16 @@ async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)retu
   }else{
     try{okSq=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:curPw});}catch(e){okSq=false;}
   }
-  if(!okSq)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');await sb.patch('jex_users','id=eq.'+uid2,{sec_q:newQ,sec_a:norm(newA)});u.sec_q=newQ;toast('Security question updated');render();}
+  if(!okSq)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');
+  // The actual write runs server-side (rpc_update_security_question), which
+  // re-verifies identity itself (current password for legacy accounts, an
+  // actual live Supabase Auth session for migrated ones) instead of
+  // trusting the client-side check above alone. Closes a real
+  // account-takeover path: sec_a (the answer "Forgot password" checks) was
+  // directly PATCH-able on ANY row with no verification at all before this.
+  try{await sb.rpc('rpc_update_security_question',{p_user_id:uid2,p_cur_pw:curPw,p_new_q:newQ,p_new_a:newA});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.sec_q=newQ;toast('Security question updated');render();}
 async function forgotStep1(email){
   const u=DB.users.find(u=>u.email&&norm(u.email)===norm(email)&&u.status==='approved');
   if(!u)return toast('No account found with that email');
@@ -1394,7 +1446,15 @@ async function forgotStep3(pw,conf){
     toast('Password reset');UI.loginView='select';UI.forgotUserId=null;UI.forgotAnswer=null;render();
     return;
   }
-  const fpH=await hashPw(pw);await sb.patch('jex_users','id=eq.'+u.id,{password:fpH});
+  // Runs server-side (rpc_reset_legacy_password), re-verifying the
+  // security answer itself -- same reasoning as reset_migrated_password
+  // above: this function is directly reachable, so it can't trust that
+  // forgotStep2's check already happened. The previous raw PATCH here had
+  // NO server-side check of any kind, making it callable with any
+  // UI.forgotUserId to reset ANY account's password outright.
+  let ok=false;
+  try{ok=await sb.rpc('rpc_reset_legacy_password',{p_user_id:u.id,p_answer:UI.forgotAnswer,p_new_pw:pw});}catch(e){ok=false;}
+  if(!ok)return toast('Could not reset password — start over from Forgot Password');
   toast('Password reset');UI.loginView='select';UI.forgotUserId=null;UI.forgotAnswer=null;render();
 }
 async function finishPasswordRecovery(pw,conf){
@@ -1511,8 +1571,12 @@ async function respondToInvite(memberId,accept){
   if(m.student_id!==cu()?.id)return toast('This invitation is not addressed to you');
   if(!confirm(accept?'Accept this founder invitation?':'Decline this founder invitation?'))return;
 
-  // Update jex_company_members status
-  await sb.patch('jex_company_members','id=eq.'+memberId,{status:accept?'accepted':'declined'});
+  // Update jex_company_members status. Runs server-side
+  // (rpc_respond_to_invite), re-checking the same "addressed to you" rule
+  // above -- it was client-side only, so a raw PATCH could accept/decline
+  // any invitation on someone else's behalf.
+  try{await sb.rpc('rpc_respond_to_invite',{p_member_id:memberId,p_accept:!!accept});}
+  catch(e){return toast(rpcErrorMessage(e));}
   m.status=accept?'accepted':'declined';
 
   const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
@@ -1655,7 +1719,10 @@ async function removeFounder(memberId,name){
   const targetCo=DB.companies.find(c=>c.owner_id===m.company_user_id);
   if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can remove a founder');
   if(!confirm('Remove '+name+' as a founder? They will lose access to manage this company.'))return;
-  await sb.patch('jex_company_members','id=eq.'+memberId,{status:'removed'});
+  // Runs server-side (rpc_remove_founder), re-checking the same
+  // owner-or-founder rule above -- it was client-side only.
+  try{await sb.rpc('rpc_remove_founder',{p_member_id:memberId});}
+  catch(e){return toast(rpcErrorMessage(e));}
   m.status='removed';
   const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
   const u=cu();
@@ -1715,8 +1782,12 @@ async function flagAccount(targetId,targetName,targetType,reason){
 async function resolveFlag(flagId,action,note){
   const f=DB.flags.find(x=>x.id===flagId);if(!f)return;
   const u=cu();
-  const claimed=await sb.patch('jex_flags','id=eq.'+flagId+'&status=eq.open',{status:action,resolution_note:(note||'').trim(),resolved_by:u.name});
-  if(!claimed.length)return toast('This flag was already resolved');
+  // Runs server-side (rpc_admin_resolve_flag) -- this had NO check at all
+  // before (compliance flags could be resolved/dismissed by anyone).
+  let r;
+  try{r=await sb.rpc('rpc_admin_resolve_flag',{p_flag_id:flagId,p_action:action,p_note:note||''});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  if(!r.resolved)return toast('This flag was already resolved');
   f.status=action;f.resolution_note=(note||'').trim();f.resolved_by=u.name;
   await logActivity('flag_resolve',u.name+' '+(action==='resolved'?'resolved':'dismissed')+' flag on '+f.target_name+(note?' — '+note:''),{userId:u.id,userName:u.name});
   toast('Flag '+(action==='resolved'?'resolved':'dismissed'));render();
@@ -1902,8 +1973,7 @@ async function placeStopLoss(ticker,triggerPrice){
   // Cancel existing stop-loss for this ticker
   const existing=DB.stopLossOrders.find(s=>s.user_id===u.id&&s.ticker===ticker&&s.status==='active');
   if(existing){
-    await sb.patch('jex_stop_loss','id=eq.'+existing.id,{status:'cancelled'});
-    existing.status='cancelled';
+    try{await sb.rpc('rpc_cancel_stop_loss',{p_id:existing.id});existing.status='cancelled';}catch(e){}
   }
   const rec={id:uid(),user_id:u.id,ticker,trigger_price:triggerPrice,shares:held,status:'active',ts:ts()};
   await sb.post('jex_stop_loss',rec);
@@ -1916,7 +1986,10 @@ function doPlaceStopLoss(ticker){
 async function cancelStopLoss(id){
   const s0=DB.stopLossOrders.find(x=>x.id===id);
   if(!s0||s0.user_id!==cu()?.id)return toast('You can only cancel your own stop-loss orders');
-  await sb.patch('jex_stop_loss','id=eq.'+id,{status:'cancelled'});
+  // Runs server-side (rpc_cancel_stop_loss), re-checking the same
+  // ownership rule above -- it was client-side only.
+  try{await sb.rpc('rpc_cancel_stop_loss',{p_id:id});}
+  catch(e){return toast(rpcErrorMessage(e));}
   const s=DB.stopLossOrders.find(x=>x.id===id);if(s)s.status='cancelled';
   toast('Stop-loss cancelled');render();
 }
@@ -1989,13 +2062,18 @@ async function checkPriceAlerts(){
     const co=getCo(a.ticker);if(!co)continue;
     const triggered=(a.direction==='above'&&co.price>=a.target_price)||(a.direction==='below'&&co.price<=a.target_price);
     if(!triggered)continue;
-    // Atomic claim, same reasoning as stop-loss orders: without it, two clients
-    // polling at the same moment could both fire this alert's notification.
-    const claimed=await sb.patch('jex_price_alerts','id=eq.'+a.id+'&triggered=eq.false',{triggered:true});
-    if(!claimed.length){a.triggered=true;continue;}
+    // The actual claim + condition re-check both run server-side now
+    // (rpc_trigger_price_alert) -- the local check above is just a cheap
+    // filter so an obviously-not-due alert doesn't round-trip on every
+    // poll, same as the stop-loss/circuit-breaker polling loops. The RPC
+    // re-validates price vs target itself rather than trusting this
+    // client-side match.
+    let r;
+    try{r=await sb.rpc('rpc_trigger_price_alert',{p_id:a.id});}catch(e){continue;}
+    if(!r.triggered){if(r.reason==='already_triggered_or_missing')a.triggered=true;continue;}
     a.triggered=true;
-    await pushNotification(a.user_id,'price_alert','🎯 Price alert: '+a.ticker+' is '+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0)+' (now '+fmt(co.price)+')',a.ticker);
-    toast('Price alert triggered: '+a.ticker+' '+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0));
+    await pushNotification(r.user_id,'price_alert','🎯 Price alert: '+r.ticker+' is '+r.direction+' '+fmt(r.target_price)+' (now '+fmt(r.price)+')',r.ticker);
+    toast('Price alert triggered: '+r.ticker+' '+r.direction+' '+fmt(r.target_price));
   }
 }
 
@@ -2134,10 +2212,10 @@ async function pushNotificationToAll(type,message,excludeIds=[]){
 }
 async function markAllRead(){
   const unread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read);
-  for(const n of unread){
-    await sb.patch('jex_notifications','id=eq.'+n.id,{read:true});
-    n.read=true;
-  }
+  // Runs server-side (rpc_mark_notifications_read), scoped to the
+  // caller's own rows via auth.uid() rather than a client-supplied id.
+  try{await sb.rpc('rpc_mark_notifications_read',{});}catch(e){return;}
+  for(const n of unread)n.read=true;
   render();
 }
 function myUnreadCount(){
@@ -2410,8 +2488,6 @@ setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();await
 // ═══════════════════════════════════════════════
 // TRADING
 // ═══════════════════════════════════════════════
-async function updateUser(uid2,data){const u=getUser(uid2);if(!u)return;Object.assign(u,data);await sb.patch('jex_users','id=eq.'+uid2,data);}
-async function updateCo(ticker,data){const co=getCo(ticker);if(!co)return;Object.assign(co,data);await sb.patch('jex_companies','ticker=eq.'+ticker,data);}
 // Market buy/sell/short/cover are executed server-side (rpc_trade_* —
 // see trade_engine_migration.sql) so cash/holdings/shares/price can't be
 // fabricated by a raw REST call — the client can no longer PATCH those
@@ -2490,7 +2566,15 @@ async function coverShort(ticker,qty){
   applyTradeResult(ticker,r);
   toast('Covered '+qty+' × '+ticker+' | P&L: '+(r.pnl>=0?'+':'')+fmt(r.pnl));if(UI.companyPage)render();else openPanel(ticker);
 }
-async function toggleWatch(ticker){const u=cu();if(!u)return;const wl=[...watchlist(u)];const i=wl.indexOf(ticker);if(i>=0){wl.splice(i,1);toast(ticker+' removed from watchlist');}else{wl.push(ticker);toast(ticker+' added to watchlist');}await updateUser(u.id,{watchlist:wl});render();}
+async function toggleWatch(ticker){
+  const u=cu();if(!u)return;
+  const wasWatched=watchlist(u).includes(ticker);
+  toast(wasWatched?ticker+' removed from watchlist':ticker+' added to watchlist');
+  let r;
+  try{r=await sb.rpc('rpc_toggle_watchlist',{p_ticker:ticker});}catch(e){return;}
+  u.watchlist=r.watchlist;
+  render();
+}
 
 // ═══════════════════════════════════════════════
 // FUNDS
@@ -2505,7 +2589,6 @@ function currentFundNav(f){
   const totalValue=Math.round((f.cash+holdingsValue+fundShortPnl(f))*100)/100;
   return f.units_outstanding>0?Math.round((totalValue/f.units_outstanding)*10000)/10000:10;
 }
-async function updateFund(fundId,data){const f=getFund(fundId);if(!f)return;Object.assign(f,data);await sb.patch('jex_funds','id=eq.'+fundId,data);}
 
 async function createFund(name,feePct){
   const u=cu();if(!u||u.role!=='company')return toast('Only company accounts can create a fund');
@@ -2522,7 +2605,11 @@ async function closeFund(fundId){
   const f=getFund(fundId);if(!f)return;
   if(!canManageFund(f))return toast('Only this fund\'s manager or the Chairman can close it');
   if(f.status!=='active')return;
-  await updateFund(fundId,{status:'closed'});
+  // Runs server-side (rpc_close_fund), re-checking the same
+  // manager-or-Chairman rule above -- it was client-side only.
+  try{await sb.rpc('rpc_close_fund',{p_fund_id:fundId});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  f.status='closed';
   toast('Fund closed to new deposits — existing depositors can still withdraw');render();
 }
 // Fund deposit/withdraw run server-side (rpc_fund_deposit/rpc_fund_withdraw)
@@ -2653,11 +2740,14 @@ async function postFinancials(ticker,period,revenue,profit,summary){
   if(isNaN(revenue)||revenue<0)return toast('Enter a valid revenue amount');
   if(isNaN(profit))return toast('Enter a valid profit amount (can be negative for a loss)');
   if(!summary||summary.trim().length<10)return toast('Add a short summary (at least 10 characters)');
-  const entry={id:uid(),period:period.trim(),revenue,profit,summary:summary.trim(),ts:ts()};
-  const newFinancials=[entry,...(co.financials||[])];
-  await updateCo(ticker,{financials:newFinancials});
-  await pushNotificationToHolders(ticker,'financials','📊 '+co.name+' ('+ticker+') posted financial results for '+entry.period+': Revenue '+fmt(revenue)+', Profit '+fmt(profit));
-  await logActivity('financials',co.name+' posted financials for '+entry.period+' — Rev '+fmt(revenue)+', Profit '+fmt(profit),{ticker,amount:revenue});
+  // Runs server-side (rpc_post_financials), re-checking the same
+  // owner-only rule above -- it was client-side only.
+  let r;
+  try{r=await sb.rpc('rpc_post_financials',{p_ticker:ticker,p_period:period.trim(),p_revenue:revenue,p_profit:profit,p_summary:summary.trim()});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  co.financials=r.financials;
+  await pushNotificationToHolders(ticker,'financials','📊 '+co.name+' ('+ticker+') posted financial results for '+r.entry.period+': Revenue '+fmt(revenue)+', Profit '+fmt(profit));
+  await logActivity('financials',co.name+' posted financials for '+r.entry.period+' — Rev '+fmt(revenue)+', Profit '+fmt(profit),{ticker,amount:revenue});
   toast('Financial report posted');render();
 }
 async function updateFundingGoal(ticker,goal,useOfFunds){
@@ -2670,7 +2760,11 @@ async function updateFundingGoal(ticker,goal,useOfFunds){
     g=Math.round(g*100)/100;
   }
   const uof=(useOfFunds||'').trim().slice(0,1000)||null;
-  await updateCo(ticker,{funding_goal:g,use_of_funds:uof});
+  // Runs server-side (rpc_update_funding_goal), re-checking the same
+  // owner-or-founder rule above -- it was client-side only.
+  try{await sb.rpc('rpc_update_funding_goal',{p_ticker:ticker,p_goal:g,p_use_of_funds:uof});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  co.funding_goal=g;co.use_of_funds=uof;
   toast('Funding goal updated');render();
 }
 // Buybacks are executed server-side (rpc_buyback) -- besides closing the
@@ -2764,31 +2858,33 @@ async function submitIPO(name,ticker,price,shares,desc){
   const app={id:uid(),user_id:UI.userId,name:name.trim(),ticker,price:p,shares:s,description:(desc||'').trim(),status:'pending',ts:ts()};
   await sb.post('jex_ipo_applications',app);
   DB.ipoApps.push(app);
-  await updateUser(UI.userId,{app_status:'pending'});
+  try{await sb.rpc('rpc_set_own_app_status',{p_status:'pending'});}catch(e){}
+  const self=cu();if(self)self.app_status='pending';
   toast('✓ IPO application submitted! Awaiting Chairman approval.');
   UI.appTab='status';
   render();
 }
 async function reviewIPO(id,approve){
   const app=DB.ipoApps.find(a=>a.id===id);if(!app)return;
-  if(approve&&DB.companies.find(c=>c.ticker===app.ticker))return toast('Ticker "'+app.ticker+'" is already listed — reject this application or have the applicant resubmit with a different ticker.');
-  // Atomically claim this application before listing — otherwise a double-click or
-  // two admins reviewing it at once could both pass the (stale) ticker check above
-  // and both list a company under the same ticker.
-  const claimed=await sb.patch('jex_ipo_applications','id=eq.'+id+'&status=eq.pending',{status:approve?'approved':'rejected'});
-  if(!claimed.length)return toast('This application was already reviewed');
+  // Runs server-side (rpc_review_ipo) -- this had NO auth check at all
+  // before, not even client-side: any authenticated caller could create a
+  // fully fabricated listed company (or silently reject someone else's
+  // real application). The RPC requires Chairman/President and does the
+  // same atomic pending-claim + ticker-uniqueness check the client used to
+  // do unsafely, entirely inside the database.
+  let r;
+  try{r=await sb.rpc('rpc_review_ipo',{p_id:id,p_approve:!!approve});}
+  catch(e){return toast(rpcErrorMessage(e));}
   app.status=approve?'approved':'rejected';
-  if(approve){
-    const owner=getUser(app.user_id);
-    const co={id:uid(),name:app.name,ticker:app.ticker,price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',owner_id:app.user_id,description:app.description,price_history:[{p:app.price,t:'IPO'}],financials:[],classroom_id:owner?.classroom_id||null};
-    await sb.post('jex_companies',co);DB.companies.push(co);
-    await updateUser(app.user_id,{app_status:'approved'});
-    await logActivity('ipo',app.name+' ('+app.ticker+') listed on JEX @ '+fmt(app.price),{ticker:app.ticker,userId:app.user_id,amount:app.price});
-    await pushNotification(app.user_id,'ipo','🎉 Your IPO has been approved! '+app.name+' ('+app.ticker+') is now listed on JEX.',app.ticker);
-    toast('✓ '+app.name+' ('+app.ticker+') is now listed on JEX!');
+  if(r.approved){
+    DB.companies.push(r.company);
+    const owner=getUser(r.user_id);if(owner)owner.app_status='approved';
+    await logActivity('ipo',r.name+' ('+r.ticker+') listed on JEX @ '+fmt(r.price),{ticker:r.ticker,userId:r.user_id,amount:r.price});
+    await pushNotification(r.user_id,'ipo','🎉 Your IPO has been approved! '+r.name+' ('+r.ticker+') is now listed on JEX.',r.ticker);
+    toast('✓ '+r.name+' ('+r.ticker+') is now listed on JEX!');
   } else {
-    await updateUser(app.user_id,{app_status:'rejected'});
-    await pushNotification(app.user_id,'ipo','❌ Your IPO application for '+app.name+' was rejected.');
+    const owner=getUser(r.user_id);if(owner)owner.app_status='rejected';
+    await pushNotification(r.user_id,'ipo','❌ Your IPO application for '+r.name+' was rejected.');
     toast('IPO application rejected');
   }
   render();
@@ -2891,19 +2987,20 @@ async function delistCompany(ticker,silent=false){
   if(!isAdmin(cu()))return toast('Admin access required');
   const co=DB.companies.find(c=>c.ticker===ticker);if(!co)return;
   if(!silent&&!confirm('Delist '+co.name+' ('+ticker+')? The company can reapply for IPO later.'))return;
-  // Soft delist — keep the record so the company can reapply
-  await sb.patch('jex_companies','ticker=eq.'+ticker,{status:'delisted'});
+  // Soft delist + cancelling open orders now all run server-side in one
+  // transaction (rpc_admin_delist_company) instead of 3 separate direct
+  // client writes.
+  let r;
+  try{r=await sb.rpc('rpc_admin_delist_company',{p_ticker:ticker});}
+  catch(e){return toast(rpcErrorMessage(e));}
   co.status='delisted';
-  // Cancel all open limit orders for this ticker
-  const openOrders=DB.limitOrders.filter(o=>o.ticker===ticker&&(o.status==='open'||o.status==='after_hours'));
-  for(const o of openOrders){
-    await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'cancelled'});
-    o.status='cancelled';
-    await pushNotification(o.user_id,'halt','📋 Limit order cancelled — '+ticker+' has been delisted.',ticker);
+  for(const {id,user_id} of r.cancelled_orders){
+    const o=DB.limitOrders.find(x=>x.id===id);if(o)o.status='cancelled';
+    await pushNotification(user_id,'halt','📋 Limit order cancelled — '+ticker+' has been delisted.',ticker);
   }
-  // Cancel stop-loss orders
-  const slOrders=(DB.stopLossOrders||[]).filter(s=>s.ticker===ticker&&s.status==='active');
-  for(const s of slOrders){await sb.patch('jex_stop_loss','id=eq.'+s.id,{status:'cancelled'});s.status='cancelled';}
+  for(const id of r.cancelled_stop_loss){
+    const s=(DB.stopLossOrders||[]).find(x=>x.id===id);if(s)s.status='cancelled';
+  }
   // Notify shareholders
   await pushNotificationToHolders(ticker,'halt','⚠️ '+co.name+' ('+ticker+') has been delisted from JEX.');
   await logActivity('ipo',co.name+' ('+ticker+') delisted',{ticker});
@@ -3152,35 +3249,22 @@ async function submitClassApplication(parentTicker,classType,votesPerShare,share
 // ── Chairman: approve / reject class application ─────────
 async function reviewClassApp(id,approve){
   const app=DB.classApps.find(a=>a.id===id);if(!app)return;
-  const isConversion=app.reason&&app.reason.startsWith('[CONVERT]');
-  if(approve&&!isConversion&&DB.companies.find(c=>c.ticker===app.proposed_ticker))return toast('Ticker "'+app.proposed_ticker+'" is already listed — reject this application instead.');
-  // Atomically claim before listing/converting — otherwise a double-click or two
-  // admins reviewing this at once could both pass the (stale) ticker check above.
-  const claimed=await sb.patch('jex_class_applications','id=eq.'+id+'&status=eq.pending',{status:approve?'approved':'rejected'});
-  if(!claimed.length)return toast('This application was already reviewed');
+  // Runs server-side (rpc_review_class_application) -- this had NO auth
+  // check at all before, not even client-side: any authenticated caller
+  // could create a fake share class or listed company. The RPC requires
+  // Chairman/President and does the same atomic pending-claim +
+  // ticker-uniqueness check the client used to do unsafely.
+  let r;
+  try{r=await sb.rpc('rpc_review_class_application',{p_id:id,p_approve:!!approve});}
+  catch(e){return toast(rpcErrorMessage(e));}
   app.status=approve?'approved':'rejected';
-  if(approve){
-    if(isConversion){
-      // Convert existing stock — just add metadata, don't create new company entry
-      const meta={id:uid(),parent_ticker:app.parent_ticker,ticker:app.proposed_ticker,
-        class:app.class,label:'Class '+app.class,votes_per_share:app.votes_per_share,
-        restricted:app.restricted,whitelist:app.whitelist||[],
-        company_name:app.company_name,owner_id:app.owner_id};
-      await sb.post('jex_share_classes',meta);DB.shareClasses.push(meta);
+  if(r.approved){
+    DB.shareClasses.push(r.share_class);
+    if(r.is_conversion){
       await logActivity('class_approved',app.company_name+' '+app.proposed_ticker+' converted to Class '+app.class,{ticker:app.proposed_ticker});
       toast(app.company_name+' ('+app.proposed_ticker+') converted to Class '+app.class+'!');
     } else {
-      // New class — create a new company listing
-      const co={id:uid(),name:app.company_name+' (Class '+app.class+')',ticker:app.proposed_ticker,
-        price:app.price,shares:app.shares,shares_avail:app.shares,status:'listed',
-        owner_id:app.owner_id,description:'Class '+app.class+' shares of '+app.company_name,
-        price_history:[{p:app.price,t:'Class '+app.class+' IPO'}],financials:[]};
-      await sb.post('jex_companies',co);DB.companies.push(co);
-      const meta={id:uid(),parent_ticker:app.parent_ticker,ticker:app.proposed_ticker,
-        class:app.class,label:'Class '+app.class,votes_per_share:app.votes_per_share,
-        restricted:app.restricted,whitelist:app.whitelist||[],
-        company_name:app.company_name,owner_id:app.owner_id};
-      await sb.post('jex_share_classes',meta);DB.shareClasses.push(meta);
+      DB.companies.push(r.company);
       await logActivity('class_approved',app.company_name+' Class '+app.class+' ('+app.proposed_ticker+') listed',{ticker:app.proposed_ticker});
       toast(app.company_name+' Class '+app.class+' listed as '+app.proposed_ticker+'!');
     }
@@ -3220,7 +3304,10 @@ async function closeVote(voteId){
   const targetCo=getCo(targetV.parent_ticker);
   if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can close its vote');
   if(!confirm('Close this vote?'))return;
-  await sb.patch('jex_votes','id=eq.'+voteId,{status:'closed'});
+  // Runs server-side (rpc_close_vote), re-checking the same owner-or-
+  // founder rule above -- it was client-side only.
+  try{await sb.rpc('rpc_close_vote',{p_vote_id:voteId});}
+  catch(e){return toast(rpcErrorMessage(e));}
   const v=DB.votes.find(x=>x.id===voteId);if(v){
     v.status='closed';
     // Notify all who voted
@@ -3558,8 +3645,12 @@ async function submitBugReport(){
 async function resolveBugReport(reportId){
   const r=DB.bugReports.find(x=>x.id===reportId);if(!r)return;
   const u=cu();
-  const claimed=await sb.patch('jex_bug_reports','id=eq.'+reportId+'&status=eq.open',{status:'resolved',resolved_by:u.name});
-  if(!claimed.length)return toast('This report was already resolved');
+  // Runs server-side (rpc_admin_resolve_bug_report) -- this had NO check
+  // at all before.
+  let res;
+  try{res=await sb.rpc('rpc_admin_resolve_bug_report',{p_report_id:reportId});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  if(!res.resolved)return toast('This report was already resolved');
   r.status='resolved';r.resolved_by=u.name;
   toast('Bug report marked resolved');render();
 }
@@ -3593,8 +3684,12 @@ function renderContactAdminModalHTML(){
 async function resolveContactMessage(msgId){
   const m=DB.contactMessages.find(x=>x.id===msgId);if(!m)return;
   const u=cu();
-  const claimed=await sb.patch('jex_contact_messages','id=eq.'+msgId+'&status=eq.open',{status:'resolved',resolved_by:u.name});
-  if(!claimed.length)return toast('This message was already resolved');
+  // Runs server-side (rpc_admin_resolve_contact_message) -- this had NO
+  // check at all before.
+  let r;
+  try{r=await sb.rpc('rpc_admin_resolve_contact_message',{p_msg_id:msgId});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  if(!r.resolved)return toast('This message was already resolved');
   m.status='resolved';m.resolved_by=u.name;
   toast('Message marked resolved');render();
 }
@@ -4683,7 +4778,15 @@ function renderAppStatus(app){
     ${app.status==='rejected'?`<button class="btn btn-primary" onclick="reapply()">Submit new application</button>`:''}
   </div>`;
 }
-async function reapply(){const idx=DB.ipoApps.findIndex(a=>a.user_id===UI.userId);if(idx>=0){await sb.patch('jex_ipo_applications','id=eq.'+DB.ipoApps[idx].id,{status:'withdrawn'});DB.ipoApps.splice(idx,1);}await updateUser(UI.userId,{app_status:'none'});UI.appTab='apply';render();}
+async function reapply(){
+  // Runs server-side (rpc_set_own_app_status) -- withdraws any pending IPO
+  // application and resets app_status, both scoped to the caller's own row
+  // via auth.uid() rather than a client-supplied id.
+  try{await sb.rpc('rpc_set_own_app_status',{p_status:'none'});}catch(e){return toast(rpcErrorMessage(e));}
+  const idx=DB.ipoApps.findIndex(a=>a.user_id===UI.userId);if(idx>=0)DB.ipoApps.splice(idx,1);
+  const self=cu();if(self)self.app_status='none';
+  UI.appTab='apply';render();
+}
 function renderAppForm(app){
   if(app&&app.status==='pending')return`<div class="card"><div class="empty">Application under review.</div></div>`;
   if(app&&app.status==='approved')return`<div class="card"><div class="empty">Your company is already listed!</div></div>`;
@@ -5049,7 +5152,10 @@ function previewLogo(input){
 async function saveLogo(){
   const logo=window._pendingLogo;if(!logo)return toast('Select an image first');
   const u=cu();const co=DB.companies.find(c=>c.owner_id===u.id);if(!co)return;
-  await updateCo(co.ticker,{logo});
+  // Runs server-side (rpc_save_company_logo), re-checking ownership.
+  try{await sb.rpc('rpc_save_company_logo',{p_ticker:co.ticker,p_logo:logo});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  co.logo=logo;
   window._pendingLogo=null;
   toast('Logo saved');render();
 }
