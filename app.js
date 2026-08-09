@@ -61,6 +61,38 @@ const sb = {
 // non-admin's expected rejection should never break the wider load.
 async function safeRpc(fn,params){try{return await sb.rpc(fn,params);}catch(e){return null;}}
 const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='YOUR_SUPABASE_ANON_KEY';
+// ── Client-side error/failure logging ─────────────────────
+// Reports genuinely uncaught errors to an admin-only log (see the
+// client-error-logging migration) -- normal validation rejections are
+// already caught by the code that triggers them and shown via toast(),
+// so they never reach here; only real bugs do. Deliberately does not use
+// safeRpc/sb.rpc's own error surface (a failed report must never itself
+// throw a second uncaught error) and de-dupes identical errors within one
+// page load so a loop that errors every frame doesn't flood the log.
+const _reportedErrors=new Set();
+function reportClientError(message,stack,source){
+  try{
+    if(!isConfigured())return;
+    const key=String(message)+'|'+String(source||'');
+    if(_reportedErrors.has(key))return;
+    _reportedErrors.add(key);
+    sb.rpc('rpc_report_client_error',{
+      p_message:String(message||'').slice(0,500),
+      p_stack:String(stack||'').slice(0,2000),
+      p_source:String(source||'').slice(0,300),
+      p_url:typeof location!=='undefined'?location.href:null
+    }).catch(()=>{});
+  }catch(e){}
+}
+if(typeof window!=='undefined'){
+  window.addEventListener('error',e=>{
+    reportClientError(e.message,e.error&&e.error.stack,(e.filename||'')+(e.lineno?':'+e.lineno:''));
+  });
+  window.addEventListener('unhandledrejection',e=>{
+    const r=e.reason;
+    reportClientError(r&&r.message?r.message:String(r),r&&r.stack,'unhandledrejection');
+  });
+}
 // Used for Google Sign-In and (Phase 1) migrated local accounts — all other data
 // access stays on the sb wrapper above, which itself borrows this client's session
 // token when one exists (see sbAuthToken below).
@@ -116,7 +148,7 @@ async function hashPw(pw){
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
-  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],contactMessages:[],indexHistory:[],snapshots:[],
+  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],contactMessages:[],indexHistory:[],snapshots:[],clientErrors:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
     weekly_schedule:{sun:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},mon:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},tue:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},wed:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},thu:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},fri:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},sat:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}}},
     weekly_active:false,weekly_override:false}};
@@ -296,7 +328,7 @@ async function loadAll(){
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
     activity,shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds,contactMessages,indexHistory,snapshots]=await Promise.all([
+    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds,contactMessages,indexHistory,snapshots,clientErrors]=await Promise.all([
     sb.get('jex_pending','order=created_at.asc&select='+JEX_PENDING_SAFE_SELECT),
     sb.get('jex_news','order=created_at.desc&limit=50'),
     sb.get('jex_ipo_applications','order=created_at.asc'),
@@ -344,12 +376,15 @@ async function loadAll(){
     safeRpc('rpc_admin_list_contact_messages').then(r=>r||[]),
     sb.get('jex_index_history','order=created_at.asc&limit=500'),
     sb.get('jex_snapshots','order=created_at.desc&limit=50'),
+    // Same pattern as flags/bug_reports/contact_messages -- admin-only
+    // (see the client-error-logging migration).
+    safeRpc('rpc_admin_list_client_errors',{p_limit:100}).then(r=>r||[]),
   ]);
   Object.assign(DB,{pending,news,ipoApps,dilApps,
     trades,dividends,buybacks,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds,contactMessages,indexHistory,snapshots});
+    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds,contactMessages,indexHistory,snapshots,clientErrors});
   // Chairman/President/Treasurer/Compliance Officer only (see
   // rpc_admin_get_all_emails): merges real email addresses into the
   // already-loaded (email-less) DB.users/DB.pending rows. safeRpc resolves
@@ -5534,13 +5569,15 @@ function renderAdmin(){
   const openBugReports=(DB.bugReports||[]).filter(b=>b.status==='open').length;
   const openMessages=(DB.contactMessages||[]).filter(m=>m.status==='open').length;
   const messagesTabEntry=['messages',openMessages?'Messages <span class="badge b-red">'+openMessages+'</span>':'Messages'];
+  const errorCount=(DB.clientErrors||[]).length;
+  const clientErrorsTabEntry=['client_errors',errorCount?'Errors <span class="badge b-red">'+errorCount+'</span>':'Errors'];
   // President can only see: session, balances, passwords
   const presidentTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
   const secretaryTabs=[['announcements','Announcements'],['minutes','Minutes'],['notices','Official notices'],['shareholders','Shareholder registry'],['votes_all','Vote oversight'],['news','News'],messagesTabEntry];
   const sectreTabs=u.role==='secretary'?secretaryTabs:[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log'],messagesTabEntry];
-  const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags'],messagesTabEntry];
-  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['bug_reports',openBugReports?'Bug reports <span class="badge b-red">'+openBugReports+'</span>':'Bug reports'],messagesTabEntry,['snapshots','Snapshots']];
-  const treasurerTabs=[['balances','Balances'],['cashflow','Cash flow'],['dividends_audit','Dividend audit'],['price_adj_log','Price adjustments'],['budget_warnings','Budget warnings'],['activity','Activity log'],messagesTabEntry];
+  const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags'],messagesTabEntry,clientErrorsTabEntry];
+  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['bug_reports',openBugReports?'Bug reports <span class="badge b-red">'+openBugReports+'</span>':'Bug reports'],messagesTabEntry,['snapshots','Snapshots'],clientErrorsTabEntry];
+  const treasurerTabs=[['balances','Balances'],['cashflow','Cash flow'],['dividends_audit','Dividend audit'],['price_adj_log','Price adjustments'],['budget_warnings','Budget warnings'],['activity','Activity log'],messagesTabEntry,clientErrorsTabEntry];
   const tabs=(chair||isPresident(u))?chairmanTabs:u.role==='compliance_officer'?complianceTabs:u.role==='treasurer'?treasurerTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
   if(!allowedTabs.includes(UI.adminTab))UI.adminTab=tabs[0][0];
@@ -5556,6 +5593,7 @@ function renderAdmin(){
   :UI.adminTab==='dashboard'?renderAdminDashboard()
   :UI.adminTab==='flags'?renderAdminFlags()
   :UI.adminTab==='bug_reports'?renderAdminBugReports()
+  :UI.adminTab==='client_errors'?renderAdminClientErrors()
   :UI.adminTab==='messages'?renderAdminMessages()
   :UI.adminTab==='snapshots'?renderSnapshotTab()
   :UI.adminTab==='minutes'?renderAdminMinutes()
@@ -6040,6 +6078,37 @@ function renderAdminBugReports(){
     </div>`;
   }
   return html;
+}
+function renderAdminClientErrors(){
+  const errors=DB.clientErrors||[];
+  let html=`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+    Uncaught client-side errors ${errors.length?`<button class="btn btn-sm btn-danger" onclick="clearClientErrors()">Clear all</button>`:''}
+  </div>
+  <div class="ibox ibox-blue">Automatically captured whenever a student's browser hits an uncaught JavaScript error or an unhandled promise rejection — no bug report needed. Normal validation messages (toasts) never show up here.</div>`;
+  if(!errors.length){
+    html+='<div class="empty">No errors reported</div>';
+  } else {
+    errors.forEach(e=>{
+      html+=`<div style="padding:12px;border:1px solid var(--red);border-radius:var(--radius);margin-bottom:10px;background:rgba(255,77,106,0.04)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+          <span style="font-size:16px">⚠️</span>
+          <strong style="font-family:var(--mono);font-size:13px">${esc(e.message)}</strong>
+          <span style="font-size:11px;color:var(--text2);margin-left:auto">${esc(e.ts)}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text2)">${e.user_name?esc(e.user_name)+' ('+esc(e.user_role||'unknown')+')':'Not signed in'}${e.url?' — '+esc(e.url):''}</div>
+        ${e.stack?`<pre style="font-size:11px;color:var(--text2);white-space:pre-wrap;margin-top:8px;max-height:120px;overflow:auto">${esc(e.stack)}</pre>`:''}
+      </div>`;
+    });
+  }
+  html+='</div>';
+  return html;
+}
+async function clearClientErrors(){
+  if(!confirm('Clear all logged client errors?'))return;
+  try{await sb.rpc('rpc_admin_clear_client_errors',{});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.clientErrors=[];
+  toast('Error log cleared');render();
 }
 function renderAdminMessages(){
   const openMsgs=(DB.contactMessages||[]).filter(m=>m.status==='open');
