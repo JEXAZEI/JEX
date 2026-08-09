@@ -6,12 +6,18 @@ const SUPABASE_ANON_KEY = 'sb_publishable_-moLk6DXyj8L41Ope-RAXw_3YPkyv_8';
 const SESSION_KEY = 'jex-session-v3';
 const APP_VERSION = '1.0.0';
 // jex_users/jex_pending grant anon/authenticated column-level SELECT on
-// everything except password/sec_a (see the password-hash-fix migration) —
-// a bare select=* is a table-level operation and fails outright under a
-// column-only grant, so every fetch of these two tables must explicitly
-// list columns. Centralized here so every call site stays in sync.
-const JEX_USERS_SAFE_SELECT = 'id,name,username,email,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,auth_provider,auth_uid,created_at,classroom_id,email_notifications,notification_email';
-const JEX_PENDING_SAFE_SELECT = 'id,name,email,role,sec_q,description,ts,created_at,classroom_id,username,auth_provider,email_verified,auth_uid';
+// everything except password/sec_a (see the password-hash-fix migration),
+// and — since the email-pii-exposure-fix migration — except email and
+// notification_email too (jex_pending: email only). A bare select=* is a
+// table-level operation and fails outright under a column-only grant, so
+// every fetch of these two tables must explicitly list columns.
+// Centralized here so every call site stays in sync. email/notification_email
+// are deliberately NOT in this bulk list any more — every legitimate reader
+// gets them through a scoped RPC instead (see rpc_resolve_login_identity,
+// rpc_google_session_match, rpc_admin_get_all_emails,
+// rpc_get_company_team_contacts).
+const JEX_USERS_SAFE_SELECT = 'id,name,username,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,auth_provider,auth_uid,created_at,classroom_id,email_notifications';
+const JEX_PENDING_SAFE_SELECT = 'id,name,role,sec_q,description,ts,created_at,classroom_id,username,auth_provider,email_verified,auth_uid';
 
 // Headers carry the CURRENT user's own Supabase Auth access token when one exists
 // (real per-user identity, needed for RLS to ever enforce anything per-row), falling
@@ -48,6 +54,12 @@ const sb = {
   async del(t,q){const h=await this.headers();const r=await fetch(this.url(t,q),{method:'DELETE',headers:h});if(!r.ok)throw new Error(await r.text());},
   async rpc(fn,params){const h=await this.headers({'Accept':'application/json'});const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:h,body:JSON.stringify(params||{})});if(!r.ok)throw new Error(await r.text());return r.json();}
 };
+// Calls an RPC and swallows any failure (permission-denied for a role that
+// legitimately shouldn't have access, network hiccup, etc.) into `null`
+// instead of throwing — used for RPCs that are only meaningful for SOME
+// callers (e.g. admin-only bulk data merged in opportunistically) where a
+// non-admin's expected rejection should never break the wider load.
+async function safeRpc(fn,params){try{return await sb.rpc(fn,params);}catch(e){return null;}}
 const isConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='YOUR_SUPABASE_ANON_KEY';
 // Used for Google Sign-In and (Phase 1) migrated local accounts — all other data
 // access stays on the sb wrapper above, which itself borrows this client's session
@@ -293,14 +305,21 @@ async function loadAll(){
     sb.get('jex_company_members','order=created_at.asc'),
     sb.get('jex_founder_allocations','order=created_at.desc'),
     sb.get('jex_price_adjustments','order=created_at.desc&limit=50'),
-    sb.get('jex_flags','order=created_at.desc'),
+    // jex_flags/jex_bug_reports/jex_contact_messages: table-level SELECT is
+    // revoked for anon/authenticated entirely now (see the
+    // email-pii-exposure-fix migration) -- these three RPCs are the only
+    // way to read them, and only resolve to real data for the admin roles
+    // each one actually gates on. Any other caller gets a permission error
+    // here, which safeRpc quietly turns into an empty array -- exactly the
+    // "nothing to show" state those users should see anyway.
+    safeRpc('rpc_admin_list_flags').then(r=>r||[]),
     sb.get('jex_classrooms','order=created_at.asc'),
     sb.get('jex_stop_loss','status=eq.active&order=created_at.asc'),
     sb.get('jex_minutes','order=created_at.desc&limit=50'),
     sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
-    sb.get('jex_bug_reports','order=created_at.desc&limit=100'),
+    safeRpc('rpc_admin_list_bug_reports').then(r=>r||[]),
     sb.get('jex_funds','order=created_at.asc'),
-    sb.get('jex_contact_messages','order=created_at.desc&limit=100'),
+    safeRpc('rpc_admin_list_contact_messages').then(r=>r||[]),
     sb.get('jex_index_history','order=created_at.asc&limit=500'),
     sb.get('jex_snapshots','order=created_at.desc&limit=50'),
   ]);
@@ -309,6 +328,32 @@ async function loadAll(){
     shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
     priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds,contactMessages,indexHistory,snapshots});
+  // Chairman/President/Treasurer/Compliance Officer only (see
+  // rpc_admin_get_all_emails): merges real email addresses into the
+  // already-loaded (email-less) DB.users/DB.pending rows. safeRpc resolves
+  // to null for every other role, in which case nothing is merged and
+  // those rows simply have no .email, matching what non-admin UI ever
+  // reads from them.
+  const emailMap=await safeRpc('rpc_admin_get_all_emails');
+  if(emailMap){
+    const uMap=new Map(emailMap.users.map(e=>[e.id,e.email]));
+    const pMap=new Map(emailMap.pending.map(e=>[e.id,e.email]));
+    DB.users.forEach(u=>{if(uMap.has(u.id))u.email=uMap.get(u.id);});
+    DB.pending.forEach(p=>{if(pMap.has(p.id))p.email=pMap.get(p.id);});
+  }
+  // The bulk fetch above just overwrote DB.users wholesale, including
+  // whatever richer row (with email) a just-completed login/Google-match
+  // RPC had merged in for the CURRENT user before calling loadAll() --
+  // finishLogin() sets UI.userId before this runs, so it's already known
+  // here. Re-merges it back in rather than leaving self email blank until
+  // the next full page reload.
+  if(UI.userId){
+    const info=await safeRpc('rpc_get_own_contact_info');
+    if(info){
+      const self=DB.users.find(u=>u.id===UI.userId);
+      if(self){self.email=info.email;self.notification_email=info.notification_email;}
+    }
+  }
   render(); // re-render with full data
 }
 
@@ -595,8 +640,25 @@ async function saveEmailJSConfig(){
   const serviceId=(get('ejs-service')?.value||'').trim();
   const templateId=(get('ejs-template')?.value||'').trim();
   const pubKey=(get('ejs-pubkey')?.value||'').trim();
-  await saveSession({emailjs_service_id:serviceId||null,emailjs_template_id:templateId||null,emailjs_public_key:pubKey||null});
+  const siteUrl=(get('ejs-siteurl')?.value||'').trim();
+  await saveSession({emailjs_service_id:serviceId||null,emailjs_template_id:templateId||null,emailjs_public_key:pubKey||null,emailjs_site_url:siteUrl||null});
   toast(serviceId?'✓ Email config saved — students can now enable email notifications':'Email config cleared');
+  render();
+}
+// The private key (EmailJS calls it "Access Token") never round-trips back
+// to any client after this -- rpc_admin_save_email_secret only ever tells
+// the caller back whether one is set (jex_session.emailjs_secret_configured),
+// never the value itself. Needed because sending now happens server-side
+// (rpc_push_notification via pg_net), which EmailJS requires the private
+// key for since there's no browser Origin header to satisfy its default
+// same-origin check.
+async function saveEmailJSSecret(){
+  const token=(get('ejs-secret')?.value||'').trim();
+  try{await sb.rpc('rpc_admin_save_email_secret',{p_access_token:token});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.session.emailjs_secret_configured=!!token;
+  const el=get('ejs-secret');if(el)el.value='';
+  toast(token?'✓ Private key saved':'Private key cleared');
   render();
 }
 async function saveCBPct(){
@@ -760,8 +822,15 @@ async function pushToSheets(type,payload){
 async function pushBalances(){
   if(!SHEETS_URL)return;
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+  // email dropped from this payload -- it's pushed to an unauthenticated
+  // third-party Google Apps Script webhook (SHEETS_URL) from whichever
+  // student's browser happens to trigger a sync, and bulk DB.users no
+  // longer carries email at all for non-admins anyway (see the
+  // email-pii-exposure-fix migration). Re-architecting the Sheets
+  // integration to fetch email server-side wasn't worth it for a "rank
+  // sheet" feature that never needed it in the first place.
   const rows=students.map((u,i)=>({
-    rank:i+1,name:u.name,email:u.email,
+    rank:i+1,name:u.name,
     cash:Math.round(u.cash*100)/100,
     portfolio:Math.round(pv(u)*100)/100,
     shortPnl:Math.round(sPnl(u)*100)/100,
@@ -915,14 +984,14 @@ async function autoRefresh(){
       sb.get('jex_limit_orders','order=created_at.asc'),
       sb.get('jex_company_members','order=created_at.asc'),
       sb.get('jex_founder_allocations','order=created_at.desc'),
-      sb.get('jex_flags','order=created_at.desc'),
+      safeRpc('rpc_admin_list_flags').then(r=>r||[]),
     sb.get('jex_classrooms','order=created_at.asc'),
     sb.get('jex_stop_loss','status=eq.active&order=created_at.asc'),
       sb.get('jex_minutes','order=created_at.desc&limit=50'),
       sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
-      sb.get('jex_bug_reports','order=created_at.desc&limit=100'),
+      safeRpc('rpc_admin_list_bug_reports').then(r=>r||[]),
       sb.get('jex_funds','order=created_at.asc'),
-      sb.get('jex_contact_messages','order=created_at.desc&limit=100'),
+      safeRpc('rpc_admin_list_contact_messages').then(r=>r||[]),
     ]);
     const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
@@ -938,6 +1007,16 @@ async function autoRefresh(){
     DB.bugReports=newBugReports;
     DB.funds=newFunds;
     DB.contactMessages=newContactMessages;
+    // Chairman/President only (see loadAll) -- keeps newly-arrived pending
+    // registrations' emails visible without a full reload; a no-op safeRpc
+    // resolves to null for everyone else.
+    const emailMap=await safeRpc('rpc_admin_get_all_emails');
+    if(emailMap){
+      const uMap=new Map(emailMap.users.map(e=>[e.id,e.email]));
+      const pMap=new Map(emailMap.pending.map(e=>[e.id,e.email]));
+      DB.users.forEach(u=>{if(uMap.has(u.id))u.email=uMap.get(u.id);});
+      DB.pending.forEach(p=>{if(pMap.has(p.id))p.email=pMap.get(p.id);});
+    }
     // Merge new trades (avoid duplicates)
     const existingIds=new Set(DB.trades.map(t=>t.id));
     newTrades.forEach(t=>{if(!existingIds.has(t.id))DB.trades.unshift(t);});
@@ -1024,8 +1103,16 @@ async function checkGoogleSession(){
   const meta=session.user.user_metadata||{};
   const name=String(meta.full_name||meta.name||email.split('@')[0]||'Google User');
   const authUid=session.user.id||null;
-  const existing=DB.users.find(u=>norm(u.email)===email&&(u.role==='student'||u.role==='company')&&u.status==='approved');
-  if(existing){
+  // Matching against DB.users/DB.pending by email client-side is gone --
+  // bulk fetches no longer carry email at all (see the
+  // email-pii-exposure-fix migration). rpc_google_session_match() does the
+  // match (and the auth_uid backfill, in the same call) server-side,
+  // reading the email from the caller's own verified JWT rather than
+  // trusting anything client-supplied.
+  let match;
+  try{match=await sb.rpc('rpc_google_session_match',{});}catch(e){console.warn('Google session match failed:',e);return;}
+  if(match.status==='existing'){
+    const existing=match.user;
     // Real page navigation (every nav click, now that pages are routed)
     // reruns boot() -> checkGoogleSession() on an already-established
     // session -- if localStorage already restored this exact user, there's
@@ -1033,14 +1120,8 @@ async function checkGoogleSession(){
     // (right after this call) handle it silently instead of re-toasting
     // "Signed in with Google" and re-resetting navTab on every click.
     if(UI.userId===existing.id)return;
-    // Quietly backfill auth_uid for a legacy account the first time it signs in with
-    // Google — costs nothing, and means one less account stuck on the old system.
-    // Runs server-side (rpc_link_own_auth_uid), which independently checks the
-    // caller's own live-session email (from the JWT, not client-supplied)
-    // against this row's stored email before linking.
-    if(authUid&&!existing.auth_uid){
-      try{await sb.rpc('rpc_link_own_auth_uid',{p_user_id:existing.id});existing.auth_uid=authUid;}catch(e){console.warn('auth_uid backfill failed:',e);}
-    }
+    const idx=DB.users.findIndex(u=>u.id===existing.id);
+    if(idx>=0)DB.users[idx]=existing;else DB.users.push(existing);
     UI.userId=existing.id;
     UI.navTab=isAdmin(existing)?'admin':existing.role==='company'?'mystock':'market';
     try{localStorage.setItem(SESSION_KEY,existing.id);}catch(e){}
@@ -1049,8 +1130,7 @@ async function checkGoogleSession(){
     render();
     return;
   }
-  const pendingMatch=DB.pending.find(r=>norm(r.email)===email);
-  if(pendingMatch){
+  if(match.status==='pending'){
     toast('Your registration is still awaiting Chairman/President approval');
     render();
     return;
@@ -1156,8 +1236,11 @@ async function registerStudent(name,username,email,pw,secQ,secA,emailVerified,au
   // Checked across every role, not just students: emails are the real Supabase Auth
   // identity now, and checkGoogleSession()/loginByForm both key off email, so two
   // approved-or-pending accounts sharing one email leads to genuinely broken, hard-to-
-  // diagnose login lockouts (whichever record .find() happens to match first "wins").
-  if(DB.users.find(u=>u.email&&norm(u.email)===norm(email))||DB.pending.find(r=>r.email&&norm(r.email)===norm(email)))return toast('An account with that email already exists');
+  // diagnose login lockouts. Runs server-side (rpc_check_email_taken) -- bulk
+  // DB.users/DB.pending no longer carry email at all to check against client-side.
+  let emailTaken=false;
+  try{emailTaken=await sb.rpc('rpc_check_email_taken',{p_email:email});}catch(e){return toast('Could not verify email — please try again');}
+  if(emailTaken)return toast('An account with that email already exists');
   const newAuthUid=isGoogle?(authUid||null):await tryCreateAuthAccount(email,pw);
   const isMigrated=isGoogle||!!newAuthUid;
   const pwHash=isMigrated?null:await hashPw(pw);
@@ -1183,7 +1266,9 @@ async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerifi
   if(DB.users.find(u=>norm(u.name)===norm(n))||DB.pending.find(r=>norm(r.name)===norm(n)))return toast('Name already taken');
   if(DB.users.find(u=>norm(u.username)===norm(un))||DB.pending.find(r=>norm(r.username)===norm(un)))return toast('Username already taken');
   // See the matching check in registerStudent for why this spans every role.
-  if(DB.users.find(u=>u.email&&norm(u.email)===norm(email))||DB.pending.find(r=>r.email&&norm(r.email)===norm(email)))return toast('An account with that email already exists');
+  let emailTakenCo=false;
+  try{emailTakenCo=await sb.rpc('rpc_check_email_taken',{p_email:email});}catch(e){return toast('Could not verify email — please try again');}
+  if(emailTakenCo)return toast('An account with that email already exists');
   const newAuthUidCo=isGoogle?(authUid||null):await tryCreateAuthAccount(email,pw);
   const isMigratedCo=isGoogle||!!newAuthUidCo;
   const pwHashCo=isMigratedCo?null:await hashPw(pw);
@@ -1232,10 +1317,17 @@ async function loginByForm(){
   const pw=get('login-password')?.value||'';
   UI.loginUsername=username;
   if(!username||!pw){UI.loginError='Enter your username and password';return render();}
-  const pool=UI.loginTab==='admin'?DB.users.filter(isAdmin):DB.users.filter(u=>u.role===UI.loginTab&&u.status==='approved');
   const idInput=norm(normalizeUsername(username));
-  const u=pool.find(u=>(u.email&&norm(u.email)===idInput)||(u.username&&norm(u.username)===idInput));
+  // Matching by email or username against the pool used to be a client-side
+  // DB.users.find() -- bulk DB.users no longer carries email at all (see the
+  // email-pii-exposure-fix migration), so the match itself now happens
+  // server-side (rpc_resolve_login_identity), scoped to the same pool
+  // (UI.loginTab: 'student'|'company'|'admin') the client-side filter used.
+  let u;
+  try{u=await sb.rpc('rpc_resolve_login_identity',{p_identifier:username,p_pool:UI.loginTab});}catch(e){u=null;}
   if(!u){UI.loginError='Invalid username or password';return render();}
+  const idx=DB.users.findIndex(x=>x.id===u.id);
+  if(idx>=0)DB.users[idx]=u;else DB.users.push(u);
   // Secretary/Treasurer/Compliance Officer sign in with a username only — their
   // email exists purely as the backing Supabase Auth credential, not something
   // they're meant to use or see day-to-day, unlike Chairman/President. Only
@@ -1413,8 +1505,15 @@ async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)retu
   catch(e){return toast(rpcErrorMessage(e));}
   u.sec_q=newQ;toast('Security question updated');render();}
 async function forgotStep1(email){
-  const u=DB.users.find(u=>u.email&&norm(u.email)===norm(email)&&u.status==='approved');
+  // Was DB.users.find(u=>norm(u.email)===...) -- bulk DB.users no longer
+  // carries email (see the email-pii-exposure-fix migration), so this
+  // resolves server-side now, same RPC loginByForm uses (pool='any' matches
+  // the original's no-role-filter, approved-only, email-only semantics).
+  let u;
+  try{u=await sb.rpc('rpc_resolve_login_identity',{p_identifier:email,p_pool:'any'});}catch(e){u=null;}
   if(!u)return toast('No account found with that email');
+  const idx=DB.users.findIndex(x=>x.id===u.id);
+  if(idx>=0)DB.users[idx]=u;else DB.users.push(u);
   if(u.auth_provider==='google'&&supaAuth){
     // Google-linked accounts have a real, Google-verified email, so the built-in
     // email reset is meaningful for them. Migrated-local accounts (auth_uid set,
@@ -1598,6 +1697,7 @@ async function respondToInvite(memberId,accept){
 
   const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
   const u=cu();
+  if(accept&&co)_teamContactsLoaded.delete(co.ticker);
 
   if(accept&&co){
     // jex_company_members is already patched above — that's the source of truth
@@ -2186,38 +2286,17 @@ function showBrowserPush(title,body){
 if(typeof Notification!=='undefined'&&Notification.permission==='granted')_pushEnabled=true;
 
 // ── Email via EmailJS ────────────────────────────────────
-function sendEmailNotification(user, type, message, ticker){
-  if(!user||!user.email_notifications)return;
-  const addr=user.notification_email||user.email;
-  if(!addr)return;
-  const important=['dividend','halt','stop_loss','ipo','session','limit_fill','founder_alloc','bug_report','contact_admin'];
-  if(!important.includes(type))return;
-  const sid=DB.session.emailjs_service_id;
-  const tid=DB.session.emailjs_template_id;
-  const key=DB.session.emailjs_public_key;
-  if(!sid||!tid||!key)return;
-  if(typeof emailjs==='undefined')return;
-  try{
-    emailjs.init({publicKey:key});
-    emailjs.send(sid,tid,{
-      to_email:addr,
-      to_name:user.name,
-      subject:'JEX Alert — '+message.replace(/[-￿]/g,'').trim().slice(0,60),
-      message:message,
-      ticker:ticker||'',
-      app_url:window.location.origin+window.location.pathname
-    }).catch(()=>{});
-  }catch(e){}
-}
+// sendEmailNotification()/emailjs.send() is gone -- the EmailJS private key
+// now lives server-only (jex_email_secrets) and dispatch happens inside
+// rpc_push_notification() via pg_net (see email-pii-exposure-fix migration).
 
 async function pushNotification(userId, type, message, ticker=null){
   try{
-    const rec={id:uid(),user_id:userId,type,message,ticker,read:false,ts:ts()};
-    await sb.post('jex_notifications',rec);
-    // Email doesn't require the recipient to be the active session — sendEmailNotification
-    // sends via the recipient's own address regardless of who's currently logged in.
-    const emailUser=getUser(userId);
-    if(emailUser)sendEmailNotification(emailUser,type,message,ticker);
+    // jex_notifications INSERT is revoked from anon/authenticated entirely
+    // now (see the email-pii-exposure-fix migration) -- this RPC is the
+    // only way to create one, and does the recipient's email dispatch
+    // server-side (pg_net -> EmailJS) in the same call, best-effort.
+    const rec=await sb.rpc('rpc_push_notification',{p_user_id:userId,p_type:type,p_message:message,p_ticker:ticker});
     if(userId===UI.userId){
       DB.notifications.unshift(rec);
       // Fire browser push for current user
@@ -3713,6 +3792,16 @@ async function resolveBugReport(reportId){
 function openContactAdminModal(){
   const root=document.getElementById('contact-modal-root');if(!root)return;
   root.innerHTML=renderContactAdminModalHTML();
+  // Chairman/President emails aren't in bulk DB.users any more (see the
+  // email-pii-exposure-fix migration) -- this modal is reachable from the
+  // footer of every page, logged in or not, so it needs its own public RPC
+  // rather than the Chairman/President-only bulk merge loadAll() does.
+  safeRpc('rpc_get_leadership_contacts').then(rows=>{
+    if(!rows)return;
+    let changed=false;
+    rows.forEach(r=>{const u=getUser(r.id);if(u&&u.email!==r.email){u.email=r.email;changed=true;}});
+    if(changed&&root.innerHTML)root.innerHTML=renderContactAdminModalHTML();
+  });
 }
 function closeContactAdminModal(){const root=document.getElementById('contact-modal-root');if(root)root.innerHTML='';}
 const ADMIN_ROLE_ORDER={chairman:0,president:1,secretary:2,treasurer:3,compliance_officer:4};
@@ -4345,6 +4434,23 @@ function openCompanyPage(ticker){
   // called from the market page's ticker list/table, so no page-identity
   // check needed here.
   if(typeof history!=='undefined')history.pushState({ticker},'','?ticker='+encodeURIComponent(ticker));
+  loadCompanyTeamContacts(ticker);
+}
+// Backs the public "Contact the people behind this company" Team tab and
+// the owner's own Founders list -- both need owner+accepted-founder emails,
+// which bulk DB.users no longer carries (see the email-pii-exposure-fix
+// migration). Memoized per ticker for the page session so switching tabs
+// back and forth doesn't refetch; invalidated on respondToInvite() below,
+// the one place a company's team composition actually changes client-side.
+const _teamContactsLoaded=new Set();
+async function loadCompanyTeamContacts(ticker){
+  if(!ticker||_teamContactsLoaded.has(ticker))return;
+  _teamContactsLoaded.add(ticker);
+  const rows=await safeRpc('rpc_get_company_team_contacts',{p_ticker:ticker});
+  if(!rows){_teamContactsLoaded.delete(ticker);return;}
+  let changed=false;
+  rows.forEach(r=>{const u=getUser(r.id);if(u&&u.email!==r.email){u.email=r.email;changed=true;}});
+  if(changed)render();
 }
 function setupCompanyPageSwipe(){
   const el=document.getElementById('company-page-content');
@@ -4743,8 +4849,14 @@ function renderSettings(){
     <div class="frow"><label class="flabel">Service ID</label><input type="text" id="ejs-service" placeholder="service_xxxxxxx" value="${DB.session.emailjs_service_id||''}"></div>
     <div class="frow"><label class="flabel">Template ID</label><input type="text" id="ejs-template" placeholder="template_xxxxxxx" value="${DB.session.emailjs_template_id||''}"></div>
     <div class="frow"><label class="flabel">Public key</label><input type="text" id="ejs-pubkey" placeholder="e.g. AbCdEfGhIjKlMnOp" value="${DB.session.emailjs_public_key||''}"></div>
+    <div class="frow"><label class="flabel">App URL (optional)</label><input type="text" id="ejs-siteurl" placeholder="https://yourname.github.io/JEX/" value="${esc(DB.session.emailjs_site_url||'')}"></div>
     <button class="btn btn-primary" onclick="saveEmailJSConfig()">Save</button>
     ${DB.session.emailjs_service_id&&DB.session.emailjs_template_id&&DB.session.emailjs_public_key?'<div style="font-size:12px;color:var(--text2);margin-top:8px">✓ Configured — email alerts will send for students with it enabled</div>':''}
+    <hr class="divider">
+    <div class="ibox ibox-amber">Emails now send from the server, not this browser — EmailJS requires a <strong>Private Key</strong> (Account → API Keys → "Access Token") for that. It's stored server-side only and never shown again once saved.</div>
+    <div class="frow"><label class="flabel">Private key</label><input type="password" id="ejs-secret" placeholder="${DB.session.emailjs_secret_configured?'••••••••  (already set — leave blank to keep)':'paste private key'}"></div>
+    <button class="btn btn-primary" onclick="saveEmailJSSecret()">Save private key</button>
+    ${DB.session.emailjs_secret_configured?'<div style="font-size:12px;color:var(--text2);margin-top:8px">✓ Private key is set</div>':'<div style="font-size:12px;color:var(--amber);margin-top:8px">⚠ No private key set — email sending is disabled until one is saved</div>'}
   </div>`:'';
   const isGoogleAccount=u.auth_provider==='google';
   const isMigratedLocal=!!u.auth_uid&&!isGoogleAccount;
@@ -4850,6 +4962,7 @@ function renderMyStock(){
   const co=getMyCompany(u.id);
   const isLead=co&&co.owner_id===u.id;
   if(!co)return renderApply();
+  loadCompanyTeamContacts(co.ticker);
   const pendingDil=DB.dilApps.find(d=>d.ticker===co.ticker&&d.status==='pending');
   const myDils=DB.dilApps.filter(d=>d.ticker===co.ticker).reverse();
   const myDivs=DB.dividends.filter(d=>d.ticker===co.ticker).reverse();
@@ -6837,6 +6950,9 @@ async function boot(){
     if(UI.userId){
       const u=DB.users.find(u=>u.id===UI.userId);
       if(u){
+        // Self email/notification_email is already merged in by loadAll()
+        // itself (it knows UI.userId by the time it runs, since it's set
+        // above before loadAll() is called) -- see rpc_get_own_contact_info.
         UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'mystock':'market';
         if(isAdmin(u))UI.adminTab='dashboard';
         // Real routed pages (settings.html, etc. -- see PAGE_ROUTES) set
