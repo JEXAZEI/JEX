@@ -131,7 +131,20 @@ function subscribeRealtime(){
   const wsUrl=SUPABASE_URL.replace('https://','wss://').replace('http://','ws://');
   // Use Supabase Realtime REST API via SSE (works without SDK)
   // Subscribe to key tables via postgres_changes
-  const tables=['jex_companies','jex_trades','jex_announcements','jex_notifications',
+  // jex_notifications deliberately excluded -- Supabase Realtime's
+  // postgres_changes broadcasts the full row of every change to every
+  // subscribed client, straight from WAL replication, completely bypassing
+  // PostgREST's anon/authenticated grants (there's no RLS on this schema to
+  // scope it with). Notifications are per-user by nature, so there is no
+  // safe way to put this table on a shared realtime channel -- the
+  // handleRealtimeUpdate() 'user_id===UI.userId' check below only filters
+  // what the client CHOOSES to display, not what already arrived over the
+  // wire. Notifications now rely on the ~15-20s autoRefresh() poll instead
+  // (through rpc_get_my_notifications, safely scoped server-side). See the
+  // notification-privacy-fix migration for the production-side caveat this
+  // alone can't fully close (whether jex_notifications is actually in the
+  // supabase_realtime publication needs checking directly).
+  const tables=['jex_companies','jex_trades','jex_announcements',
     'jex_halts','jex_session','jex_limit_orders','jex_news','jex_votes'];
   // Build a single channel for all tables
   const channelName='jex-realtime-'+Math.random().toString(36).slice(2);
@@ -187,14 +200,12 @@ function handleRealtimeUpdate(table,event,newRow,oldRow){
       if(newRow&&event==='INSERT'){if(!DB.announcements.find(a=>a.id===newRow.id))DB.announcements.unshift(newRow);}
       else if(event==='DELETE'&&oldRow)DB.announcements=DB.announcements.filter(a=>a.id!==oldRow.id);
       break;
+    // jex_notifications is no longer subscribed via realtime at all (see
+    // subscribeRealtime() -- notifications now arrive via the periodic
+    // poll instead, since realtime has no way to scope a per-user table
+    // without RLS). This case is unreachable; kept only so an unexpected
+    // event for this table fails safe (does nothing) instead of erroring.
     case 'jex_notifications':
-      if(newRow&&newRow.user_id===UI.userId&&!DB.notifications.find(n=>n.id===newRow.id)){
-        DB.notifications.unshift(newRow);
-        // Show a brief toast for new notifications
-        // Only toast for important notifications (dividends, halts, squeeze alerts)
-      const importantTypes=['dividend','halt','stop_loss','earnings_surprise','flag'];
-      if(!newRow.read&&importantTypes.includes(newRow.type))toast(newRow.message.slice(0,80));
-      }
       break;
     case 'jex_halts':
       if(event==='INSERT'&&newRow&&!DB.halts.find(h=>h.ticker===newRow.ticker))DB.halts.push(newRow);
@@ -299,7 +310,13 @@ async function loadAll(){
     sb.get('jex_class_applications','order=created_at.asc'),
     sb.get('jex_votes','order=created_at.desc'),
     sb.get('jex_vote_ballots','order=created_at.asc'),
-    sb.get('jex_notifications','order=created_at.desc&limit=50'),
+    // jex_notifications SELECT is revoked entirely now (see the
+    // notification-privacy-fix migration) -- table-wide SELECT was
+    // wide open, no user_id filter enforced server-side, leaking every
+    // user's notification content (flag/bug-report/contact-admin
+    // summaries, price alert targets, trading activity) to anyone.
+    // safeRpc resolves to null pre-login, turned into [] below.
+    safeRpc('rpc_get_my_notifications',{p_limit:50}).then(r=>r||[]),
     sb.get('jex_price_alerts','order=created_at.asc'),
     sb.get('jex_nw_history','order=created_at.desc&limit=200'),
     sb.get('jex_company_members','order=created_at.asc'),
@@ -977,7 +994,11 @@ async function autoRefresh(){
   try{
     // Only reload lightweight tables that change frequently
     const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports,newFunds,newContactMessages]=await Promise.all([
-      sb.get('jex_notifications','user_id=eq.'+UI.userId+'&order=created_at.desc&limit=50'),
+      // Was a client-supplied user_id=eq. filter -- not a real security
+      // boundary since SELECT was table-wide open (see the
+      // notification-privacy-fix migration). rpc_get_my_notifications
+      // scopes it server-side via auth.uid() instead.
+      sb.rpc('rpc_get_my_notifications',{p_limit:50}),
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_companies','order=created_at.asc'),
       sb.get('jex_trades','order=id.desc&limit=100'),
