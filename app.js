@@ -305,7 +305,12 @@ async function loadAll(){
     sb.get('jex_dividends','order=created_at.asc'),
     sb.get('jex_buybacks','order=created_at.asc'),
     sb.get('jex_limit_orders','order=created_at.asc'),
-    sb.get('jex_activity','order=created_at.desc&limit=100'),
+    // jex_activity SELECT is revoked entirely now (see the
+    // activity-log-privacy-fix migration) -- table-wide SELECT was wide
+    // open with no role check, leaking the same flag-reason/bug-report/
+    // price-adjustment content already locked down for jex_notifications/
+    // jex_flags to every user's browser memory regardless of role.
+    safeRpc('rpc_admin_list_activity',{p_limit:100}).then(r=>r||[]),
     sb.get('jex_share_classes','order=created_at.asc'),
     sb.get('jex_class_applications','order=created_at.asc'),
     sb.get('jex_votes','order=created_at.desc'),
