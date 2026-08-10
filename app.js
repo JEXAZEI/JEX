@@ -52,7 +52,11 @@ const sb = {
   async post(t,d){const minimal=t==='jex_users'||t==='jex_pending';const h=await this.headers({'Prefer':'return='+(minimal?'minimal':'representation')});const r=await fetch(this.url(t),{method:'POST',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return minimal?null:r.json();},
   async patch(t,q,d){const minimal=t==='jex_users'||t==='jex_pending';const h=await this.headers({'Prefer':'return='+(minimal?'minimal':'representation')});const r=await fetch(this.url(t,q),{method:'PATCH',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return minimal?null:r.json();},
   async del(t,q){const h=await this.headers();const r=await fetch(this.url(t,q),{method:'DELETE',headers:h});if(!r.ok)throw new Error(await r.text());},
-  async rpc(fn,params){const h=await this.headers({'Accept':'application/json'});const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:h,body:JSON.stringify(params||{})});if(!r.ok)throw new Error(await r.text());return r.json();}
+  async rpc(fn,params){const h=await this.headers({'Accept':'application/json'});const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:h,body:JSON.stringify(params||{})});if(!r.ok)throw new Error(await r.text());
+    // `returns void` RPCs (e.g. rpc_admin_clear_client_errors) come back as an
+    // empty 204 body -- r.json() on an empty body throws "Unexpected end of
+    // JSON input", so read as text first and only parse if there's anything there.
+    const t=await r.text();return t?JSON.parse(t):null;}
 };
 // Calls an RPC and swallows any failure (permission-denied for a role that
 // legitimately shouldn't have access, network hiccup, etc.) into `null`
@@ -149,7 +153,7 @@ let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[]
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
   companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],contactMessages:[],indexHistory:[],snapshots:[],clientErrors:[],
-  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
+  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},session_started_at:null,jxi_open_value:null,budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
     weekly_schedule:{sun:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},mon:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},tue:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},wed:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},thu:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},fri:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},sat:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}}},
     weekly_active:false,weekly_override:false}};
 let SHEETS_URL=null;
@@ -2304,8 +2308,18 @@ async function checkCircuitBreakers(){
 async function recordSessionOpenPrices(){
   const prices={};
   DB.companies.forEach(c=>{prices[c.ticker]=c.price;});
-  await saveSession({session_open_prices:prices});
-  DB.session.session_open_prices=prices;
+  // jxi_open_value/session_started_at anchor the JXI headline %-change and
+  // the 1D chart view to THIS session's open, the same way a real index's
+  // "today" numbers reset every morning instead of showing change since
+  // inception. Captured at the same moment as session_open_prices (every
+  // connected client independently detects the open->closed transition
+  // and races to save this -- harmless, since they're all computing the
+  // same values from the same just-opened prices within moments of each
+  // other, same as the pre-existing session_open_prices capture).
+  const jxiOpen=computeJXI().value;
+  const data={session_open_prices:prices,session_started_at:Date.now(),jxi_open_value:jxiOpen};
+  await saveSession(data);
+  Object.assign(DB.session,data);
 }
 
 // ═══════════════════════════════════════════════
@@ -3328,10 +3342,28 @@ function buildJxiChart(canvasId){
   const canvas=get(canvasId);if(!canvas||!window.Chart)return;
   const interval=chartIntervals[canvasId]||'max';
   const allPts=jxiPriceHistory();
-  const pts=filterByInterval(allPts,interval);
+  let pts,anchoredAtOpen=false;
+  if(interval==='1d'&&DB.session.session_started_at){
+    // Resets fresh every time a session opens, like a real index's "1D"
+    // view -- anchored on the last snapshot before this session started
+    // (its "open" reference point) plus everything since, rather than a
+    // rolling 24-hour window that would still show yesterday's session
+    // bleeding into today's.
+    const cutoff=DB.session.session_started_at;
+    const before=allPts.filter(p=>p.t&&new Date(p.t).getTime()<cutoff);
+    const after=allPts.filter(p=>p.t&&new Date(p.t).getTime()>=cutoff);
+    pts=before.length?[before[before.length-1],...after]:after;
+    anchoredAtOpen=before.length>0;
+  }else{
+    pts=filterByInterval(allPts,interval);
+  }
   if(!pts.length)return;
   const prices=pts.map(p=>p.p);
-  const labels=pts.map((p,i)=>i===pts.length-1?'Now':fmtChartLabel(p.t,interval));
+  const labels=pts.map((p,i)=>{
+    if(i===pts.length-1&&pts.length>1)return'Now';
+    if(i===0&&anchoredAtOpen)return'Open';
+    return fmtChartLabel(p.t,interval);
+  });
   const isUp=prices.length>0&&prices[prices.length-1]>=prices[0];
   const lc=isUp?'#00c896':'#ff4d6a';
   const fillColor=isUp?'rgba(0,200,150,0.06)':'rgba(255,77,106,0.06)';
@@ -4410,13 +4442,19 @@ function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.com
 function renderIndexCard(){
   const idx=computeJXI();
   if(!idx.constituents.length)return'';
+  // Headline %-change is TODAY's move (since this session opened), like a
+  // real index -- not the change since each constituent's first-ever
+  // listing (idx.change, still used for the per-company "Since listing"
+  // column below, where that framing is correct).
+  const openVal=DB.session.jxi_open_value;
+  const sessionChange=openVal?Math.round(((idx.value-openVal)/openVal*100)*100)/100:null;
   return `<div class="card">
     <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:10px">
       <div>
         <div class="section-title" style="margin-bottom:2px">JXI <span style="font-weight:400;color:var(--text2);font-size:12px">JEX Composite</span></div>
         <div style="font-size:28px;font-weight:500;font-family:var(--mono)">${idx.value.toFixed(2)}</div>
       </div>
-      <div class="${idx.change>=0?'price-up':'price-down'}" style="font-size:15px;font-weight:500">${idx.change>=0?'+':''}${idx.change}%</div>
+      ${sessionChange!==null?`<div class="${sessionChange>=0?'price-up':'price-down'}" style="font-size:15px;font-weight:500">${sessionChange>=0?'+':''}${sessionChange}% <span style="font-size:11px;color:var(--text2);font-weight:400">today</span></div>`:`<div class="${idx.change>=0?'price-up':'price-down'}" style="font-size:15px;font-weight:500">${idx.change>=0?'+':''}${idx.change}% <span style="font-size:11px;color:var(--text2);font-weight:400">since listing</span></div>`}
       <div style="margin-left:auto;font-size:12px;color:var(--text2)">${idx.constituents.length} listed compan${idx.constituents.length!==1?'ies':'y'} · equal-weighted · base 1000</div>
     </div>
     ${DB.indexHistory&&DB.indexHistory.length>=2?`${buildJxiChartIntervalBar('jxi-chart')}<div style="position:relative;height:160px;margin-bottom:14px"><canvas id="jxi-chart"></canvas></div>`:'<div class="ibox ibox-blue" style="margin-bottom:14px;font-size:12px">Chart builds up as trades happen — check back after some activity.</div>'}
