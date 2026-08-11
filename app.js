@@ -610,7 +610,13 @@ const shareholders=ticker=>DB.users.filter(u=>u.role==='student'&&(holdings(u)[t
 const divTotal=(ticker,ps)=>shareholders(ticker).reduce((s,u)=>s+Math.round(((holdings(u)[ticker])||0)*ps*100)/100,0);
 const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);return Math.max(0.01,Math.round((dir==='buy'?co.price*(1+impact):co.price*(1-impact))*100)/100);};
 const isWatched=ticker=>{const u=cu();return u&&watchlist(u).includes(ticker);};
-const sharesBar=co=>{const pct=co.shares>0?Math.round((co.shares_avail/co.shares)*100):0;return `<div class="sbar-wrap"><div style="font-size:12px;font-weight:500;font-family:var(--mono)">${co.shares_avail.toLocaleString()} <span style="font-weight:400;color:var(--text2)">/ ${co.shares.toLocaleString()}</span></div><div style="font-size:11px;color:var(--text3);margin-top:1px">${pct}% available</div><div class="sbar-bg"><div class="sbar-fill" style="width:${pct}%"></div></div></div>`;};
+const sharesBar=co=>{
+  // JXI mints/redeems on demand -- shares_avail always equals shares (see
+  // rpc_trade_buy/sell's is_index_fund branch), so the usual "available out
+  // of a fixed float" bar would always read a meaningless "100% available"
+  // and imply a supply that can run out, which it can't.
+  if(co.is_index_fund)return `<div class="sbar-wrap"><div style="font-size:12px;font-weight:500;font-family:var(--mono)">${co.shares.toLocaleString()}</div><div style="font-size:11px;color:var(--text3);margin-top:1px">units outstanding</div></div>`;
+  const pct=co.shares>0?Math.round((co.shares_avail/co.shares)*100):0;return `<div class="sbar-wrap"><div style="font-size:12px;font-weight:500;font-family:var(--mono)">${co.shares_avail.toLocaleString()} <span style="font-weight:400;color:var(--text2)">/ ${co.shares.toLocaleString()}</span></div><div style="font-size:11px;color:var(--text3);margin-top:1px">${pct}% available</div><div class="sbar-bg"><div class="sbar-fill" style="width:${pct}%"></div></div></div>`;};
 const roleBadge=role=>role==='chairman'?'<span class="badge b-chair">Chairman</span>':role==='president'?'<span class="badge b-pres">President</span>':role==='secretary'?'<span class="badge b-sec">Secretary</span>':role==='treasurer'?'<span class="badge b-tre">Treasurer</span>':role==='compliance_officer'?'<span class="badge b-co">Compliance</span>':role==='student'?'<span class="badge b-blue">Student</span>':role==='company'?'<span class="badge b-amber">Company</span>':'';
 const avatarClass=role=>role==='chairman'?'av-ch':role==='president'?'av-pr':role==='secretary'?'av-sec':role==='treasurer'?'av-tre':role==='compliance_officer'?'av-co':role==='company'?'av-c':'av-s';
 
@@ -2115,6 +2121,10 @@ function calcPnLAttribution(userId){
 // Company health score (0-100)
 function calcHealthScore(co){
   if(!co||co.status!=='listed')return null;
+  // A cash-cushion/short-interest/dividend-history score doesn't mean
+  // anything for an index fund with no owner, no financials, and no
+  // dividends -- the table already renders "—" for a null score.
+  if(co.is_index_fund)return null;
   let score=50;
   // Price stability (less volatile = better, up to +20)
   const h=co.price_history||[];
@@ -4505,7 +4515,10 @@ function renderIndexCard(){
 function getMarketListed(u){
   const searchQ=(document.getElementById('market-search')?.value||'').toLowerCase();
   return DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)
-    &&(!searchQ||(c.name.toLowerCase().includes(searchQ)||c.ticker.toLowerCase().includes(searchQ))));
+    &&(!searchQ||(c.name.toLowerCase().includes(searchQ)||c.ticker.toLowerCase().includes(searchQ))))
+    // JXI pinned to the top, like a benchmark/reference instrument on a real
+    // exchange -- everything else keeps its normal (creation) order.
+    .sort((a,b)=>(b.is_index_fund?1:0)-(a.is_index_fund?1:0));
 }
 let _marketLastPrices={};
 function renderMarketRows(u,listed){
@@ -6351,7 +6364,7 @@ function renderAdminNews(){
 function renderAdminListed(){
   return`<div class="card"><div class="section-title">Listed companies</div>
     <table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th>Change</th><th>Shares</th><th>Owner</th><th></th></tr></thead>
-    <tbody>${DB.companies.map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${esc(c.name)}${getClassroomName(c.classroom_id)?` <span class="badge b-gray" style="font-size:10px">${esc(getClassroomName(c.classroom_id))}</span>`:''} ${c.status==='delisted'?'<span class="badge b-red" style="font-size:10px">delisted</span>':''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${esc(c.ticker)}')" title="Click to copy">${esc(c.ticker)}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${esc(owner?owner.name:'—')}</td><td>${c.status==='delisted'?
+    <tbody>${[...DB.companies].sort((a,b)=>(b.is_index_fund?1:0)-(a.is_index_fund?1:0)).map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${esc(c.name)}${getClassroomName(c.classroom_id)?` <span class="badge b-gray" style="font-size:10px">${esc(getClassroomName(c.classroom_id))}</span>`:''} ${c.status==='delisted'?'<span class="badge b-red" style="font-size:10px">delisted</span>':''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${esc(c.ticker)}')" title="Click to copy">${esc(c.ticker)}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${esc(owner?owner.name:'—')}</td><td>${c.status==='delisted'?
     `<button class="btn btn-sm btn-primary" onclick="relistCompany('${c.ticker}')">Re-list</button>`:
     `<button class="btn btn-sm btn-danger" onclick="delistCompany('${c.ticker}')">Delist</button>`
   }</td></tr>`;}).join('')||`<tr><td colspan="7"><div class="empty">No listed companies</div></td></tr>`}
