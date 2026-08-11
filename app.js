@@ -670,6 +670,16 @@ function destroyCharts(){Object.keys(charts).forEach(k=>destroyChart(k));charts=
 // ═══════════════════════════════════════════════
 const pad=n=>n<10?'0'+n:String(n);
 function getAZTime(){return new Date(new Date().toLocaleString('en-US',{timeZone:'America/Phoenix'}));}
+// True once the calendar day (Arizona time, same timezone the scheduler
+// already standardizes on) has rolled over since session_open_prices was
+// last captured -- lets the daily %-change baseline reset every day like a
+// real market's open, even when the exchange itself is left continuously
+// "open" across multiple days instead of being closed and reopened each one.
+function isNewTradingDay(){
+  if(!DB.session.session_started_at)return false;
+  const lastAz=new Date(new Date(DB.session.session_started_at).toLocaleString('en-US',{timeZone:'America/Phoenix'}));
+  return lastAz.toDateString()!==getAZTime().toDateString();
+}
 function fmtAZTime(d){return d.toLocaleString('en-US',{timeZone:'America/Phoenix',weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true})+' MST';}
 // Runs server-side (rpc_admin_save_session) -- saveSession() itself had no
 // auth check at all, and neither did most of its callers (saveBudgetThreshold,
@@ -1064,17 +1074,57 @@ async function sessionAutoTick(){
   const wasOpen=DB.session.status==='open';
   let r;
   try{r=await sb.rpc('rpc_session_tick',{});}catch(e){return;}
-  if(!r.changed)return;
-  Object.assign(DB.session,r.session);
-  const nowOpen=DB.session.status==='open';
-  if(nowOpen&&!wasOpen){
-    sessionTimer=setInterval(tickTimer,500);
-    toast(DB.session.label.includes('weekly')?'🟢 Trading session opened (weekly schedule)':'Trading session is now open!');
-  } else if(!nowOpen&&wasOpen){
-    clearInterval(sessionTimer);sessionTimer=null;
-    toast(DB.session.label&&DB.session.label.includes('weekly')?'🔴 Trading session closed (weekly schedule)':'Session ended.');
+  if(r.changed){
+    Object.assign(DB.session,r.session);
+    const nowOpen=DB.session.status==='open';
+    if(nowOpen&&!wasOpen){
+      sessionTimer=setInterval(tickTimer,500);
+      toast(DB.session.label.includes('weekly')?'🟢 Trading session opened (weekly schedule)':'Trading session is now open!');
+      // The scheduler opening the market is just as much "today's open" as a
+      // manual Chairman/President click -- without this, a classroom that
+      // only ever uses the weekly auto-schedule (never a manual open/close)
+      // would never capture a daily %-change baseline through this path at
+      // all, leaving every stock's "today" % stuck showing since-listing.
+      recordSessionOpenPrices();
+    } else if(!nowOpen&&wasOpen){
+      clearInterval(sessionTimer);sessionTimer=null;
+      toast(DB.session.label&&DB.session.label.includes('weekly')?'🔴 Trading session closed (weekly schedule)':'Session ended.');
+    }
+    render();
+    return;
   }
-  render();
+  // Real market %-change resets every trading day -- do the same here even
+  // when the exchange is left continuously open across midnight instead of
+  // being closed and reopened each day.
+  if(DB.session.status==='open'&&isNewTradingDay())await recordSessionOpenPrices();
+  // Catch manual Chairman/President actions -- opening/closing/pausing the
+  // market, adjusting a stock's price, halting/resuming trading -- that
+  // rpc_session_tick() above doesn't cover (it only decides SCHEDULER-driven
+  // transitions). Piggybacks on this same 15s timer rather than a new one;
+  // only 3 small tables, so it stays cheap at this cadence, and gets every
+  // other connected client's screen "automatically" refreshed within 15s
+  // regardless of whether Realtime's WebSocket push is also working.
+  try{
+    const [freshSession,freshCompanies,freshHalts]=await Promise.all([
+      sb.get('jex_session','id=eq.1'),
+      sb.get('jex_companies','order=created_at.asc'),
+      sb.get('jex_halts','order=created_at.asc'),
+    ]);
+    const nowOpen=freshSession[0]&&freshSession[0].status==='open';
+    if(freshSession[0])Object.assign(DB.session,freshSession[0]);
+    DB.companies=freshCompanies;
+    DB.halts=freshHalts;
+    if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
+    if(nowOpen&&!wasOpen){
+      sessionTimer=setInterval(tickTimer,500);
+      toast('🟢 Trading session is now open!');
+      recordSessionOpenPrices();
+    } else if(!nowOpen&&wasOpen){
+      clearInterval(sessionTimer);sessionTimer=null;
+      toast('🔴 Trading session has closed.');
+    }
+    if(!userIsFillingForm())render();
+  }catch(e){}
 }
 setInterval(()=>{sessionAutoTick();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
 
@@ -2393,21 +2443,23 @@ async function checkCircuitBreakers(){
     }
   }
 }
+// jxi_open_value/session_started_at anchor the JXI headline %-change and the
+// 1D chart view to THIS trading day's open, the same way a real index's
+// "today" numbers reset every morning instead of showing change since
+// inception. Every connected client (any role, not just Chairman/President)
+// can independently be the one to first observe a session-open transition or
+// a day rollover -- via Realtime, the scheduler poll, or the daily-reset
+// check -- and needs to be able to record this, so this goes through its own
+// narrowly-scoped RPC (server-recomputes the snapshot from the authoritative
+// jex_companies prices itself, never trusting client-submitted values)
+// instead of the Chairman/President-gated rpc_admin_save_session used for
+// actual session control. The RPC is itself idempotent within the same
+// Arizona calendar day, so redundant/racing calls from multiple clients
+// detecting the same transition are harmless no-ops after the first one.
 async function recordSessionOpenPrices(){
-  const prices={};
-  DB.companies.forEach(c=>{prices[c.ticker]=c.price;});
-  // jxi_open_value/session_started_at anchor the JXI headline %-change and
-  // the 1D chart view to THIS session's open, the same way a real index's
-  // "today" numbers reset every morning instead of showing change since
-  // inception. Captured at the same moment as session_open_prices (every
-  // connected client independently detects the open->closed transition
-  // and races to save this -- harmless, since they're all computing the
-  // same values from the same just-opened prices within moments of each
-  // other, same as the pre-existing session_open_prices capture).
-  const jxiOpen=computeJXI().value;
-  const data={session_open_prices:prices,session_started_at:Date.now(),jxi_open_value:jxiOpen};
-  await saveSession(data);
-  Object.assign(DB.session,data);
+  let r;
+  try{r=await sb.rpc('rpc_record_session_open_prices',{});}catch(e){return;}
+  if(r&&r.session)Object.assign(DB.session,r.session);
 }
 
 // ═══════════════════════════════════════════════
