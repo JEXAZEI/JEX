@@ -506,7 +506,19 @@ const uid=()=>'id_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
 const ts=()=>new Date().toLocaleTimeString();
 const isoNow=()=>new Date().toISOString();
 
-const priceChg=c=>{if(!c.price_history||c.price_history.length<2)return 0;const f=c.price_history[0].p,l=c.price_history[c.price_history.length-1].p;return f?((l-f)/f*100):0;};
+// Daily (since this session opened) is the default %-change everywhere --
+// every ticker's headline number should mean "today," the same way a real
+// stock's or index's does, not "since I first started covering it." Falls
+// back to since-listing (the original behavior) until this ticker's first
+// session-open capture happens (a brand new IPO mid-session, or before any
+// session has ever opened on a fresh exchange).
+const priceChg=c=>{
+  const openPrice=DB.session.session_open_prices&&DB.session.session_open_prices[c.ticker];
+  if(openPrice>0)return(c.price-openPrice)/openPrice*100;
+  if(!c.price_history||c.price_history.length<2)return 0;
+  const f=c.price_history[0].p,l=c.price_history[c.price_history.length-1].p;
+  return f?((l-f)/f*100):0;
+};
 function computeJXI(){
   // JXI itself is now a real, tradeable ticker in DB.companies (see
   // is_index_fund) -- it must never appear in its own basket, or its price
@@ -1061,7 +1073,7 @@ async function autoRefresh(){
   if(!UI.userId)return; // not logged in
   if(userIsFillingForm())return; // don't interrupt forms
   const now=Date.now();
-  if(now-_lastRefresh<18000)return; // debounce
+  if(now-_lastRefresh<4000)return; // debounce
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
@@ -1127,7 +1139,7 @@ async function autoRefresh(){
     }
   }catch(e){/* silent fail */}
 }
-setInterval(autoRefresh,20000);
+setInterval(autoRefresh,5000);
 // Browsers throttle setInterval in background tabs (often down to once a
 // minute or less) -- if a trade happened while this tab was in the
 // background, its next scheduled autoRefresh() could be a long way off by
@@ -3294,8 +3306,24 @@ function setChartInterval(canvasId,interval,co){
 }
 function buildIntervalButtons(canvasId,co){
   const intervals=[['1d','1D'],['5d','5D'],['1m','1M'],['max','Max']];
-  const current=chartIntervals[canvasId]||'max';
+  const current=chartIntervals[canvasId]||'1d';
   return intervals.map(([val,label])=>`<button style="font-size:11px;padding:2px 8px;border-radius:4px;cursor:pointer;border:1px solid ${current===val?'var(--blue)':'var(--border2)'};background:${current===val?'var(--blue)':'transparent'};color:${current===val?'white':'var(--text2)'};font-family:var(--font)" onclick="setChartInterval('${canvasId}','${val}',getCo('${co.ticker}'))">${label}</button>`).join('');
+}
+// Shared by buildChart (per-company) and buildJxiChart (the index) -- the
+// 1D view resets fresh every time a session opens, like a real ticker's
+// "today" numbers, anchored on the last point before this session started
+// (its "open" reference) plus everything since, rather than a rolling
+// 24-hour window that would still show yesterday's session bleeding into
+// today's. Falls back to the plain rolling-window filterByInterval() when
+// no session has opened yet (e.g. a brand new exchange).
+function anchorToSessionOpen(allPts,interval){
+  if(interval==='1d'&&DB.session.session_started_at){
+    const cutoff=DB.session.session_started_at;
+    const before=allPts.filter(p=>p.t&&new Date(p.t).getTime()<cutoff);
+    const after=allPts.filter(p=>p.t&&new Date(p.t).getTime()>=cutoff);
+    return{pts:before.length?[before[before.length-1],...after]:after,anchoredAtOpen:before.length>0};
+  }
+  return{pts:filterByInterval(allPts,interval),anchoredAtOpen:false};
 }
 function filterByInterval(pts,interval){
   if(!pts||!pts.length)return pts;
@@ -3347,12 +3375,16 @@ function destroyChart(canvasId){
 function buildChart(canvasId,co){
   destroyChart(canvasId);
   const canvas=get(canvasId);if(!canvas||!window.Chart)return;
-  const interval=chartIntervals[canvasId]||'max';
+  const interval=chartIntervals[canvasId]||'1d';
   const allPts=co.price_history||[];
-  const pts=filterByInterval(allPts,interval);
+  const{pts,anchoredAtOpen}=anchorToSessionOpen(allPts,interval);
   if(!pts.length)return;
   const prices=pts.map(p=>p.p);
-  const labels=pts.map((p,i)=>i===pts.length-1?'Now':fmtChartLabel(p.t,interval));
+  const labels=pts.map((p,i)=>{
+    if(i===pts.length-1&&pts.length>1)return'Now';
+    if(i===0&&anchoredAtOpen)return'Open';
+    return fmtChartLabel(p.t,interval);
+  });
   const isUp=prices.length>0&&prices[prices.length-1]>=prices[0];
   const lc=isUp?'#00c896':'#ff4d6a';
   const fillColor=isUp?'rgba(0,200,150,0.06)':'rgba(255,77,106,0.06)';
@@ -3382,7 +3414,7 @@ function buildChart(canvasId,co){
 }
 function buildJxiIntervalButtons(canvasId){
   const intervals=[['1d','1D'],['5d','5D'],['1m','1M'],['max','Max']];
-  const current=chartIntervals[canvasId]||'max';
+  const current=chartIntervals[canvasId]||'1d';
   return intervals.map(([val,label])=>`<button style="font-size:11px;padding:2px 8px;border-radius:4px;cursor:pointer;border:1px solid ${current===val?'var(--blue)':'var(--border2)'};background:${current===val?'var(--blue)':'transparent'};color:${current===val?'white':'var(--text2)'};font-family:var(--font)" onclick="setJxiChartInterval('${canvasId}','${val}')">${label}</button>`).join('');
 }
 function buildJxiChartIntervalBar(canvasId){
@@ -3398,23 +3430,9 @@ function setJxiChartInterval(canvasId,interval){
 function buildJxiChart(canvasId){
   destroyChart(canvasId);
   const canvas=get(canvasId);if(!canvas||!window.Chart)return;
-  const interval=chartIntervals[canvasId]||'max';
+  const interval=chartIntervals[canvasId]||'1d';
   const allPts=jxiPriceHistory();
-  let pts,anchoredAtOpen=false;
-  if(interval==='1d'&&DB.session.session_started_at){
-    // Resets fresh every time a session opens, like a real index's "1D"
-    // view -- anchored on the last snapshot before this session started
-    // (its "open" reference point) plus everything since, rather than a
-    // rolling 24-hour window that would still show yesterday's session
-    // bleeding into today's.
-    const cutoff=DB.session.session_started_at;
-    const before=allPts.filter(p=>p.t&&new Date(p.t).getTime()<cutoff);
-    const after=allPts.filter(p=>p.t&&new Date(p.t).getTime()>=cutoff);
-    pts=before.length?[before[before.length-1],...after]:after;
-    anchoredAtOpen=before.length>0;
-  }else{
-    pts=filterByInterval(allPts,interval);
-  }
+  const{pts,anchoredAtOpen}=anchorToSessionOpen(allPts,interval);
   if(!pts.length)return;
   const prices=pts.map(p=>p.p);
   const labels=pts.map((p,i)=>{
@@ -4181,18 +4199,38 @@ function renderCompanyPage(parentTicker){
   <div class="tab-row" style="margin-bottom:16px">
     <button class="tab ${tab==='overview'?'active':''}" onclick="UI.companyPageTab='overview';render()">Overview</button>
     <button class="tab ${tab==='trade'?'active':''}" onclick="UI.companyPageTab='trade';render()">${canTrade?'Trade':'Trade'}</button>
-    
-    <button class="tab ${tab==='news'?'active':''}" onclick="UI.companyPageTab='news';render()">News ${companyNews.length?'<span class="badge b-amber" style="margin-left:4px">'+companyNews.length+'</span>':''}</button>
-    <button class="tab ${tab==='votes'?'active':''}" onclick="UI.companyPageTab='votes';render()">Votes ${companyVotes.filter(v=>v.status==='open').length?'<span class="badge b-green" style="margin-left:4px">'+companyVotes.filter(v=>v.status==='open').length+'</span>':''}</button>
-    <button class="tab ${tab==='shareholders'?'active':''}" onclick="UI.companyPageTab='shareholders';render()">Shareholders</button>
-    <button class="tab ${tab==='team'?'active':''}" onclick="UI.companyPageTab='team';render()">Team</button>
+
+    ${co.is_index_fund?'':`<button class="tab ${tab==='news'?'active':''}" onclick="UI.companyPageTab='news';render()">News ${companyNews.length?'<span class="badge b-amber" style="margin-left:4px">'+companyNews.length+'</span>':''}</button>
+    <button class="tab ${tab==='votes'?'active':''}" onclick="UI.companyPageTab='votes';render()">Votes ${companyVotes.filter(v=>v.status==='open').length?'<span class="badge b-green" style="margin-left:4px">'+companyVotes.filter(v=>v.status==='open').length+'</span>':''}</button>`}
+    <button class="tab ${tab==='shareholders'?'active':''}" onclick="UI.companyPageTab='shareholders';render()">${co.is_index_fund?'Holders':'Shareholders'}</button>
+    ${co.is_index_fund?'':`<button class="tab ${tab==='team'?'active':''}" onclick="UI.companyPageTab='team';render()">Team</button>
     <button class="tab ${tab==='financials'?'active':''}" onclick="UI.companyPageTab='financials';render()">Financials ${co.financials&&co.financials.length?'<span class="badge b-gray" style="margin-left:4px">'+co.financials.length+'</span>':''}</button>
-    <button class="tab ${tab==='dividends'?'active':''}" onclick="UI.companyPageTab='dividends';render()">Dividends</button>
+    <button class="tab ${tab==='dividends'?'active':''}" onclick="UI.companyPageTab='dividends';render()">Dividends</button>`}
     ${canTrade?`<button class="tab ${tab==='alerts'?'active':''}" onclick="UI.companyPageTab='alerts';render()">🎯 Alerts ${DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&!a.triggered).length?'<span class="badge b-blue" style="margin-left:4px">'+DB.priceAlerts.filter(a=>a.user_id===u.id&&a.ticker===parentTicker&&!a.triggered).length+'</span>':''}</button>`:''}
     <button class="tab ${tab==='trades'?'active':''}" onclick="UI.companyPageTab='trades';render()">Trade history</button>
   </div>`;
+  // Index funds have no owner/company behind them -- if UI.companyPageTab
+  // is left pointing at a tab that was just hidden above (e.g. navigated
+  // here right after viewing a real company's Financials tab), fall back to
+  // Overview instead of rendering a blank/broken tab body below.
+  if(co.is_index_fund&&['news','votes','team','financials','dividends'].includes(tab)){UI.companyPageTab='overview';return renderCompanyPage(parentTicker);}
 
-  if(tab==='overview'){
+  if(tab==='overview'&&co.is_index_fund){
+    // No owner, no IPO, no share classes, no shorting -- none of the usual
+    // company-overview concepts apply to an index tracker. Composition
+    // mirrors the constituents table on the market page's index card.
+    const idx=computeJXI();
+    html+='<div class="grid4" style="margin-bottom:14px">'
+      +'<div class="mcard"><div class="mlabel">Price</div><div class="mval" style="font-family:var(--mono)">'+fmt(co.price)+'</div></div>'
+      +'<div class="mcard"><div class="mlabel">Holders</div><div class="mval">'+shareholders.length+'</div></div>'
+      +'<div class="mcard"><div class="mlabel">Units outstanding</div><div class="mval">'+co.shares.toLocaleString()+'</div></div>'
+      +'<div class="mcard"><div class="mlabel">Constituents</div><div class="mval">'+idx.constituents.length+'</div></div>'
+      +'</div>'
+      +'<div class="ibox ibox-blue" style="margin-bottom:14px">Tracks the JEX Composite Index — an equal-weighted average of every listed company. Price updates automatically to match the live index value and can\'t be manually adjusted. Buying mints new units at the live price; selling redeems them, so there\'s no fixed share supply.</div>';
+    html+='<div class="card"><div class="section-title">Composition</div><table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th class="r">Today</th></tr></thead>'
+      +'<tbody>'+idx.constituents.map(c=>{const cco=getCo(c.ticker);const cchg=cco?priceChg(cco):0;return'<tr><td>'+esc(c.name)+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+esc(c.ticker)+'</span></td><td class="r" style="font-family:var(--mono)">'+fmt(c.price)+'</td><td class="r '+(cchg>=0?'price-up':'price-down')+'">'+(cchg>=0?'+':'')+cchg.toFixed(2)+'%</td></tr>';}).join('')
+      +'</tbody></table></div>';
+  } else if(tab==='overview'){
     // Key stats
     const totalMktCap=allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.price*c.shares:0);},0);
     // Capital raised = total value of all shares sold from exchange pool
@@ -4253,8 +4291,10 @@ function renderCompanyPage(parentTicker){
         +'</div>';
     });
     html+='</div>';
-
-    // Price charts
+  }
+  if(tab==='overview'){
+    // Price charts -- shared by both branches above (index funds still get
+    // their own price chart, just none of the company-specific sections).
     html+='<div class="card"><div class="section-title">Price charts</div>'
       +'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px">';
     allTickers.forEach(ticker=>{
@@ -4511,9 +4551,8 @@ function renderIndexCard(){
   const idx=computeJXI();
   if(!idx.constituents.length)return'';
   // Headline %-change is TODAY's move (since this session opened), like a
-  // real index -- not the change since each constituent's first-ever
-  // listing (idx.change, still used for the per-company "Since listing"
-  // column below, where that framing is correct).
+  // real index -- idx.change (since each constituent's first-ever listing)
+  // is only the fallback shown before the first session-open capture.
   const openVal=DB.session.jxi_open_value;
   const sessionChange=openVal?Math.round(((idx.value-openVal)/openVal*100)*100)/100:null;
   return `<div class="card">
@@ -4526,8 +4565,8 @@ function renderIndexCard(){
       <div style="margin-left:auto;font-size:12px;color:var(--text2)">${idx.constituents.length} listed compan${idx.constituents.length!==1?'ies':'y'} · equal-weighted · base 1000</div>
     </div>
     ${DB.indexHistory&&DB.indexHistory.length>=2?`${buildJxiChartIntervalBar('jxi-chart')}<div style="position:relative;height:160px;margin-bottom:14px"><canvas id="jxi-chart"></canvas></div>`:'<div class="ibox ibox-blue" style="margin-bottom:14px;font-size:12px">Chart builds up as trades happen — check back after some activity.</div>'}
-    <table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th class="r">Since listing</th></tr></thead>
-    <tbody>${idx.constituents.map(c=>{const chg=Math.round(((c.ratio-1)*100)*100)/100;return `<tr><td>${esc(c.name)}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${esc(c.ticker)}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${chg>=0?'+':''}${chg}%</td></tr>`;}).join('')}</tbody></table>
+    <table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th class="r">Today</th></tr></thead>
+    <tbody>${idx.constituents.map(c=>{const co=getCo(c.ticker);const chg=co?priceChg(co):Math.round(((c.ratio-1)*100)*100)/100;return `<tr><td>${esc(c.name)}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${esc(c.ticker)}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${chg>=0?'+':''}${chg.toFixed(2)}%</td></tr>`;}).join('')}</tbody></table>
   </div>`;
 }
 function getMarketListed(u){
