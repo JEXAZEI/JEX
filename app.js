@@ -24,10 +24,29 @@ const JEX_PENDING_SAFE_SELECT = 'id,name,role,sec_q,description,ts,created_at,cl
 // back to the shared anon key otherwise — e.g. logged out, or a legacy account that
 // hasn't been migrated to real auth yet. supaAuth is declared further down; guarded
 // here since sb is defined before it.
+// supabase-js v2 serializes concurrent auth.getSession() calls behind an
+// internal lock (to avoid racing a token refresh) -- loadAll() fires dozens
+// of requests via Promise.all, and each one calling getSession() itself
+// turned that "parallel" fetch into dozens of queued lock acquisitions
+// before any request could even start, badly slowing down every page load.
+// _authTokenCache is kept in sync by the onAuthStateChange listener below
+// (which fires once immediately with the current session, then again on
+// every sign-in/out/refresh), so most calls here just read the cache
+// instead of touching the lock at all.
+let _authTokenCache={ready:false,token:null};
+// Before the cache is warm (the very first loadAll(), racing the async
+// initial onAuthStateChange event), multiple concurrent callers would each
+// still hit the lock independently -- sharing one in-flight getSession()
+// call between them collapses that back down to a single lock acquisition.
+let _authTokenInflight=null;
 async function sbAuthToken(){
   if(typeof supaAuth==='undefined'||!supaAuth)return SUPABASE_ANON_KEY;
+  if(_authTokenCache.ready)return _authTokenCache.token||SUPABASE_ANON_KEY;
   try{
-    const{data}=await supaAuth.auth.getSession();
+    if(!_authTokenInflight){
+      _authTokenInflight=supaAuth.auth.getSession().finally(()=>{_authTokenInflight=null;});
+    }
+    const{data}=await _authTokenInflight;
     if(data&&data.session&&data.session.access_token)return data.session.access_token;
   }catch(e){}
   return SUPABASE_ANON_KEY;
@@ -136,6 +155,10 @@ try{
     // Force out of any existing app session and show the "set new password" form,
     // regardless of what the page happened to be showing before the link was clicked.
     supaAuth.auth.onAuthStateChange((event,session)=>{
+      // Fires once immediately with the current session (whatever it is),
+      // then again on every sign-in/out/refresh -- keeps sbAuthToken()'s
+      // cache correct without it ever needing to call getSession() itself.
+      _authTokenCache={ready:true,token:(session&&session.access_token)||null};
       if(event==='PASSWORD_RECOVERY'){
         _passwordRecoveryActive=true;
         if(session&&session.access_token){try{localStorage.setItem(RECOVERY_TOKEN_KEY,session.access_token);}catch(e){}}
