@@ -204,8 +204,15 @@ function subscribeRealtime(){
     let heartbeatInterval;
     
     ws.onopen=()=>{
-      // Join channel
-      ws.send(JSON.stringify({topic:'realtime:*',event:'phx_join',payload:{config:{broadcast:{self:false},presence:{key:''},postgres_changes:tables.map(t=>({event:'*',schema:'public',table:t}))}},ref:'1'}));
+      // Join channel -- topic must be this client's own unique channel name
+      // (channelName, generated above), not a literal 'realtime:*' wildcard.
+      // Supabase's Realtime protocol is per-channel: the server matches
+      // incoming WAL changes against each joined channel's own
+      // config.postgres_changes list, keyed by the channel's topic, not by
+      // any special wildcard string -- a topic the server doesn't recognize
+      // as a real channel silently never receives events, even though the
+      // connection itself stays open and looks healthy.
+      ws.send(JSON.stringify({topic:'realtime:'+channelName,event:'phx_join',payload:{config:{broadcast:{self:false},presence:{key:''},postgres_changes:tables.map(t=>({event:'*',schema:'public',table:t}))}},ref:'1'}));
       // Heartbeat every 30s
       heartbeatInterval=setInterval(()=>{
         if(ws.readyState===1)ws.send(JSON.stringify({topic:'phoenix',event:'heartbeat',payload:{},ref:'hb'}));
@@ -1121,6 +1128,17 @@ async function autoRefresh(){
   }catch(e){/* silent fail */}
 }
 setInterval(autoRefresh,20000);
+// Browsers throttle setInterval in background tabs (often down to once a
+// minute or less) -- if a trade happened while this tab was in the
+// background, its next scheduled autoRefresh() could be a long way off by
+// the time someone actually looks at it again. Force an immediate refresh
+// the moment the tab regains focus instead of waiting for that timer,
+// independent of whether Realtime's WebSocket push is also working.
+if(typeof document!=='undefined'){
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='visible'){_lastRefresh=0;autoRefresh();}
+  });
+}
 
 // ── Keyboard shortcuts ────────────────────────────────────
 document.addEventListener('keydown',function(e){
