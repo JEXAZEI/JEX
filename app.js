@@ -7071,6 +7071,15 @@ async function boot(){
       <div style="height:100%;background:var(--blue);border-radius:2px;animation:progress 1.5s ease-in-out infinite"></div>
     </div>
   </div>`;
+  // Set the routed page immediately, before any data loads -- otherwise every
+  // render() inside loadAll() (Phase 1, then Phase 2) still targets the
+  // 'market' default and briefly flashes the market page before flipping to
+  // the real one once data arrives and this was applied too late. The
+  // destination is unambiguous from the URL alone (window.__JEX_PAGE__, set
+  // inline by each page's own shell before app.js loads), so it doesn't need
+  // to wait on the user's role the way the root page's landing-tab redirect
+  // below does.
+  if(typeof window!=='undefined'&&window.__JEX_PAGE__&&PAGE_ROUTES.has(window.__JEX_PAGE__))UI.navTab=window.__JEX_PAGE__;
   try{
     // Restore session before loadAll so first render() in phase 1 shows correct nav
     const savedId=localStorage.getItem(SESSION_KEY);
@@ -7086,24 +7095,26 @@ async function boot(){
         // Self email/notification_email is already merged in by loadAll()
         // itself (it knows UI.userId by the time it runs, since it's set
         // above before loadAll() is called) -- see rpc_get_own_contact_info.
-        UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'mystock':'market';
-        if(isAdmin(u))UI.adminTab='dashboard';
-        // Real routed pages (settings.html, etc. -- see PAGE_ROUTES) set
-        // window.__JEX_PAGE__ in an inline script before app.js loads, so
-        // boot() knows which page it's actually on instead of always
-        // defaulting to the role's usual landing tab.
-        if(typeof window!=='undefined'&&window.__JEX_PAGE__&&PAGE_ROUTES.has(window.__JEX_PAGE__))UI.navTab=window.__JEX_PAGE__;
-        // loadAll() already rendered twice (Phase 1, then Phase 2 once its data
-        // arrived), but both of those renders ran before UI.navTab was set here
-        // -- for anyone whose real tab isn't the 'market' default (every admin
-        // role, company accounts), the DOM is left showing loadAll()'s last
-        // render regardless. Beyond just being the wrong page, that stale
-        // render's own delayed chart-drawing setTimeout (buildJxiChart, etc.)
-        // re-checks UI.navTab when it fires and silently no-ops once it no
-        // longer matches -- leaving a permanently blank chart canvas sitting in
-        // DOM nobody redraws. One more render() here with the final, settled
-        // navTab makes the DOM match reality and gives every chart's own timer
-        // a stable navTab to fire against.
+        // Every routed page (including index.html, whose identity is
+        // 'market') already had its destination fixed above, before
+        // loadAll(), from the URL alone -- that always wins, market page
+        // included: a chairman opening index.html directly lands on market,
+        // not their admin dashboard. The role-based landing tab below is only
+        // a fallback for the case where no page identity exists at all (e.g.
+        // window.__JEX_PAGE__ missing/unrecognized).
+        if(!(typeof window!=='undefined'&&window.__JEX_PAGE__&&PAGE_ROUTES.has(window.__JEX_PAGE__))){
+          UI.navTab=isAdmin(u)?'admin':u?.role==='company'?'mystock':'market';
+          if(isAdmin(u))UI.adminTab='dashboard';
+        }
+        // loadAll() already rendered twice (Phase 1, then Phase 2 once its
+        // data arrived) against the navTab set before loadAll() -- fine in
+        // the normal case, but a stale render's own delayed chart-drawing
+        // setTimeout (buildJxiChart, etc.) re-checks UI.navTab when it fires
+        // and silently no-ops once it no longer matches -- leaving a
+        // permanently blank chart canvas sitting in DOM nobody redraws. One
+        // more render() here with the final, settled navTab makes the DOM
+        // match reality and gives every chart's own timer a stable navTab to
+        // fire against.
         render();
         subscribeRealtime();
         // Deep link: index.html?ticker=ACME (the market page) opens straight
