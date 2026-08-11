@@ -501,7 +501,10 @@ const isoNow=()=>new Date().toISOString();
 
 const priceChg=c=>{if(!c.price_history||c.price_history.length<2)return 0;const f=c.price_history[0].p,l=c.price_history[c.price_history.length-1].p;return f?((l-f)/f*100):0;};
 function computeJXI(){
-  const listed=DB.companies.filter(c=>c.status==='listed'&&!getClassMeta(c.ticker));
+  // JXI itself is now a real, tradeable ticker in DB.companies (see
+  // is_index_fund) -- it must never appear in its own basket, or its price
+  // would track a moving average that includes itself.
+  const listed=DB.companies.filter(c=>c.status==='listed'&&!getClassMeta(c.ticker)&&!c.is_index_fund);
   if(!listed.length)return{value:1000,change:0,constituents:[]};
   const constituents=listed.map(c=>{
     const base=(c.price_history&&c.price_history[0]&&c.price_history[0].p)||c.price;
@@ -2033,7 +2036,9 @@ function calcSharpe(userId){
 // Portfolio beta vs exchange index (market-cap weighted)
 function calcBeta(userId){
   const u=getUser(userId);if(!u)return null;
-  const listed=DB.companies.filter(c=>c.status==='listed');
+  // Excludes JXI itself -- it wouldn't make sense as a constituent of the
+  // "market returns" benchmark it's meant to track.
+  const listed=DB.companies.filter(c=>c.status==='listed'&&!c.is_index_fund);
   if(!listed.length)return null;
   // Build market returns from company price histories
   const mktPrices=listed.map(c=>c.price_history||[]);
@@ -2172,6 +2177,7 @@ function checkShortSqueezes(){
 // ═══════════════════════════════════════════════
 async function placeStopLoss(ticker,triggerPrice){
   const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(co.is_index_fund)return toast('Stop-loss orders aren\'t available for JXI yet');
   triggerPrice=parseFloat(triggerPrice);
   if(isNaN(triggerPrice)||triggerPrice<=0)return toast('Enter a valid trigger price');
   if(triggerPrice>=co.price)return toast('Stop-loss must be below current price ('+fmt(co.price)+')');
@@ -2610,6 +2616,7 @@ async function settleLimitOrder(order,cancelIfUnfilled){
 // ── Place a limit order (fundId optional: places on behalf of a fund) ──
 async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
   const co=getCo(ticker);if(!co)return;
+  if(co.is_index_fund)return toast('Limit orders aren\'t available for JXI yet — use a market order instead');
   qty=parseInt(qty);limitPrice=parseFloat(limitPrice);
   if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(isNaN(limitPrice)||limitPrice<=0)return toast('Enter a valid limit price');
@@ -2751,6 +2758,7 @@ async function placeSell(ticker,qty){
 }
 async function placeShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
+  if(co.is_index_fund)return toast('Shorting isn\'t available for JXI yet');
   if(!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const coll=Math.round(co.price*qty*1.5*100)/100;
@@ -4291,37 +4299,45 @@ function renderCompanyPage(parentTicker){
         +'<div class="mcard"><div class="mlabel">You hold</div><div class="mval">'+held+' shares</div></div>'
         +'<div class="mcard"><div class="mlabel">Short position</div><div class="mval '+(short?'red':'')+'">'+( short?short.qty+' @ '+fmt(short.avgPrice):'—')+'</div></div>'
         +'</div>';
+      // JXI (is_index_fund): only market buy/sell are wired up server-side
+      // (see rpc_trade_buy/sell's is_index_fund branch) -- limit orders and
+      // shorting assume price-impact/order-book dynamics that don't apply
+      // to a NAV-priced instrument, so those controls are hidden rather
+      // than offered and silently behaving oddly.
+      const idxFund=!!co.is_index_fund;
+      const effMode=(idxFund&&(mode==='short'||mode==='cover'))?'buy':mode;
       html+='<div class="card"><div class="ot-toggle">'
-        +'<button class="ot-btn '+(mode==='buy'?'ot-buy':'')+'" onclick="UI.panelMode=&quot;buy&quot;;render()">Buy</button>'
-        +'<button class="ot-btn '+(mode==='sell'?'ot-sell':'')+'" onclick="UI.panelMode=&quot;sell&quot;;render()">Sell</button>'
-        +'<button class="ot-btn '+(mode==='short'?'ot-short':'')+'" onclick="UI.panelMode=&quot;short&quot;;render()">Short</button>'
-        +(short?'<button class="ot-btn '+(mode==='cover'?'ot-cover':'')+'" onclick="UI.panelMode=&quot;cover&quot;;render()">Cover</button>':'')
+        +'<button class="ot-btn '+(effMode==='buy'?'ot-buy':'')+'" onclick="UI.panelMode=&quot;buy&quot;;render()">Buy</button>'
+        +'<button class="ot-btn '+(effMode==='sell'?'ot-sell':'')+'" onclick="UI.panelMode=&quot;sell&quot;;render()">Sell</button>'
+        +(idxFund?'':'<button class="ot-btn '+(effMode==='short'?'ot-short':'')+'" onclick="UI.panelMode=&quot;short&quot;;render()">Short</button>'
+        +(short?'<button class="ot-btn '+(effMode==='cover'?'ot-cover':'')+'" onclick="UI.panelMode=&quot;cover&quot;;render()">Cover</button>':''))
         +'</div>';
-      if(mode==='buy'){
-        html+='<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Available: <strong>'+co.shares_avail+'</strong> of '+co.shares.toLocaleString()+'</p>'
-          +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="cp-qty" value="1" min="1" max="'+co.shares_avail+'"></div>'
+      if(effMode==='buy'){
+        html+=(idxFund?'<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Buys mint new units at the live index price — there\'s no fixed supply to run out of.</p>':
+          '<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Available: <strong>'+co.shares_avail+'</strong> of '+co.shares.toLocaleString()+'</p>')
+          +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="cp-qty" value="1" min="1"'+(idxFund?'':' max="'+co.shares_avail+'"')+'></div>'
           +'<div style="padding-bottom:12px"><button class="btn btn-success" onclick="disableTradeBtn(this);cpTrade(&quot;buy&quot;)">Buy now</button></div></div>'
           +'<div id="cp-preview">'+impactPreview(co,1,'buy')+'</div>'
-          +'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy'+infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')+'</div>'
+          +(idxFund?'':'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy'+infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')+'</div>'
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-qty" value="1" min="1"></div>'
           +'<div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="cp-lmt-price" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
           +'<div class="frow" style="flex:1"><label class="flabel">Order type</label><select id="limit-order-type"><option value="gtc">GTC (Good till cancelled)</option><option value="day">Day order (expires at close)</option></select></div>'
-          +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="cpLimit(&quot;buy&quot;)">Place limit</button></div></div>';
-      } else if(mode==='sell'){
+          +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="cpLimit(&quot;buy&quot;)">Place limit</button></div></div>');
+      } else if(effMode==='sell'){
         html+='<p style="font-size:12px;color:var(--text2);margin-bottom:8px">You hold: <strong>'+held+'</strong></p>';
         if(held>0){
           html+='<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="cp-qty" value="1" min="1" max="'+held+'"></div>'
             +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="disableTradeBtn(this);cpTrade(&quot;sell&quot;)">Sell now</button></div></div>'
             +'<div id="cp-preview">'+impactPreview(co,1,'sell')+'</div>'
-            +'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell'+infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')+'</div>'
+            +(idxFund?'':'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell'+infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')+'</div>'
             +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-sty" value="1" min="1" max="'+held+'"></div>'
             +'<div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="cp-lmt-sprice" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
             +'<div class="frow" style="flex:1"><label class="flabel">Type</label><select id="limit-order-type-sell"><option value="gtc">GTC</option><option value="day">Day</option><option value="fok">FOK</option></select></div>'
-            +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="cpLimit(&quot;sell&quot;)">Place limit</button></div></div>';
+            +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="cpLimit(&quot;sell&quot;)">Place limit</button></div></div>');
         } else {
           html+='<div class="empty" style="padding:16px">You don&#39;t hold any '+parentTicker+'.</div>';
         }
-      } else if(mode==='short'){
+      } else if(effMode==='short'){
         html+='<div class="ibox ibox-purple">Short selling'+infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. You borrow shares and sell them now; later you buy them back to cover, hopefully at a lower price. The difference is your profit or loss, but losses are uncapped since a price can rise indefinitely.')+' — borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div>'
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="cp-qty" value="1" min="1"></div>'
           +'<div style="padding-bottom:12px"><button class="btn btn-purple" onclick="cpTrade(&quot;short&quot;)">Short sell</button></div></div>'
@@ -4333,7 +4349,8 @@ function renderCompanyPage(parentTicker){
           +'<div style="padding-bottom:12px"><button class="btn btn-warning" onclick="cpTrade(&quot;cover&quot;)">Cover short</button></div></div>'
           +'<div id="cp-preview">'+impactPreview(co,short.qty,'buy')+'</div>';
       }
-      // Stop-loss section
+      // Stop-loss section -- not offered for JXI, same reasoning as limit/short above.
+      if(!idxFund){
       const myStopLoss=DB.stopLossOrders.find(s=>s.user_id===u.id&&s.ticker===parentTicker&&s.status==='active');
       html+='<div class="card" style="margin-top:14px"><div class="section-title">🛑 Stop-loss order</div>'
         +'<div class="ibox ibox-purple">Automatically sells all your shares if the price drops to your trigger price.</div>';
@@ -4352,6 +4369,7 @@ function renderCompanyPage(parentTicker){
         html+='<div style="font-size:13px;color:var(--text2)">You don&#39;t hold any '+parentTicker+' shares.</div>';
       }
       html+='</div>';
+      }
       html+='</div>';
     }
   }
@@ -4653,6 +4671,11 @@ function openPanel(ticker){
   marketContent.innerHTML=renderMarket();
   const panel=get('trade-panel');if(!panel)return;
   const mode=UI.panelMode,fin=c.financials&&c.financials[0];
+  // See the identical idxFund/effMode handling in renderCompanyPage's trade
+  // tab -- limit orders and shorting aren't wired up for JXI, so they're
+  // hidden here too rather than left to behave oddly.
+  const idxFund=!!c.is_index_fund;
+  const effMode=(idxFund&&(mode==='short'||mode==='cover'))?'buy':mode;
   panel.innerHTML=`<div class="card" style="border-color:var(--blue)">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
       <div><span style="font-weight:500;font-size:15px">${esc(c.name)}</span> <span class="badge b-gray" style="font-family:var(--mono)">${esc(ticker)}</span>
@@ -4666,34 +4689,34 @@ function openPanel(ticker){
     ${fin?`<div style="font-size:12px;padding:8px 10px;background:var(--bg3);border-radius:var(--radius);margin-bottom:10px">Latest: Rev <strong>${fmt(fin.revenue)}</strong> | Profit <strong>${fmt(fin.profit)}</strong> — <span style="color:var(--text2)">${esc(fin.summary)}</span></div>`:''}
     <hr class="divider">
     <div class="ot-toggle">
-      <button class="ot-btn ${mode==='buy'?'ot-buy':''}" onclick="UI.panelMode='buy';openPanel('${ticker}')">Buy</button>
-      <button class="ot-btn ${mode==='sell'?'ot-sell':''}" onclick="UI.panelMode='sell';openPanel('${ticker}')">Sell</button>
-      <button class="ot-btn ${mode==='short'?'ot-short':''}" onclick="UI.panelMode='short';openPanel('${ticker}')">Short</button>
-      ${short?`<button class="ot-btn ${mode==='cover'?'ot-cover':''}" onclick="UI.panelMode='cover';openPanel('${ticker}')">Cover</button>`:''}
+      <button class="ot-btn ${effMode==='buy'?'ot-buy':''}" onclick="UI.panelMode='buy';openPanel('${ticker}')">Buy</button>
+      <button class="ot-btn ${effMode==='sell'?'ot-sell':''}" onclick="UI.panelMode='sell';openPanel('${ticker}')">Sell</button>
+      ${idxFund?'':`<button class="ot-btn ${effMode==='short'?'ot-short':''}" onclick="UI.panelMode='short';openPanel('${ticker}')">Short</button>
+      ${short?`<button class="ot-btn ${effMode==='cover'?'ot-cover':''}" onclick="UI.panelMode='cover';openPanel('${ticker}')">Cover</button>`:''}`}
     </div>
-    ${mode==='buy'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Buy pushes price up. Available: <strong>${c.shares_avail}</strong> of ${c.shares.toLocaleString()}.</p>
-    <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${c.shares_avail}" oninput="document.getElementById('cp-preview')&&(document.getElementById('cp-preview').innerHTML=impactPreview(getCo('${ticker}'),parseInt(this.value)||1,'buy'))"></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="disableTradeBtn(this);placeBuy('${ticker}',get('t-qty')?.value)">Buy now</button></div></div>
+    ${effMode==='buy'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?`Buys mint new units at the live index price — there's no fixed supply to run out of.`:`Buy pushes price up. Available: <strong>${c.shares_avail}</strong> of ${c.shares.toLocaleString()}.`}</p>
+    <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1"${idxFund?'':` max="${c.shares_avail}"`} oninput="document.getElementById('cp-preview')&&(document.getElementById('cp-preview').innerHTML=impactPreview(getCo('${ticker}'),parseInt(this.value)||1,'buy'))"></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="disableTradeBtn(this);placeBuy('${ticker}',get('t-qty')?.value)">Buy now</button></div></div>
     <div id="t-preview">${impactPreview(c,1,'buy')}</div>
-    <hr class="divider" style="margin:10px 0">
+    ${idxFund?'':`<hr class="divider" style="margin:10px 0">
     <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy${infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')}</div>
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="t-lmt-qty" value="1" min="1"></div>
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="placeLimitOrder('${ticker}','buy',get('t-lmt-qty')?.value,get('t-lmt-price')?.value)">Place limit</button></div>
-    </div>`
-    :mode==='sell'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Sell pushes price down. You hold: <strong>${held}</strong>.</p>${held>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${held}"></div><div style="padding-bottom:12px"><button class="btn btn-danger" onclick="placeSell('${ticker}',get('t-qty')?.value)">Sell now</button></div></div>
+    </div>`}`
+    :effMode==='sell'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?'Sells redeem your units at the live index price.':'Sell pushes price down.'} You hold: <strong>${held}</strong>.</p>${held>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${held}"></div><div style="padding-bottom:12px"><button class="btn btn-danger" onclick="placeSell('${ticker}',get('t-qty')?.value)">Sell now</button></div></div>
     <div id="t-preview">${impactPreview(c,1,'sell')}</div>
-    <hr class="divider" style="margin:10px 0">
+    ${idxFund?'':`<hr class="divider" style="margin:10px 0">
     <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell${infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')}</div>
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="t-lmt-qty" value="1" min="1" max="${held}"></div>
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="placeLimitOrder('${ticker}','sell',get('t-lmt-qty')?.value,get('t-lmt-price')?.value)">Place limit</button></div>
-    </div>`:`<div class="empty" style="padding:16px">You don't hold any ${ticker}.</div>`}`
-    :mode==='short'?`<div class="ibox ibox-purple">Short selling${infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. You borrow shares and sell them now; later you buy them back to cover, hopefully at a lower price. The difference is your profit or loss, but losses are uncapped since a price can rise indefinitely.')} — borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="placeShort('${ticker}',get('t-qty')?.value)">Short sell</button></div></div><div id="t-preview">${shortPrev(c,1)}</div>`
+    </div>`}`:`<div class="empty" style="padding:16px">You don't hold any ${ticker}.</div>`}`
+    :effMode==='short'?`<div class="ibox ibox-purple">Short selling${infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. You borrow shares and sell them now; later you buy them back to cover, hopefully at a lower price. The difference is your profit or loss, but losses are uncapped since a price can rise indefinitely.')} — borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="placeShort('${ticker}',get('t-qty')?.value)">Short sell</button></div></div><div id="t-preview">${shortPrev(c,1)}</div>`
     :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="coverShort('${ticker}',get('t-qty')?.value)">Cover short</button></div></div><div id="t-preview">${impactPreview(c,short.qty,'buy')}</div>`:''}
   </div>`;
-  const qi=get('t-qty');if(qi){qi.addEventListener('input',()=>{const q=parseInt(qi.value)||0,p=get('t-preview');if(!p)return;if(mode==='buy')p.innerHTML=impactPreview(c,q,'buy');else if(mode==='sell')p.innerHTML=impactPreview(c,q,'sell');else if(mode==='short')p.innerHTML=shortPrev(c,q);else if(mode==='cover')p.innerHTML=impactPreview(c,q,'buy');});}
+  const qi=get('t-qty');if(qi){qi.addEventListener('input',()=>{const q=parseInt(qi.value)||0,p=get('t-preview');if(!p)return;if(effMode==='buy')p.innerHTML=impactPreview(c,q,'buy');else if(effMode==='sell')p.innerHTML=impactPreview(c,q,'sell');else if(effMode==='short')p.innerHTML=shortPrev(c,q);else if(effMode==='cover')p.innerHTML=impactPreview(c,q,'buy');});}
   panel.scrollIntoView({behavior:'smooth',block:'nearest'});setTimeout(()=>{destroyChart('panel-chart');buildChart('panel-chart',c);},50);
 }
 function closePanel(){UI.panelTicker=null;destroyCharts();document.getElementById('market-content').innerHTML=renderMarket();}
@@ -4844,7 +4867,10 @@ function renderFundDetail(fundId){
   }
 
   if(isManager&&f.status==='active'){
-    const tradable=DB.companies.filter(c=>c.status==='listed'&&c.owner_id!==f.manager_id);
+    // JXI excluded for now -- fund trading still goes through the standard
+    // price-impact rpc_trade_buy/sell path, which the JXI branch bypasses
+    // entirely (see the migration), so it isn't wired up for funds yet.
+    const tradable=DB.companies.filter(c=>c.status==='listed'&&c.owner_id!==f.manager_id&&!c.is_index_fund);
     html+=`<div class="card"><div class="section-title">Trade on behalf of the fund</div>
       <div class="ibox ibox-amber" style="margin-bottom:12px">Fund cash available: <strong>${fmt(f.cash)}</strong>. You cannot trade your own company's stock through this fund.</div>
       <div class="frow"><label class="flabel">Ticker</label><select id="fund-trade-ticker">${tradable.map(c=>`<option value="${c.ticker}">${c.ticker} — ${esc(c.name)} (${fmt(c.price)})</option>`).join('')}</select></div>
@@ -6227,7 +6253,7 @@ function renderAdminDashboard(){
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
   const companies=DB.companies.filter(c=>c.status==='listed');
   const todayTrades=DB.trades.filter(t=>t.ts&&t.ts.includes(new Date().toLocaleDateString()));
-  const totalMktCap=companies.reduce((s,c)=>s+c.price*c.shares,0);
+  const totalMktCap=companies.filter(c=>!c.is_index_fund).reduce((s,c)=>s+c.price*c.shares,0);
   const openOrders=DB.limitOrders.filter(o=>o.status==='open').length;
   const halted=DB.halts.length;
   // Biggest mover
@@ -6330,7 +6356,7 @@ function renderAdminListed(){
     <div class="ibox ibox-amber">Apply a percentage boost or drop to any stock. Notifies all holders. Use positive % to boost, negative % to drop (e.g. -10 = drop 10%).</div>
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Stock</label>
-        <select id="adj-ticker"><option value="">— Select —</option>${DB.companies.map(c=>`<option value="${esc(c.ticker)}">${esc(c.ticker)} — ${esc(c.name)} (${fmt(c.price)})</option>`).join('')}</select>
+        <select id="adj-ticker"><option value="">— Select —</option>${DB.companies.filter(c=>!c.is_index_fund).map(c=>`<option value="${esc(c.ticker)}">${esc(c.ticker)} — ${esc(c.name)} (${fmt(c.price)})</option>`).join('')}</select>
       </div>
       <div class="frow" style="flex:1"><label class="flabel">Adjustment %</label>
         <input type="number" id="adj-pct" placeholder="e.g. 15 or -10" step="0.1"></div>
@@ -6448,7 +6474,7 @@ function renderExchangeStats(){
   const today=new Date().toLocaleDateString();
   const todayTrades=DB.trades.filter(t=>t.ts&&t.ts.includes(today));
   const totalVol=todayTrades.reduce((s,t)=>s+t.price*t.qty,0);
-  const totalMktCap=listed.reduce((s,c)=>s+c.price*c.shares,0);
+  const totalMktCap=listed.filter(c=>!c.is_index_fund).reduce((s,c)=>s+c.price*c.shares,0);
   const movers=listed.map(c=>({ticker:c.ticker,name:c.name,chg:priceChg(c),price:c.price})).sort((a,b)=>Math.abs(b.chg)-Math.abs(a.chg));
   const gainers=[...movers].sort((a,b)=>b.chg-a.chg).filter(m=>m.chg>0);
   const losers=[...movers].sort((a,b)=>a.chg-b.chg).filter(m=>m.chg<0);
@@ -6771,13 +6797,19 @@ function renderAdminVoteOversight(){
 // TREASURER FEATURES  
 // ═══════════════════════════════════════════════
 function renderTreasurerCashFlow(){
-  const totalCapitalRaised=DB.trades.filter(t=>t.seller_id==='exchange').reduce((s,t)=>s+(t.price*t.qty),0);
+  // JXI buys are also 'exchange'-countered trades (minted, not sold by a
+  // company) -- excluded here since this is specifically IPO/dilution
+  // capital raised BY companies, not units minted for the index fund.
+  const totalCapitalRaised=DB.trades.filter(t=>t.seller_id==='exchange'&&!getCo(t.ticker)?.is_index_fund).reduce((s,t)=>s+(t.price*t.qty),0);
   const totalDividendsPaid=DB.dividends.reduce((s,d)=>s+d.total,0);
   const totalBuybacks=DB.buybacks.reduce((s,b)=>s+b.total,0);
-  const uniqueOwnerIds=[...new Set(DB.companies.filter(c=>c.status==='listed').map(c=>c.owner_id))];
+  const uniqueOwnerIds=[...new Set(DB.companies.filter(c=>c.status==='listed'&&!c.is_index_fund).map(c=>c.owner_id))];
   const totalCompanyCash=uniqueOwnerIds.reduce((s,oid)=>{const owner=getUser(oid);return s+(owner?owner.cash:0);},0);
   const totalStudentCash=DB.users.filter(u=>u.role==='student'&&u.status==='approved').reduce((s,u)=>s+u.cash,0);
-  const totalMarketCap=DB.companies.filter(c=>c.status==='listed').reduce((s,c)=>s+c.price*c.shares,0);
+  // Excludes JXI -- its "shares"/price don't represent real backing capital,
+  // just outstanding fund units, and double-counting it against the very
+  // companies it tracks would distort this stat.
+  const totalMarketCap=DB.companies.filter(c=>c.status==='listed'&&!c.is_index_fund).reduce((s,c)=>s+c.price*c.shares,0);
   return`<div class="grid3" style="margin-bottom:14px">
     <div class="mcard"><div class="mlabel">💰 Total capital raised</div><div class="mval" style="font-family:var(--mono);color:var(--green)">${fmt(totalCapitalRaised)}</div><div style="font-size:11px;color:var(--text2);margin-top:4px">From IPO & dilution share sales</div></div>
     <div class="mcard"><div class="mlabel">💸 Total dividends paid</div><div class="mval" style="font-family:var(--mono);color:var(--red)">${fmt(totalDividendsPaid)}</div><div style="font-size:11px;color:var(--text2);margin-top:4px">Across ${DB.dividends.length} payments</div></div>
