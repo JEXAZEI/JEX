@@ -1073,7 +1073,7 @@ async function autoRefresh(){
   if(!UI.userId)return; // not logged in
   if(userIsFillingForm())return; // don't interrupt forms
   const now=Date.now();
-  if(now-_lastRefresh<4000)return; // debounce
+  if(now-_lastRefresh<18000)return; // debounce
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
@@ -1139,7 +1139,7 @@ async function autoRefresh(){
     }
   }catch(e){/* silent fail */}
 }
-setInterval(autoRefresh,5000);
+setInterval(autoRefresh,20000);
 // Browsers throttle setInterval in background tabs (often down to once a
 // minute or less) -- if a trade happened while this tab was in the
 // background, its next scheduled autoRefresh() could be a long way off by
@@ -2802,7 +2802,6 @@ async function placeSell(ticker,qty){
 }
 async function placeShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
-  if(co.is_index_fund)return toast('Shorting isn\'t available for JXI yet');
   if(!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const coll=Math.round(co.price*qty*1.5*100)/100;
@@ -3467,7 +3466,20 @@ function buildJxiChart(canvasId){
     });
   }catch(e){console.warn('buildJxiChart error:',e);}
 }
-function impactPreview(co,qty,dir){if(!qty||qty<=0)return'';const np=impactPrice(co,qty,dir),delta=np-co.price,pct=((delta/co.price)*100).toFixed(2),cls=dir==='buy'?'price-up':'price-down';return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">Fill: <strong>${fmt(np)}</strong> <span class="${cls}">${delta>=0?'+':''}${fmt(delta)} (${delta>=0?'+':''}${pct}%)</span> &nbsp;|&nbsp; Total: <strong>${fmt(np*qty)}</strong></div>`;}
+function impactPreview(co,qty,dir){
+  if(!qty||qty<=0)return'';
+  if(co.is_index_fund){
+    // impactPrice()'s liquidity formula is keyed off co.shares -- for JXI
+    // that's units outstanding (often tiny), not a real liquidity pool, so
+    // it would always read as a maxed-out fake "12% impact" regardless of
+    // quantity. JXI fills always happen at the live index price instead,
+    // no price impact, same as the real is_index_fund branch server-side.
+    const total=Math.round(co.price*qty*100)/100;
+    return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">Fill: <strong>${fmt(co.price)}</strong> <span style="color:var(--text2)">live index price, no price impact</span> &nbsp;|&nbsp; Total: <strong>${fmt(total)}</strong></div>`;
+  }
+  const np=impactPrice(co,qty,dir),delta=np-co.price,pct=((delta/co.price)*100).toFixed(2),cls=dir==='buy'?'price-up':'price-down';
+  return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">Fill: <strong>${fmt(np)}</strong> <span class="${cls}">${delta>=0?'+':''}${fmt(delta)} (${delta>=0?'+':''}${pct}%)</span> &nbsp;|&nbsp; Total: <strong>${fmt(np*qty)}</strong></div>`;
+}
 function shortPrev(co,qty){if(!qty||qty<=0)return'';const c=Math.round(co.price*qty*1.5*100)/100;return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:rgba(83,74,183,0.1);border-radius:var(--radius);color:#AFA9EC">Short ${qty} @ ${fmt(co.price)} | Collateral: <strong>${fmt(c)}</strong></div>`;}
 function dilPreview(co,ns){if(!ns||ns<=0)return'';const ta=co.shares+ns,np=Math.max(0.01,Math.round(co.price*(co.shares/ta)*100)/100);return `<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px"><div><div style="color:var(--text2);margin-bottom:2px">Total after</div><div style="font-weight:500">${ta.toLocaleString()}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Increase</div><div style="font-weight:500;color:var(--amber)">+${Math.round((ns/co.shares)*100)}%</div></div><div><div style="color:var(--text2);margin-bottom:2px">Est. price</div><div style="font-weight:500;color:var(--red)">${fmt(np)}</div></div></div>`;}
 
@@ -4372,17 +4384,19 @@ function renderCompanyPage(parentTicker){
         +'<div class="mcard"><div class="mlabel">Short position</div><div class="mval '+(short?'red':'')+'">'+( short?short.qty+' @ '+fmt(short.avgPrice):'—')+'</div></div>'
         +'</div>';
       // JXI (is_index_fund): only market buy/sell are wired up server-side
-      // (see rpc_trade_buy/sell's is_index_fund branch) -- limit orders and
-      // shorting assume price-impact/order-book dynamics that don't apply
-      // to a NAV-priced instrument, so those controls are hidden rather
-      // than offered and silently behaving oddly.
+      // (see rpc_trade_buy/sell/short/cover_short's is_index_fund branches)
+      // -- limit orders still assume order-book dynamics that don't apply
+      // to a NAV-priced instrument, so that control stays hidden. Shorting
+      // is enabled: it's collateral-backed borrowing against the live NAV,
+      // same shape as any other stock, just priced off jxi_live_value()
+      // instead of price-impact.
       const idxFund=!!co.is_index_fund;
-      const effMode=(idxFund&&(mode==='short'||mode==='cover'))?'buy':mode;
+      const effMode=mode;
       html+='<div class="card"><div class="ot-toggle">'
         +'<button class="ot-btn '+(effMode==='buy'?'ot-buy':'')+'" onclick="UI.panelMode=&quot;buy&quot;;render()">Buy</button>'
         +'<button class="ot-btn '+(effMode==='sell'?'ot-sell':'')+'" onclick="UI.panelMode=&quot;sell&quot;;render()">Sell</button>'
-        +(idxFund?'':'<button class="ot-btn '+(effMode==='short'?'ot-short':'')+'" onclick="UI.panelMode=&quot;short&quot;;render()">Short</button>'
-        +(short?'<button class="ot-btn '+(effMode==='cover'?'ot-cover':'')+'" onclick="UI.panelMode=&quot;cover&quot;;render()">Cover</button>':''))
+        +'<button class="ot-btn '+(effMode==='short'?'ot-short':'')+'" onclick="UI.panelMode=&quot;short&quot;;render()">Short</button>'
+        +(short?'<button class="ot-btn '+(effMode==='cover'?'ot-cover':'')+'" onclick="UI.panelMode=&quot;cover&quot;;render()">Cover</button>':'')
         +'</div>';
       if(effMode==='buy'){
         html+=(idxFund?'<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Buys mint new units at the live index price — there\'s no fixed supply to run out of.</p>':
@@ -4622,7 +4636,12 @@ function buildSparklines(){
         try{charts['spark-'+c.ticker].destroy();}catch(e){}
         delete charts['spark-'+c.ticker];
       }
-      const pts=(c.price_history||[]).filter(p=>p&&typeof p.p==='number').slice(-20);
+      // Today's move, same as everything else (priceChg(), the full-size
+      // charts) -- anchored to session-open instead of just "whatever the
+      // last 20 raw points happen to be," which could span several days.
+      const allPts=(c.price_history||[]).filter(p=>p&&typeof p.p==='number');
+      const{pts:anchoredPts}=anchorToSessionOpen(allPts,'1d');
+      const pts=anchoredPts.length>=2?anchoredPts:allPts.slice(-20);
       if(pts.length<2)return;
       const prices=pts.map(p=>p.p);
       const isUp=prices[prices.length-1]>=prices[0];
@@ -4746,10 +4765,10 @@ function openPanel(ticker){
   const panel=get('trade-panel');if(!panel)return;
   const mode=UI.panelMode,fin=c.financials&&c.financials[0];
   // See the identical idxFund/effMode handling in renderCompanyPage's trade
-  // tab -- limit orders and shorting aren't wired up for JXI, so they're
-  // hidden here too rather than left to behave oddly.
+  // tab -- limit orders still aren't wired up for JXI (hidden here too),
+  // but shorting is (rpc_trade_short/cover_short's is_index_fund branch).
   const idxFund=!!c.is_index_fund;
-  const effMode=(idxFund&&(mode==='short'||mode==='cover'))?'buy':mode;
+  const effMode=mode;
   panel.innerHTML=`<div class="card" style="border-color:var(--blue)">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
       <div><span style="font-weight:500;font-size:15px">${esc(c.name)}</span> <span class="badge b-gray" style="font-family:var(--mono)">${esc(ticker)}</span>
@@ -4765,8 +4784,8 @@ function openPanel(ticker){
     <div class="ot-toggle">
       <button class="ot-btn ${effMode==='buy'?'ot-buy':''}" onclick="UI.panelMode='buy';openPanel('${ticker}')">Buy</button>
       <button class="ot-btn ${effMode==='sell'?'ot-sell':''}" onclick="UI.panelMode='sell';openPanel('${ticker}')">Sell</button>
-      ${idxFund?'':`<button class="ot-btn ${effMode==='short'?'ot-short':''}" onclick="UI.panelMode='short';openPanel('${ticker}')">Short</button>
-      ${short?`<button class="ot-btn ${effMode==='cover'?'ot-cover':''}" onclick="UI.panelMode='cover';openPanel('${ticker}')">Cover</button>`:''}`}
+      <button class="ot-btn ${effMode==='short'?'ot-short':''}" onclick="UI.panelMode='short';openPanel('${ticker}')">Short</button>
+      ${short?`<button class="ot-btn ${effMode==='cover'?'ot-cover':''}" onclick="UI.panelMode='cover';openPanel('${ticker}')">Cover</button>`:''}
     </div>
     ${effMode==='buy'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?`Buys mint new units at the live index price — there's no fixed supply to run out of.`:`Buy pushes price up. Available: <strong>${c.shares_avail}</strong> of ${c.shares.toLocaleString()}.`}</p>
     <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1"${idxFund?'':` max="${c.shares_avail}"`} oninput="document.getElementById('cp-preview')&&(document.getElementById('cp-preview').innerHTML=impactPreview(getCo('${ticker}'),parseInt(this.value)||1,'buy'))"></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="disableTradeBtn(this);placeBuy('${ticker}',get('t-qty')?.value)">Buy now</button></div></div>
