@@ -109,6 +109,18 @@ let supaAuth=null;
 // also checked synchronously as a second, ordering-independent signal, since Supabase's redirect
 // link carries a recovery marker (type=recovery) before the SDK has even parsed it into an event.
 let _passwordRecoveryActive=/type=recovery/.test(window.location.hash)||/type=recovery/.test(window.location.search);
+// True for the whole page load a Google OAuth redirect landed back on --
+// Supabase's return URL carries either #access_token=... (implicit flow) or
+// ?code=... (PKCE) before the SDK has parsed/exchanged it into a session.
+// Used only to keep the "Connecting..." splash up through checkGoogleSession()
+// instead of flashing the login screen in between: without a saved
+// localStorage session yet (this may be this browser's first-ever visit),
+// loadAll()'s own renders show the login screen while checkGoogleSession()
+// is still working out that this is actually a just-completed Google
+// sign-in, which read as a jarring "back to login" flash right after
+// approving on Google's consent screen. Cleared once checkGoogleSession()
+// settles either way (see its finally block below).
+let _oauthReturnActive=!_passwordRecoveryActive&&(/access_token=/.test(window.location.hash)||/[?&]code=/.test(window.location.search));
 // A recovery session is otherwise indistinguishable from a normal signed-in session once
 // persisted — if someone opens a reset link and then just closes the tab without setting a
 // new password, that live session would still be sitting in localStorage on the next visit,
@@ -1155,6 +1167,12 @@ async function checkGoogleSession(){
   if(!supaAuth)return;
   // Never auto-login off a password-recovery session — see _passwordRecoveryActive above.
   if(_passwordRecoveryActive)return;
+  // Every path below returns through here -- see _oauthReturnActive above for
+  // why this needs to clear no matter how this call resolves (matched,
+  // pending, brand new signup, or no session at all), not just on success.
+  try{await checkGoogleSessionInner();}finally{_oauthReturnActive=false;}
+}
+async function checkGoogleSessionInner(){
   let session=null;
   try{
     const res=await supaAuth.auth.getSession();
@@ -7009,7 +7027,13 @@ function getPageContent(){
 function render(){
   destroyCharts();
   const app=document.getElementById('app');
-  if(!UI.userId){app.innerHTML=renderLogin()+renderLegalFooter();return;}
+  if(!UI.userId){
+    // See _oauthReturnActive above -- keep the connecting splash up instead
+    // of flashing the login screen while a just-completed Google sign-in is
+    // still being resolved into a session.
+    if(_oauthReturnActive){app.innerHTML=renderLoadingSplash();return;}
+    app.innerHTML=renderLogin()+renderLegalFooter();return;
+  }
   const u=cu();if(!u){UI.userId=null;app.innerHTML=renderLogin()+renderLegalFooter();return;}
   const _cu=cu();
   const _isMobileStudent=_cu&&(_cu.role==='student'||_cu.role==='company')&&window.innerWidth<=640;
@@ -7059,18 +7083,21 @@ function setTab(t){UI.navTab=t;UI.panelTicker=null;destroyCharts();render();}
 // ═══════════════════════════════════════════════
 // BOOT
 // ═══════════════════════════════════════════════
-async function boot(){
-  if(!isConfigured()){document.getElementById('app').innerHTML=renderConfig();return;}
-  // Show loading splash immediately
-  // Restore theme before rendering
-  try{if(localStorage.getItem('jex-theme')==='light')document.body.classList.add('light-mode');}catch(e){}
-  document.getElementById('app').innerHTML=`<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px">
+function renderLoadingSplash(){
+  return `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px">
     <div style="font-family:var(--mono);font-size:28px;font-weight:700"><span style="color:var(--amber)">JEX</span></div>
     <div style="font-size:13px;color:var(--text2)">Connecting to exchange...</div>
     <div style="width:200px;height:3px;background:var(--bg3);border-radius:2px;overflow:hidden">
       <div style="height:100%;background:var(--blue);border-radius:2px;animation:progress 1.5s ease-in-out infinite"></div>
     </div>
   </div>`;
+}
+async function boot(){
+  if(!isConfigured()){document.getElementById('app').innerHTML=renderConfig();return;}
+  // Show loading splash immediately
+  // Restore theme before rendering
+  try{if(localStorage.getItem('jex-theme')==='light')document.body.classList.add('light-mode');}catch(e){}
+  document.getElementById('app').innerHTML=renderLoadingSplash();
   // Set the routed page immediately, before any data loads -- otherwise every
   // render() inside loadAll() (Phase 1, then Phase 2) still targets the
   // 'market' default and briefly flashes the market page before flipping to
