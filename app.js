@@ -729,8 +729,9 @@ async function reviewDivApproval(id,approve){
   catch(e){return toast(rpcErrorMessage(e));}
   da.status='approved';da.approved_by=u.name;
   if(r.owner_id){const o=getUser(r.owner_id);if(o)o.cash=r.owner_cash;}
-  await refreshDividendPayoutBalances(r.payouts);
-  if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker:da.ticker,company_name:da.company_name,per_share:da.per_share,total:r.total,note:da.note||'Treasurer-approved dividend',payouts:r.payouts,ts:ts()});
+  const jxiPayoutsA=(r.jxi_pass_through||[]).flatMap(f=>f.payouts);
+  await refreshDividendPayoutBalances([...(r.payouts||[]),...jxiPayoutsA]);
+  if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker:da.ticker,company_name:da.company_name,per_share:da.per_share,total:r.total,note:da.note||'Treasurer-approved dividend',payouts:r.payouts,jxi_pass_through:r.jxi_pass_through||[],ts:ts()});
   await logActivity('dividend',da.company_name+' paid dividend '+fmt(da.per_share)+'/share — total '+fmt(r.total),{ticker:da.ticker,userId:r.owner_id,userName:u.name,amount:r.total});
   await pushNotificationToHolders(da.ticker,'dividend','💰 '+da.company_name+' paid a dividend of '+fmt(da.per_share)+'/share');
   pushBalances();
@@ -2779,6 +2780,11 @@ function applyTradeResult(ticker,r){
   if(u){u.cash=r.cash;if('holdings'in r)u.holdings=r.holdings;if('shorts'in r)u.shorts=r.shorts;}
   if(co){co.price=r.price;if('shares_avail'in r)co.shares_avail=r.shares_avail;co.price_history=r.price_history;}
   if(r.owner_id&&r.owner_cash!=null){const owner=getUser(r.owner_id);if(owner)owner.cash=r.owner_cash;}
+  // Real backing: minting/redeeming JXI actually buys/sells a basket of its
+  // constituents server-side (see rpc_trade_buy/sell's is_index_fund branch)
+  // -- apply those price moves immediately instead of waiting for the next
+  // poll, so the trader sees the market they just moved right away.
+  if(r.constituents)r.constituents.forEach(cu2=>{const c2=getCo(cu2.ticker);if(c2){c2.price=cu2.price;c2.shares_avail=cu2.shares_avail;c2.price_history=cu2.price_history;}});
   if(r.trade)DB.trades.push(r.trade);
   if(u)snapshotNW(u.id);
   checkPriceAlerts();
@@ -3110,8 +3116,13 @@ async function issueDividend(ticker,perShare,note){
   try{r=await sb.rpc('rpc_pay_dividend',{p_ticker:ticker,p_per_share:perShare,p_note:note.trim()});}
   catch(e){return toast(rpcErrorMessage(e));}
   if(r.owner_id){const o=getUser(r.owner_id);if(o)o.cash=r.owner_cash;}
-  await refreshDividendPayoutBalances(r.payouts);
-  if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker,company_name:co.name,per_share:perShare,total:r.total,note:note.trim(),payouts:r.payouts,ts:ts()});
+  // Real backing: if JXI holds shares of this ticker, its cut was passed
+  // through to every JXI unit-holder server-side too (see
+  // rpc_pay_dividend's jxi_pass_through) -- refresh their balances the same
+  // way as the direct shareholders' so this session sees it immediately.
+  const jxiPayouts=(r.jxi_pass_through||[]).flatMap(f=>f.payouts);
+  await refreshDividendPayoutBalances([...(r.payouts||[]),...jxiPayouts]);
+  if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker,company_name:co.name,per_share:perShare,total:r.total,note:note.trim(),payouts:r.payouts,jxi_pass_through:r.jxi_pass_through||[],ts:ts()});
   await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(r.total),{ticker,userId:owner.id,userName:owner.name,amount:r.total});
   await pushNotificationToHolders(ticker,'dividend','💰 '+co.name+' paid a dividend of '+fmt(perShare)+'/share');
   pushBalances();
@@ -3347,6 +3358,20 @@ function anchorToSessionOpen(allPts,interval){
   }
   return{pts:filterByInterval(allPts,interval),anchoredAtOpen:false};
 }
+// %-change across whatever range the currently-selected chart interval
+// button covers -- first vs. last point of the exact same series buildChart/
+// buildJxiChart render, so the headline badge next to a chart always agrees
+// with what the chart itself is showing (1D = since session open, 5D/1M =
+// that trailing window, Max = since inception) instead of being stuck on a
+// fixed "today" number regardless of which button is selected.
+function intervalChg(allPts,interval){
+  const{pts}=anchorToSessionOpen(allPts,interval);
+  if(!pts||pts.length<2||!pts[0].p)return 0;
+  return Math.round(((pts[pts.length-1].p-pts[0].p)/pts[0].p*100)*100)/100;
+}
+function intervalChgLabel(interval){
+  return{'1d':'today','5d':'5D','1m':'1M','max':'since listing'}[interval]||'today';
+}
 function filterByInterval(pts,interval){
   if(!pts||!pts.length)return pts;
   if(interval==='max')return pts;
@@ -3447,6 +3472,15 @@ function setJxiChartInterval(canvasId,interval){
   if(charts[canvasId])try{charts[canvasId].destroy();delete charts[canvasId];}catch(e){}
   const bar=document.getElementById('ibar-'+canvasId);
   if(bar)bar.innerHTML=buildJxiIntervalButtons(canvasId);
+  // Keep the headline %-badge in sync with whichever interval is now
+  // selected, same as the chart itself -- otherwise clicking 5D/1M/Max
+  // would move the chart but leave the number next to it stuck on 1D's.
+  const badge=document.getElementById('jxi-chg-badge');
+  if(badge){
+    const chg=intervalChg(jxiPriceHistory(),chartIntervals[canvasId]||'1d');
+    badge.className=chg>=0?'price-up':'price-down';
+    badge.innerHTML=jxiChgBadgeHtml();
+  }
   setTimeout(()=>buildJxiChart(canvasId),20);
 }
 function buildJxiChart(canvasId){
@@ -4584,21 +4618,27 @@ function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.com
   <div class="tprice" style="${halted?'color:var(--red)':''}">${fmt(c.price)}</div>
   ${preMarket?`<div style="font-size:10px;color:var(--amber)">pre: ${fmt(preMarket)}</div>`:`<div class="tchg ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</div>`}
   </div>`;}).join('')}</div>`;}
+// Shared by the initial render() and setJxiChartInterval()'s in-place patch
+// (see below) so the headline badge and the chart it sits next to always
+// agree on what timeframe they're both showing.
+function jxiChgBadgeHtml(){
+  const interval=chartIntervals['jxi-chart']||'1d';
+  const chg=intervalChg(jxiPriceHistory(),interval);
+  const label=intervalChgLabel(interval);
+  return`${chg>=0?'+':''}${chg}% <span style="font-size:11px;color:var(--text2);font-weight:400">${label}</span>`;
+}
 function renderIndexCard(){
   const idx=computeJXI();
   if(!idx.constituents.length)return'';
-  // Headline %-change is TODAY's move (since this session opened), like a
-  // real index -- idx.change (since each constituent's first-ever listing)
-  // is only the fallback shown before the first session-open capture.
-  const openVal=DB.session.jxi_open_value;
-  const sessionChange=openVal?Math.round(((idx.value-openVal)/openVal*100)*100)/100:null;
+  const interval=chartIntervals['jxi-chart']||'1d';
+  const chg=intervalChg(jxiPriceHistory(),interval);
   return `<div class="card">
     <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:10px">
       <div>
         <div class="section-title" style="margin-bottom:2px">JXI <span style="font-weight:400;color:var(--text2);font-size:12px">JEX Composite</span></div>
         <div style="font-size:28px;font-weight:500;font-family:var(--mono)">${idx.value.toFixed(2)}</div>
       </div>
-      ${sessionChange!==null?`<div class="${sessionChange>=0?'price-up':'price-down'}" style="font-size:15px;font-weight:500">${sessionChange>=0?'+':''}${sessionChange}% <span style="font-size:11px;color:var(--text2);font-weight:400">today</span></div>`:`<div class="${idx.change>=0?'price-up':'price-down'}" style="font-size:15px;font-weight:500">${idx.change>=0?'+':''}${idx.change}% <span style="font-size:11px;color:var(--text2);font-weight:400">since listing</span></div>`}
+      <div id="jxi-chg-badge" class="${chg>=0?'price-up':'price-down'}" style="font-size:15px;font-weight:500">${jxiChgBadgeHtml()}</div>
       <div style="margin-left:auto;font-size:12px;color:var(--text2)">${idx.constituents.length} listed compan${idx.constituents.length!==1?'ies':'y'} · equal-weighted · base 1000</div>
     </div>
     ${DB.indexHistory&&DB.indexHistory.length>=2?`${buildJxiChartIntervalBar('jxi-chart')}<div style="position:relative;height:160px;margin-bottom:14px"><canvas id="jxi-chart"></canvas></div>`:'<div class="ibox ibox-blue" style="margin-bottom:14px;font-size:12px">Chart builds up as trades happen — check back after some activity.</div>'}
