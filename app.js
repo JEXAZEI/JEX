@@ -3385,6 +3385,17 @@ function setChartInterval(canvasId,interval,co){
   const barId='ibar-'+canvasId;
   const bar=document.getElementById(barId);
   if(bar)bar.innerHTML=buildIntervalButtons(canvasId,co);
+  // Keep any "Change" badge (Share classes table rows, the trade panel) and
+  // "N pts | Open" line paired with this specific chart in sync with
+  // whichever interval is now selected -- same pattern as JXI's
+  // setJxiChartInterval(), generalized to every per-company chart.
+  const badge=document.getElementById('chg-badge-'+canvasId);
+  if(badge){
+    badge.className=tickerChgClass(canvasId,co);
+    badge.innerHTML=tickerChgBadgeHtml(canvasId,co);
+  }
+  const meta=document.getElementById('chg-meta-'+canvasId);
+  if(meta)meta.innerHTML=tickerChartMetaHtml(canvasId,co);
   setTimeout(()=>{
     buildChart(canvasId,co);
   },20);
@@ -3423,6 +3434,29 @@ function intervalChg(allPts,interval){
 }
 function intervalChgLabel(interval){
   return{'1d':'today','5d':'5D','1m':'1M','max':'since listing'}[interval]||'today';
+}
+// Shared by every "Change" badge that sits next to one specific ticker's own
+// interval-selectable chart (Share classes table rows, the trade panel) --
+// same reasoning as jxiChgBadgeHtml(), generalized to any canvasId/co pair.
+// Keyed off chartIntervals[canvasId], the same state buildChart() itself
+// reads, so the badge and its chart always agree on the timeframe.
+function tickerChgBadgeHtml(canvasId,co){
+  const interval=chartIntervals[canvasId]||'1d';
+  const chg=intervalChg(co.price_history||[],interval);
+  return fmtChg(chg)+' <span style="font-size:10px;color:var(--text2);font-weight:400">'+intervalChgLabel(interval)+'</span>';
+}
+function tickerChgClass(canvasId,co){
+  const interval=chartIntervals[canvasId]||'1d';
+  return intervalChg(co.price_history||[],interval)>=0?'price-up':'price-down';
+}
+// The trade panel's "N pts | Open: $X" line -- like the badge above, this
+// used to always show the since-listing first point/count regardless of
+// which interval was selected, disagreeing with both the chart and the
+// %-change badge sitting right next to it.
+function tickerChartMetaHtml(canvasId,co){
+  const interval=chartIntervals[canvasId]||'1d';
+  const{pts}=anchorToSessionOpen(co.price_history||[],interval);
+  return pts.length+' pts | Open: '+fmt(pts.length?pts[0].p:co.price);
 }
 function filterByInterval(pts,interval){
   if(!pts||!pts.length)return pts;
@@ -4399,14 +4433,14 @@ function renderCompanyPage(parentTicker){
     allTickers.forEach(ticker=>{
       const stock=getCo(ticker);if(!stock)return;
       const meta=getClassMeta(ticker);
-      const stockChg=priceChg(stock);
+      const chartId='cp-chart-'+ticker;
       const classLabel=meta?'Class '+meta.class:'Common';
       const classColor=meta?(meta.class==='A'?'b-blue':meta.class==='B'?'b-amber':'b-teal'):'b-gray';
       html+='<div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">'
         +'<div><div style="display:flex;align-items:center;gap:6px;margin-bottom:2px"><span style="font-family:var(--mono);font-weight:500">'+ticker+'</span><span class="badge '+classColor+'">'+classLabel+'</span>'+(meta&&meta.restricted?'<span class="badge b-red">Restricted</span>':'')+'</div>'
         +'<div style="font-size:11px;color:var(--text2)">'+(meta?meta.votes_per_share+' vote'+(meta.votes_per_share!==1?'s':'')+'/share':'1 vote/share')+'</div></div>'
         +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Price</div><div style="font-family:var(--mono);font-weight:500">'+fmt(stock.price)+'</div></div>'
-        +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Change</div><div class="'+(stockChg>=0?'price-up':'price-down')+'" style="font-family:var(--mono)">'+fmtChg(stockChg)+'</div></div>'
+        +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Change</div><div id="chg-badge-'+chartId+'" class="'+tickerChgClass(chartId,stock)+'" style="font-family:var(--mono)">'+tickerChgBadgeHtml(chartId,stock)+'</div></div>'
         +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Available</div><div style="font-size:13px">'+stock.shares_avail.toLocaleString()+' / '+stock.shares.toLocaleString()+'</div></div>'
         +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Mkt cap</div><div style="font-family:var(--mono);font-size:13px">'+fmt(stock.price*stock.shares)+'</div></div>'
         +'</div>';
@@ -4874,7 +4908,7 @@ function openPanel(ticker){
   const c=getCo(ticker),u=cu();
   if(!marketContent||!c||!u)return;
   UI.panelTicker=ticker;
-  const held=(holdings(u)[ticker])||0,chg=priceChg(c),short=(shorts(u))[ticker];
+  const held=(holdings(u)[ticker])||0,short=(shorts(u))[ticker];
   destroyCharts();
   marketContent.innerHTML=renderMarket();
   const panel=get('trade-panel');if(!panel)return;
@@ -4893,7 +4927,7 @@ function openPanel(ticker){
     <div class="grid4"><div class="mcard"><div class="mlabel">Price</div><div class="mval" style="font-family:var(--mono)">${fmt(c.price)}</div></div><div class="mcard"><div class="mlabel">Your cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div><div class="mcard"><div class="mlabel">You hold</div><div class="mval">${held} shares</div></div><div class="mcard"><div class="mlabel">Short position</div><div class="mval ${short?'red':''}">${short?short.qty+' @ '+fmt(short.avgPrice):'—'}</div></div></div>
     <div style="margin-bottom:4px">${buildChartIntervalBar('panel-chart',c)}</div>
     <div style="position:relative;height:160px;margin-bottom:6px"><canvas id="panel-chart"></canvas></div>
-    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2);margin-bottom:10px"><span>${(c.price_history||[]).length} pts | Open: ${fmt((c.price_history||[])[0]?.p||c.price)}</span><span class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</span></div>
+    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2);margin-bottom:10px"><span id="chg-meta-panel-chart">${tickerChartMetaHtml('panel-chart',c)}</span><span id="chg-badge-panel-chart" class="${tickerChgClass('panel-chart',c)}">${tickerChgBadgeHtml('panel-chart',c)}</span></div>
     ${fin?`<div style="font-size:12px;padding:8px 10px;background:var(--bg3);border-radius:var(--radius);margin-bottom:10px">Latest: Rev <strong>${fmt(fin.revenue)}</strong> | Profit <strong>${fmt(fin.profit)}</strong> — <span style="color:var(--text2)">${esc(fin.summary)}</span></div>`:''}
     <hr class="divider">
     <div class="ot-toggle">
@@ -5405,7 +5439,7 @@ function renderStockOverview(co,u){
   allTickers.forEach((ticker,i)=>{
     const stock=getCo(ticker);if(!stock)return;
     const meta=getClassMeta(ticker);
-    const chg=priceChg(stock);
+    const chartId='co-chart-'+ticker;
     const classLabel=meta?'Class '+meta.class:'Unclassified';
     const classColor=meta?meta.class==='A'?'b-blue':meta.class==='B'?'b-amber':'b-teal':'b-gray';
     const vps=meta?meta.votes_per_share:1;
@@ -5418,7 +5452,7 @@ function renderStockOverview(co,u){
       +'<div style="font-size:11px;color:var(--text2)">'+vps+' vote'+(vps!==1?'s':'')+'/share'+(meta&&meta.restricted?' · '+(meta.whitelist||[]).length+' whitelisted':'')+'</div>'
       +'</div>'
       +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Price</div><div style="font-family:var(--mono);font-weight:500">'+fmt(stock.price)+'</div></div>'
-      +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Change</div><div class="'+(chg>=0?'price-up':'price-down')+'" style="font-family:var(--mono)">'+fmtChg(chg)+'</div></div>'
+      +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Change</div><div id="chg-badge-'+chartId+'" class="'+tickerChgClass(chartId,stock)+'" style="font-family:var(--mono)">'+tickerChgBadgeHtml(chartId,stock)+'</div></div>'
       +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Shares</div><div style="font-size:13px">'+stock.shares.toLocaleString()+' <span style="color:var(--text2);font-size:11px">('+stock.shares_avail.toLocaleString()+' free)</span></div></div>'
       +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Market cap</div><div style="font-family:var(--mono);font-size:13px">'+fmt(stock.price*stock.shares)+'</div></div>'
       +'</div>';
