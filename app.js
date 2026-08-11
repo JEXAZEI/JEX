@@ -2732,7 +2732,11 @@ async function placeBuy(ticker,qty){
   if(!checkRateLimit(u.id))return;
   if(u.role==='company'&&co.owner_id===u.id)return toast("You can't buy your own company's stock — use Buyback instead.");
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
-  if(co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
+  // JXI mints on demand -- shares_avail tracks units outstanding for it (see
+  // the is_index_fund branch server-side), not a real liquidity cap, so this
+  // fast local check doesn't apply. The server enforces the real limits
+  // (funds, session status, halts) either way.
+  if(!co.is_index_fund&&co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
   let r;
   try{r=await sb.rpc('rpc_trade_buy',{p_ticker:ticker,p_qty:qty});}
   catch(e){return toast(rpcErrorMessage(e));}
