@@ -4645,7 +4645,7 @@ function renderCompanyPage(parentTicker){
   }
 
   else if(tab==='shareholders'){
-    html+='<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Shareholders <span style="font-size:11px;font-weight:400;color:var(--text2)">Loading fresh data...</span></div><div id="shareholder-table">';
+    html+='<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Shareholders <span id="shareholder-loading" style="font-size:11px;font-weight:400;color:var(--text2)">Loading fresh data...</span></div><div id="shareholder-table">';
     if(!shareholders.length){html+='<div class="empty">No shareholders yet.</div>';}
     else{
       html+='<table><thead><tr><th>Holder</th>'
@@ -4671,6 +4671,7 @@ function renderCompanyPage(parentTicker){
           freshMap[u2.id].shares[t]=(u2.holdings&&u2.holdings[t]||0);
         });
       });
+      const loadingLabel=document.getElementById('shareholder-loading');if(loadingLabel)loadingLabel.remove();
       const el=document.getElementById('shareholder-table');if(!el)return;
       const freshSh=Object.values(freshMap);
       if(!freshSh.length){el.innerHTML='<div class="empty">No shareholders yet.</div>';return;}
@@ -4678,7 +4679,7 @@ function renderCompanyPage(parentTicker){
         +allTickers.map(t=>'<th class="r">'+t+'</th>').join('')
         +'<th class="r">Total</th><th class="r">Voting power</th></tr></thead><tbody>'
         +freshSh.map(sh=>{const total=Object.values(sh.shares).reduce((s,q)=>s+q,0);const vp=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);return '<tr><td style="font-weight:500">'+sh.name+'</td>'+allTickers.map(t=>'<td class="r" style="font-family:var(--mono)">'+(sh.shares[t]||0)+'</td>').join('')+'<td class="r" style="font-weight:500">'+total+'</td><td class="r" style="color:var(--amber)">'+vp+'</td></tr>';}).join('')+'</tbody></table>';
-    }).catch(()=>{});
+    }).catch(()=>{const loadingLabel=document.getElementById('shareholder-loading');if(loadingLabel)loadingLabel.remove();});
     html+='</div></div>';
   }
 
