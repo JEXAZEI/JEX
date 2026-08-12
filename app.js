@@ -567,10 +567,23 @@ async function snapshotJXI(){
   // index chart shown on the market page to every user.
   try{
     const rec=await sb.rpc('rpc_snapshot_jxi',{});
-    if(rec)DB.indexHistory.push(rec);
+    if(rec){
+      DB.indexHistory.push(rec);
+      // rpc_snapshot_jxi also updates JXI's own jex_companies row
+      // server-side (price + price_history), but doesn't return it -- and
+      // that row is what the headline badge/chart actually read (see
+      // renderIndexCard()). Without this, the caller's own view of the
+      // JXI card lags every trade/limit-fill in the system until the next
+      // poll/reload, even though the underlying data was already updated.
+      const jxiCo=getCo('JXI');
+      if(jxiCo&&rec.value!=null){
+        const etfPrice=Math.round(rec.value/10*100)/100;
+        jxiCo.price=etfPrice;
+        jxiCo.price_history=[...(jxiCo.price_history||[]),{p:etfPrice,t:rec.ts||new Date().toISOString()}];
+      }
+    }
   }catch(e){console.warn('JXI snapshot failed:',e);}
 }
-function jxiPriceHistory(){return(DB.indexHistory||[]).map(h=>({p:h.value,t:h.ts}));}
 const holdings=u=>u.holdings||{};const shorts=u=>u.shorts||{};const watchlist=u=>u.watchlist||[];
 const pv=u=>Object.entries(holdings(u)).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0);
 const sPnl=u=>Object.entries(shorts(u)).reduce((s,[t,pos])=>{const c=getCo(t);if(!c)return s;return s+Math.round((pos.avgPrice-c.price)*pos.qty*100)/100;},0);
@@ -3581,7 +3594,7 @@ function setJxiChartInterval(canvasId,interval){
   // would move the chart but leave the number next to it stuck on 1D's.
   const badge=document.getElementById('jxi-chg-badge');
   if(badge){
-    const chg=intervalChg(jxiPriceHistory(),chartIntervals[canvasId]||'1d');
+    const chg=intervalChg(getCo('JXI')?.price_history||[],chartIntervals[canvasId]||'1d');
     badge.className=chg>=0?'price-up':'price-down';
     badge.innerHTML=jxiChgBadgeHtml();
   }
@@ -3591,7 +3604,9 @@ function buildJxiChart(canvasId){
   destroyChart(canvasId);
   const canvas=get(canvasId);if(!canvas||!window.Chart)return;
   const interval=chartIntervals[canvasId]||'1d';
-  const allPts=jxiPriceHistory();
+  // JXI's own jex_companies row, not the separate jex_index_history log --
+  // see the header comment above renderIndexCard()'s equivalent read.
+  const allPts=getCo('JXI')?.price_history||[];
   const{pts,anchoredAtOpen}=anchorToSessionOpen(allPts,interval);
   if(!pts.length)return;
   const prices=pts.map(p=>p.p);
@@ -4727,7 +4742,7 @@ function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.com
 // agree on what timeframe they're both showing.
 function jxiChgBadgeHtml(){
   const interval=chartIntervals['jxi-chart']||'1d';
-  const chg=intervalChg(jxiPriceHistory(),interval);
+  const chg=intervalChg(getCo('JXI')?.price_history||[],interval);
   const label=intervalChgLabel(interval);
   return`${chg>=0?'+':''}${chg}% <span style="font-size:11px;color:var(--text2);font-weight:400">${label}</span>`;
 }
@@ -4735,7 +4750,15 @@ function renderIndexCard(){
   const idx=computeJXI();
   if(!idx.constituents.length)return'';
   const interval=chartIntervals['jxi-chart']||'1d';
-  const chg=intervalChg(jxiPriceHistory(),interval);
+  // Both the badge and the chart below read JXI's own jex_companies row
+  // (kept fresh by every JXI trade, including real-backing basket moves) --
+  // not the separate jex_index_history log, which only advances when
+  // snapshotJXI() runs and can drift out of sync with it. Reading two
+  // different histories for "the same" %-change is exactly what produced
+  // a headline that disagreed with the ticker bar/market table (both of
+  // which already use priceChg(), i.e. this same company-row history).
+  const jxiHistory=getCo('JXI')?.price_history||[];
+  const chg=intervalChg(jxiHistory,interval);
   return `<div class="card">
     <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:10px">
       <div>
@@ -4745,7 +4768,7 @@ function renderIndexCard(){
       <div id="jxi-chg-badge" class="${chg>=0?'price-up':'price-down'}" style="font-size:15px;font-weight:500">${jxiChgBadgeHtml()}</div>
       <div style="margin-left:auto;font-size:12px;color:var(--text2)">${idx.constituents.length} listed compan${idx.constituents.length!==1?'ies':'y'} · equal-weighted · base 1000</div>
     </div>
-    ${DB.indexHistory&&DB.indexHistory.length>=2?`${buildJxiChartIntervalBar('jxi-chart')}<div style="position:relative;height:160px;margin-bottom:14px"><canvas id="jxi-chart"></canvas></div>`:'<div class="ibox ibox-blue" style="margin-bottom:14px;font-size:12px">Chart builds up as trades happen — check back after some activity.</div>'}
+    ${jxiHistory.length>=2?`${buildJxiChartIntervalBar('jxi-chart')}<div style="position:relative;height:160px;margin-bottom:14px"><canvas id="jxi-chart"></canvas></div>`:'<div class="ibox ibox-blue" style="margin-bottom:14px;font-size:12px">Chart builds up as trades happen — check back after some activity.</div>'}
     <table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th class="r">Today</th></tr></thead>
     <tbody>${idx.constituents.map(c=>{const co=getCo(c.ticker);const chg=co?priceChg(co):Math.round(((c.ratio-1)*100)*100)/100;return `<tr><td>${esc(c.name)}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${esc(c.ticker)}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${chg>=0?'+':''}${chg.toFixed(2)}%</td></tr>`;}).join('')}</tbody></table>
   </div>`;
