@@ -472,7 +472,25 @@ const validEmail=e=>e&&e.includes('@')&&e.includes('.');
 const normalizeUsername=v=>{v=(v||'').trim();if(v.startsWith('@'))v=v.slice(1);return v;};
 const validUsername=v=>/^[a-zA-Z0-9_.]{3,20}$/.test(v);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const infoBubble=text=>'<span class="info-bubble" tabindex="0">i<span class="info-tip">'+esc(text)+'</span></span>';
+const infoBubble=text=>'<span class="info-bubble" tabindex="0">?<span class="info-tip">'+esc(text)+'</span></span>';
+// Info-tip tooltips are centered under their icon by default (see app.css),
+// which clips off-screen when the icon sits close to the viewport's left or
+// right edge -- exactly what happened with the NAV/unit bubble on the funds
+// page. Nudges the tooltip back on-screen with an inline transform at the
+// moment it's shown, rather than trying to guess a safe position per icon.
+function clampInfoTip(bubble){
+  const tip=bubble.querySelector('.info-tip');
+  if(!tip)return;
+  tip.style.transform='translateX(-50%)';
+  const r=tip.getBoundingClientRect();
+  const margin=8;
+  let shift=0;
+  if(r.left<margin)shift=margin-r.left;
+  else if(r.right>window.innerWidth-margin)shift=(window.innerWidth-margin)-r.right;
+  if(shift)tip.style.transform='translateX(calc(-50% + '+Math.round(shift)+'px))';
+}
+document.addEventListener('mouseover',e=>{const b=e.target.closest&&e.target.closest('.info-bubble');if(b)clampInfoTip(b);});
+document.addEventListener('focusin',e=>{const b=e.target.closest&&e.target.closest('.info-bubble');if(b)clampInfoTip(b);});
 const cu=()=>DB.users.find(u=>u.id===UI.userId)||null;
 const getUser=id=>DB.users.find(u=>u.id===id);
 const getCo=t=>DB.companies.find(c=>c.ticker===t);
@@ -5105,7 +5123,7 @@ function renderFundDetail(fundId){
     ${canManageFund(f)&&f.status==='active'?`<button class="btn btn-sm btn-danger" onclick="if(confirm('Close this fund to new deposits? Existing depositors can still withdraw.'))closeFund('${f.id}')">Close fund</button>`:''}
   </div>
   <div class="grid4" style="margin-bottom:14px">
-    <div class="mcard"><div class="mlabel">NAV / unit${infoBubble('Net Asset Value per unit: the funds total cash plus everything it holds, divided by how many units exist. This is the price you buy or sell fund units at, similar to a stock price.')}</div><div class="mval" style="font-family:var(--mono)">${fmt(nav)}</div></div>
+    <div class="mcard"><div class="mlabel">NAV / unit${infoBubble("Total fund value ÷ units outstanding — the price you buy or sell units at, like a stock price.")}</div><div class="mval" style="font-family:var(--mono)">${fmt(nav)}</div></div>
     <div class="mcard"><div class="mlabel">Assets under management</div><div class="mval" style="font-family:var(--mono)">${fmt(aum)}</div></div>
     <div class="mcard"><div class="mlabel">Since inception</div><div class="mval ${ret>=0?'green':'red'}">${ret>=0?'+':''}${ret}%</div></div>
     <div class="mcard"><div class="mlabel">Performance fee</div><div class="mval">${f.fee_pct}%</div></div>
