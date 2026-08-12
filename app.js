@@ -834,15 +834,21 @@ async function doRestoreSnapshot(snapshotId){
   // Restoring cash/holdings/shorts/price/shares_avail runs server-side
   // (rpc_admin_restore_snapshot), reading the snapshot's data from
   // jex_snapshots (RPC-written only) instead of a client-writable row.
-  // Clearing active orders and stop-loss happens inside the same RPC
-  // transaction instead of two separate direct client DELETEs.
-  try{await sb.rpc('rpc_admin_restore_snapshot',{p_activity_id:snapshotId});}
+  // Clearing active orders and stop-loss, and rolling back any trade made
+  // AFTER the snapshot was taken, happens inside the same RPC transaction
+  // instead of separate direct client DELETEs -- a true "roll back to this
+  // point in time" (this is what actually powers "End practice mode...
+  // undoing all practice trades"), not just prices/cash/holdings with stale
+  // trade history left behind.
+  let r;
+  try{r=await sb.rpc('rpc_admin_restore_snapshot',{p_activity_id:snapshotId});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.limitOrders=DB.limitOrders.filter(o=>o.status!=='open'&&o.status!=='after_hours');
   DB.stopLossOrders=[];
   await logActivity('snapshot','Snapshot restored: '+snap.label,{userId:cu()?.id,userName:cu()?.name});
   await loadAll();
-  toast('✓ Snapshot restored: '+snap.label);
+  const tradesMsg=r&&r.removed_trades?' ('+r.removed_trades+' trade'+(r.removed_trades!==1?'s':'')+' rolled back)':'';
+  toast('✓ Snapshot restored: '+snap.label+tradesMsg);
 }
 function renderSnapshotTab(){
   const snaps=DB.snapshots;
@@ -3493,6 +3499,18 @@ function fmtChartLabel(t,interval){
   }
   return t; // fallback for old string labels
 }
+// Labels the 1D chart's "Open" anchor point (the last point before this
+// session started, used to give the day's line a starting reference) --
+// literally "Open" only when that point genuinely IS from today. If the
+// exchange was closed for a while before reopening, the anchor point can
+// predate today by a day or more; calling it "Open" then would misleadingly
+// imply it's today's opening price, so it shows its real date instead.
+function anchorPointLabel(p){
+  const d=p&&p.t?new Date(p.t):null;
+  if(!d||isNaN(d))return'Open';
+  if(d.toDateString()===new Date().toDateString())return'Open';
+  return d.toLocaleDateString([],{month:'short',day:'numeric'})+' '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+}
 function destroyChart(canvasId){
   if(charts[canvasId]){
     try{charts[canvasId].destroy();}catch(e){}
@@ -3515,7 +3533,7 @@ function buildChart(canvasId,co){
   const prices=pts.map(p=>p.p);
   const labels=pts.map((p,i)=>{
     if(i===pts.length-1&&pts.length>1)return'Now';
-    if(i===0&&anchoredAtOpen)return'Open';
+    if(i===0&&anchoredAtOpen)return anchorPointLabel(p);
     return fmtChartLabel(p.t,interval);
   });
   const isUp=prices.length>0&&prices[prices.length-1]>=prices[0];
@@ -3579,7 +3597,7 @@ function buildJxiChart(canvasId){
   const prices=pts.map(p=>p.p);
   const labels=pts.map((p,i)=>{
     if(i===pts.length-1&&pts.length>1)return'Now';
-    if(i===0&&anchoredAtOpen)return'Open';
+    if(i===0&&anchoredAtOpen)return anchorPointLabel(p);
     return fmtChartLabel(p.t,interval);
   });
   const isUp=prices.length>0&&prices[prices.length-1]>=prices[0];
@@ -4790,7 +4808,13 @@ function buildSparklines(){
       // last 20 raw points happen to be," which could span several days.
       const allPts=(c.price_history||[]).filter(p=>p&&typeof p.p==='number');
       const{pts:anchoredPts}=anchorToSessionOpen(allPts,'1d');
-      const pts=anchoredPts.length>=2?anchoredPts:allPts.slice(-20);
+      // Right after the exchange reopens, before anyone's traded yet today,
+      // the anchored view can collapse to 0-1 points. Falling back to raw
+      // history here would show whatever dramatic move happened BEFORE
+      // today's reset -- a flat line at the current price (nothing's
+      // happened yet today) is the honest "reset" picture, same as a real
+      // market's intraday chart before the first trade of the day.
+      const pts=anchoredPts.length>=2?anchoredPts:[anchoredPts[0]||{p:c.price,t:new Date().toISOString()},{p:c.price,t:new Date().toISOString()}];
       if(pts.length<2)return;
       const prices=pts.map(p=>p.p);
       const isUp=prices[prices.length-1]>=prices[0];
