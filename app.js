@@ -1077,7 +1077,7 @@ async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;co
 // Countdown display only -- purely local, no write. The actual "has it
 // expired, should it close" decision now belongs entirely to
 // rpc_session_tick() (see sessionAutoTick below), so a display that's
-// briefly stale for up to one 15s poll is the accepted trade-off for not
+// briefly stale for up to one 5s poll is the accepted trade-off for not
 // trusting this 500ms client timer to decide anything real anymore.
 function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0)return;const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
 async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
@@ -1100,7 +1100,7 @@ function saveWeeklySchedule(){
   saveSession({weekly_schedule:ws}).then(()=>{toast('Weekly schedule saved');render();});
 }
 // Replaces checkSchedule()/checkWeeklySchedule() -- every connected
-// client still polls every 15s, but the actual decision (is a timer
+// client still polls every 5s, but the actual decision (is a timer
 // expired, has a one-time or weekly window opened/closed) is now made
 // entirely server-side by rpc_session_tick(), which re-derives it from
 // jex_session's own stored fields and the real server clock rather than
@@ -1137,9 +1137,9 @@ async function sessionAutoTick(){
   // Catch manual Chairman/President actions -- opening/closing/pausing the
   // market, adjusting a stock's price, halting/resuming trading -- that
   // rpc_session_tick() above doesn't cover (it only decides SCHEDULER-driven
-  // transitions). Piggybacks on this same 15s timer rather than a new one;
+  // transitions). Piggybacks on this same 5s timer rather than a new one;
   // only 3 small tables, so it stays cheap at this cadence, and gets every
-  // other connected client's screen "automatically" refreshed within 15s
+  // other connected client's screen "automatically" refreshed within 5s
   // regardless of whether Realtime's WebSocket push is also working.
   try{
     const [freshSession,freshCompanies,freshHalts]=await Promise.all([
@@ -1163,9 +1163,9 @@ async function sessionAutoTick(){
     if(!userIsFillingForm())render();
   }catch(e){}
 }
-setInterval(()=>{sessionAutoTick();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
+setInterval(()=>{sessionAutoTick();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},5000);
 
-// ── Auto-refresh: pull latest data every 20 seconds ──────
+// ── Auto-refresh: pull latest data every 5 seconds ──────
 let _lastRefresh=0;
 function userIsFillingForm(){
   // Check if any input, textarea, or select has focus or has content typed in it
@@ -1184,7 +1184,7 @@ async function autoRefresh(){
   if(!UI.userId)return; // not logged in
   if(userIsFillingForm())return; // don't interrupt forms
   const now=Date.now();
-  if(now-_lastRefresh<18000)return; // debounce
+  if(now-_lastRefresh<4000)return; // debounce
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
@@ -1250,7 +1250,7 @@ async function autoRefresh(){
     }
   }catch(e){/* silent fail */}
 }
-setInterval(autoRefresh,20000);
+setInterval(autoRefresh,5000);
 // Browsers throttle setInterval in background tabs (often down to once a
 // minute or less) -- if a trade happened while this tab was in the
 // background, its next scheduled autoRefresh() could be a long way off by
