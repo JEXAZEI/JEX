@@ -988,7 +988,14 @@ async function saveSheetsUrl(url){
 async function pushToSheets(type,payload){
   if(!SHEETS_URL)return;
   try{
-    await fetch(SHEETS_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type,...payload})});
+    // text/plain, not application/json -- Apps Script web apps don't answer
+    // the CORS preflight (OPTIONS) that a "non-simple" content-type like
+    // application/json forces the browser to send first, so that request
+    // fails outright ("Failed to fetch") before Google's server even sees
+    // it. text/plain is a CORS-simple content type, skipping the preflight
+    // entirely -- doPost(e) still reads the same raw JSON string either way
+    // via e.postData.contents.
+    await fetch(SHEETS_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({type,...payload})});
   }catch(e){console.warn('Sheets sync failed:',e);}
 }
 async function pushBalances(){
