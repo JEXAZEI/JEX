@@ -1012,11 +1012,18 @@ async function pushBalances(){
     rank:i+1,name:u.name,
     cash:Math.round(u.cash*100)/100,
     portfolio:Math.round(pv(u)*100)/100,
-    shortPnl:Math.round(sPnl(u)*100)/100,
     divs:Math.round(divRec(u)*100)/100,
     nw:nw(u),vsStart:Math.round((nw(u)-10000)*100)/100
   })).sort((a,b)=>b.nw-a.nw).map((r,i)=>({...r,rank:i+1}));
   await pushToSheets('balances',{rows});
+  // Listed companies -- was never actually pushed, so a "Companies" tab a
+  // classroom set up in their own Apps Script only ever showed whatever
+  // was there from before, never JEX's current listings.
+  const companyRows=DB.companies.filter(c=>c.status==='listed').map(c=>({
+    name:c.name,ticker:c.ticker,price:c.price,changePct:priceChg(c),
+    shares:c.shares,available:c.shares_avail,marketCap:Math.round(c.price*c.shares*100)/100
+  }));
+  await pushToSheets('companies',{rows:companyRows});
 }
 let _sessionOpenedAt=null;
 async function setSession(status){
@@ -6215,14 +6222,14 @@ function renderAdminDilution(pDil,rDil){
   return`<div class="card"><div class="section-title">Pending dilution requests</div>${pDil.length?pDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span> <span class="badge b-coral">+${d.pct_increase}%</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares — "${esc(d.reason)}"</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewDilution('${d.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewDilution('${d.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending dilution requests</div>'}${rDil.length?`<hr class="divider">${rDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares</div></div><span class="badge ${d.status==='approved'?'b-green':'b-red'}">${d.status}</span></div>`).join('')}`:''}`;
 }
 function renderAdminBalances(students){
-  const rows=students.map(u=>({name:u.name,email:u.email,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pv(u)*100)/100,shortPnl:Math.round(sPnl(u)*100)/100,divs:Math.round(divRec(u)*100)/100,nw:nw(u)})).sort((a,b)=>b.nw-a.nw);
+  const rows=students.map(u=>({name:u.name,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pv(u)*100)/100,divs:Math.round(divRec(u)*100)/100,nw:nw(u)})).sort((a,b)=>b.nw-a.nw);
   const csvEscape=v=>{if(v==null)return'';const s=String(v).replace(/\n/g,' ');return s.includes(',')||s.includes('"')?'"'+s.replace(/"/g,'""')+'"':s;};
-  const csv=[['Rank','Name','Email','Cash','Portfolio','Short P&L','Dividends','Net worth','vs Start'],...rows.map((r,i)=>[i+1,r.name,r.email,r.cash.toFixed(2),r.portfolio.toFixed(2),r.shortPnl.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),(r.nw-10000).toFixed(2)])].map(r=>r.map(csvEscape).join(',')).join('\n');
+  const csv=[['Rank','Name','Cash','Portfolio','Dividends','Net worth','vs Start'],...rows.map((r,i)=>[i+1,r.name,r.cash.toFixed(2),r.portfolio.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),(r.nw-10000).toFixed(2)])].map(r=>r.map(csvEscape).join(',')).join('\n');
   window._jexCSV=csv;
   return`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><span style="font-size:12px;color:var(--text2)">Live student balances</span><div style="display:flex;gap:8px"><button class="btn btn-sm" style="background:var(--purple);color:white;border-color:var(--purple)" onclick="generatePDFReport()">📄 Full PDF report</button><button class="btn btn-sm btn-success" onclick="downloadCSV()">Download CSV</button><button class="btn btn-sm btn-primary" onclick="const p=get('csv-panel');p.style.display=p.style.display==='none'?'block':'none'">Show CSV to copy</button></div></div>
   <div class="grid4" style="margin-bottom:14px"><div class="mcard"><div class="mlabel">Students</div><div class="mval">${rows.length}</div></div><div class="mcard"><div class="mlabel">Avg net worth</div><div class="mval ${rows.length&&rows.reduce((s,r)=>s+r.nw,0)/rows.length>=10000?'green':''}" style="font-family:var(--mono)">${rows.length?fmt(rows.reduce((s,r)=>s+r.nw,0)/rows.length):'—'}</div></div><div class="mcard"><div class="mlabel">Leader</div><div class="mval" style="font-size:15px;margin-top:4px">${esc(rows[0]?.name||'—')}</div></div><div class="mcard"><div class="mlabel">Total dividends paid</div><div class="mval green" style="font-family:var(--mono)">${fmt(rows.reduce((s,r)=>s+r.divs,0))}</div></div></div>
-  <div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th style="padding-left:14px">Rank</th><th>Student</th><th>Email</th><th class="r">Cash</th><th class="r">Portfolio</th><th class="r">Short P&L</th><th class="r">Dividends</th><th class="r">Net worth</th><th class="r">vs Start</th></tr></thead>
-  <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-10000,vc=vs>=0?'price-up':'price-down';return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${i===0?'var(--amber)':i===1?'var(--text2)':i===2?'#993C1D':'var(--text3)'}">#${i+1}</td><td style="font-weight:500">${esc(r.name)}</td><td style="color:var(--text2);font-size:12px">${esc(r.email)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r ${r.shortPnl>=0?'price-up':'price-down'}" style="font-family:var(--mono)">${r.shortPnl>=0?'+':''}${fmt(r.shortPnl)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="9"><div class="empty">No approved students yet</div></td></tr>`}
+  <div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th style="padding-left:14px">Rank</th><th>Student</th><th class="r">Cash</th><th class="r">Portfolio</th><th class="r">Dividends</th><th class="r">Net worth</th><th class="r">vs Start</th></tr></thead>
+  <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-10000,vc=vs>=0?'price-up':'price-down';return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${i===0?'var(--amber)':i===1?'var(--text2)':i===2?'#993C1D':'var(--text3)'}">#${i+1}</td><td style="font-weight:500">${esc(r.name)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="7"><div class="empty">No approved students yet</div></td></tr>`}
   </tbody></table></div>
   <div id="csv-panel" style="display:none;margin-top:12px"><div class="ibox ibox-teal">Click inside the box, press <strong>Ctrl+A</strong> (Cmd+A) to select all, then <strong>Ctrl+C</strong> to copy.</div><textarea readonly onclick="this.select()" style="width:100%;font-family:var(--mono);font-size:12px;padding:10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);resize:vertical;min-height:160px;line-height:1.5">${csv}</textarea></div>`;
 }
@@ -7334,8 +7341,8 @@ function generatePDFReport(){
     <div class="stat"><div class="stat-num">$${totalDivsPaid.toFixed(0)}</div><div class="stat-label">Dividends paid</div></div>
   </div>
   <h2>Leaderboard</h2>
-  <table><thead><tr><th>Rank</th><th>Student</th><th>Cash</th><th>Portfolio</th><th>Short P&L</th><th>Dividends</th><th>Net worth</th><th>vs Start</th></tr></thead><tbody>
-  ${students.map((u,i)=>{const vs=u._nw-10000;return`<tr><td>${i===0?'<span class="badge badge-gold">🥇 #1</span>':'#'+(i+1)}</td><td><strong>${esc(u.name)}</strong></td><td>$${u.cash.toFixed(2)}</td><td>$${pv(u).toFixed(2)}</td><td class="${sPnl(u)>=0?'up':'dn'}">$${sPnl(u).toFixed(2)}</td><td>$${u._divs.toFixed(2)}</td><td><strong class="${vs>=0?'up':'dn'}">$${u._nw.toFixed(2)}</strong></td><td class="${vs>=0?'up':'dn'}">${vs>=0?'+':''}$${vs.toFixed(2)}</td></tr>`;}).join('')}
+  <table><thead><tr><th>Rank</th><th>Student</th><th>Cash</th><th>Portfolio</th><th>Dividends</th><th>Net worth</th><th>vs Start</th></tr></thead><tbody>
+  ${students.map((u,i)=>{const vs=u._nw-10000;return`<tr><td>${i===0?'<span class="badge badge-gold">🥇 #1</span>':'#'+(i+1)}</td><td><strong>${esc(u.name)}</strong></td><td>$${u.cash.toFixed(2)}</td><td>$${pv(u).toFixed(2)}</td><td>$${u._divs.toFixed(2)}</td><td><strong class="${vs>=0?'up':'dn'}">$${u._nw.toFixed(2)}</strong></td><td class="${vs>=0?'up':'dn'}">${vs>=0?'+':''}$${vs.toFixed(2)}</td></tr>`;}).join('')}
   </tbody></table>
   <h2>Listed Companies</h2>
   <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Shares</th><th>Avail.</th><th>Market cap</th></tr></thead><tbody>
