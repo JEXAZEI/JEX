@@ -3567,9 +3567,15 @@ function buildChart(canvasId,co){
     if(i===0&&anchoredAtOpen)return anchorPointLabel(p);
     return fmtChartLabel(p.t,interval);
   });
+  // No real movement yet (fresh listing, or a session just opened with
+  // nothing traded since) shouldn't read as a gain -- last>=first would
+  // otherwise paint a completely flat line green, implying activity that
+  // never happened. Grey it out instead, same as a real market shows a
+  // flat/no-data line neutral rather than colored.
+  const noMove=prices.length<2||prices[prices.length-1]===prices[0];
   const isUp=prices.length>0&&prices[prices.length-1]>=prices[0];
-  const lc=isUp?'#00c896':'#ff4d6a';
-  const fillColor=isUp?'rgba(0,200,150,0.06)':'rgba(255,77,106,0.06)';
+  const lc=noMove?'#8896a8':(isUp?'#00c896':'#ff4d6a');
+  const fillColor=noMove?'rgba(136,150,168,0.06)':(isUp?'rgba(0,200,150,0.06)':'rgba(255,77,106,0.06)');
   try{
     charts[canvasId]=new Chart(canvas,{
       type:'line',
@@ -3633,9 +3639,12 @@ function buildJxiChart(canvasId){
     if(i===0&&anchoredAtOpen)return anchorPointLabel(p);
     return fmtChartLabel(p.t,interval);
   });
+  // See buildChart()'s matching comment -- a flat line (nothing traded
+  // yet this view) shouldn't read as a gain just because last>=first.
+  const noMove=prices.length<2||prices[prices.length-1]===prices[0];
   const isUp=prices.length>0&&prices[prices.length-1]>=prices[0];
-  const lc=isUp?'#00c896':'#ff4d6a';
-  const fillColor=isUp?'rgba(0,200,150,0.06)':'rgba(255,77,106,0.06)';
+  const lc=noMove?'#8896a8':(isUp?'#00c896':'#ff4d6a');
+  const fillColor=noMove?'rgba(136,150,168,0.06)':(isUp?'rgba(0,200,150,0.06)':'rgba(255,77,106,0.06)');
   try{
     charts[canvasId]=new Chart(canvas,{
       type:'line',
@@ -4859,8 +4868,10 @@ function buildSparklines(){
       const pts=anchoredPts.length>=2?anchoredPts:[anchoredPts[0]||{p:c.price,t:new Date().toISOString()},{p:c.price,t:new Date().toISOString()}];
       if(pts.length<2)return;
       const prices=pts.map(p=>p.p);
+      const noMove=prices[prices.length-1]===prices[0];
       const isUp=prices[prices.length-1]>=prices[0];
-      charts['spark-'+c.ticker]=new Chart(canvas,{type:'line',data:{labels:prices.map((_,i)=>i),datasets:[{data:prices,borderColor:isUp?'#00c896':'#ff4d6a',borderWidth:1.5,pointRadius:0,fill:false,tension:0.3}]},options:{responsive:false,animation:false,plugins:{legend:{display:false},tooltip:{enabled:false}},scales:{x:{display:false},y:{display:false}}}});
+      const sparkColor=noMove?'#8896a8':(isUp?'#00c896':'#ff4d6a');
+      charts['spark-'+c.ticker]=new Chart(canvas,{type:'line',data:{labels:prices.map((_,i)=>i),datasets:[{data:prices,borderColor:sparkColor,borderWidth:1.5,pointRadius:0,fill:false,tension:0.3}]},options:{responsive:false,animation:false,plugins:{legend:{display:false},tooltip:{enabled:false}},scales:{x:{display:false},y:{display:false}}}});
     });
   },80);
 }
