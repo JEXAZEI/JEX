@@ -16,7 +16,7 @@ const APP_VERSION = '1.0.0';
 // gets them through a scoped RPC instead (see rpc_resolve_login_identity,
 // rpc_google_session_match, rpc_admin_get_all_emails,
 // rpc_get_company_team_contacts).
-const JEX_USERS_SAFE_SELECT = 'id,name,username,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,auth_provider,auth_uid,created_at,classroom_id,email_notifications';
+const JEX_USERS_SAFE_SELECT = 'id,name,username,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,auth_provider,auth_uid,created_at,classroom_id,email_notifications,is_test_account';
 const JEX_PENDING_SAFE_SELECT = 'id,name,role,sec_q,description,ts,created_at,classroom_id,username,auth_provider,email_verified,auth_uid';
 
 // Headers carry the CURRENT user's own Supabase Auth access token when one exists
@@ -795,6 +795,27 @@ async function togglePracticeMode(){
   await pushNotificationToAll('session',now?'🎮 Practice mode started — trades do not count toward rankings.':'✅ Practice mode ended — real trading resumes.');
   toast(now?'Practice mode ON':'Practice mode OFF');render();
 }
+// Locks the exchange to Chairman/President and explicitly-flagged test
+// accounts only, so new features can be tried against the live production
+// database without any real student able to see or touch it -- modeled
+// directly on togglePracticeMode() above (same confirm -> snapshot ->
+// flip-a-session-flag -> later-restore shape), just gating WHO can be in
+// the exchange instead of whether trades count.
+async function toggleDevMode(){
+  if(!isAdmin(cu()))return toast('Admin access required');
+  const now=!DB.session.dev_mode;
+  if(now){
+    if(!confirm('Start Dev Mode? Only Chairman/President and test accounts will be able to sign in — every other logged-in student will be signed out within seconds. An automatic snapshot will be saved so the exchange can be restored exactly to this state when Dev Mode ends.'))return;
+    const snapId=await doSaveSnapshot('Auto-snapshot before dev mode');
+    await saveSession({dev_mode:now,dev_snapshot_id:snapId});
+  } else {
+    if(!confirm('End Dev Mode? The exchange will be automatically restored to its state from just before Dev Mode started, undoing all testing.'))return;
+    const snapId=DB.session.dev_snapshot_id;
+    await saveSession({dev_mode:now,dev_snapshot_id:null});
+    if(snapId)await doRestoreSnapshot(snapId);
+  }
+  toast(now?'Dev Mode ON':'Dev Mode OFF');render();
+}
 
 async function savePriceBand(){
   const pct=parseInt(document.getElementById('band-pct')?.value);
@@ -973,6 +994,14 @@ async function reassignClassroom(){
   toast('Reassigned to classroom: '+(cid||'unassigned'));
   render();
 }
+async function setTestAccount(uid,isTest){
+  if(!isAdmin(cu()))return toast('Admin access required');
+  try{await sb.rpc('rpc_admin_set_test_account',{p_user_id:uid,p_is_test_account:isTest});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  const u=getUser(uid);if(u)u.is_test_account=isTest;
+  toast(isTest?'Marked as test account':'No longer a test account');
+  render();
+}
 async function saveSheetsUrl(url){
   url=(url||'').trim();
   // Runs server-side (rpc_admin_save_sheets_url) -- this had NO check at
@@ -1120,6 +1149,19 @@ function saveWeeklySchedule(){
 // jex_session's own stored fields and the real server clock rather than
 // trusting each client's local Date.now()/timezone math. This function
 // just applies whatever the server decided.
+// Boots the currently logged-in user the moment Dev Mode locks them out --
+// same "reach every client within one 15s tick" guarantee every other
+// admin action on this poll already has (see the header comment below).
+// Only ever kicks a REAL session out; Chairman/President and flagged test
+// accounts are exactly who Dev Mode is meant to keep signed in.
+function checkDevModeLockout(){
+  if(!DB.session.dev_mode||!UI.userId)return false;
+  const u=cu();
+  if(!u||isAdmin(u)||u.is_test_account)return false;
+  UI.loginError='🛠️ Developer mode — exchange is currently closed for testing.';
+  logout();
+  return true;
+}
 async function sessionAutoTick(){
   if(!UI.userId)return;
   const wasOpen=DB.session.status==='open';
@@ -1127,6 +1169,7 @@ async function sessionAutoTick(){
   try{r=await sb.rpc('rpc_session_tick',{});}catch(e){return;}
   if(r.changed){
     Object.assign(DB.session,r.session);
+    if(checkDevModeLockout())return;
     const nowOpen=DB.session.status==='open';
     if(nowOpen&&!wasOpen){
       sessionTimer=setInterval(tickTimer,500);
@@ -1163,6 +1206,7 @@ async function sessionAutoTick(){
     ]);
     const nowOpen=freshSession[0]&&freshSession[0].status==='open';
     if(freshSession[0])Object.assign(DB.session,freshSession[0]);
+    if(checkDevModeLockout())return;
     DB.companies=freshCompanies;
     DB.halts=freshHalts;
     if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
@@ -1357,7 +1401,12 @@ async function checkGoogleSessionInner(){
   // reading the email from the caller's own verified JWT rather than
   // trusting anything client-supplied.
   let match;
-  try{match=await sb.rpc('rpc_google_session_match',{});}catch(e){console.warn('Google session match failed:',e);return;}
+  try{match=await sb.rpc('rpc_google_session_match',{});}
+  catch(e){
+    const msg=rpcErrorMessage(e);
+    if(msg&&msg.includes('Developer mode')){UI.loginError=msg;render();return;}
+    console.warn('Google session match failed:',e);return;
+  }
   if(match.status==='existing'){
     const existing=match.user;
     // Real page navigation (every nav click, now that pages are routed)
@@ -1571,7 +1620,17 @@ async function loginByForm(){
   // server-side (rpc_resolve_login_identity), scoped to the same pool
   // (UI.loginTab: 'student'|'company'|'admin') the client-side filter used.
   let u;
-  try{u=await sb.rpc('rpc_resolve_login_identity',{p_identifier:username,p_pool:UI.loginTab});}catch(e){u=null;}
+  try{u=await sb.rpc('rpc_resolve_login_identity',{p_identifier:username,p_pool:UI.loginTab});}
+  catch(e){
+    // Dev Mode blocks this identity server-side (raises instead of just
+    // returning null) so the login screen can say why, instead of the
+    // generic "invalid username or password" every other rejection gets --
+    // this isn't a real credential, so there's nothing to leak by being
+    // specific about it.
+    const msg=rpcErrorMessage(e);
+    UI.loginError=(msg&&msg.includes('Developer mode'))?msg:'Invalid username or password';
+    return render();
+  }
   if(!u){UI.loginError='Invalid username or password';return render();}
   const idx=DB.users.findIndex(x=>x.id===u.id);
   if(idx>=0)DB.users[idx]=u;else DB.users.push(u);
@@ -4317,7 +4376,10 @@ function toggleTheme(){
 }
 function renderBanner(){
   const s=DB.session,cls=s.status==='open'?'s-open':s.status==='paused'?'s-paused':'s-closed';
+  // Was computed but never actually included in the returned HTML below --
+  // Practice Mode has been silently missing its own banner this whole time.
   const _pracBanner=s&&s.practice_mode?'<div style="background:#f0a500;color:#000;text-align:center;padding:4px 12px;font-size:12px;font-weight:700">🎮 PRACTICE MODE — trades do not count toward rankings</div>':'';
+  const _devBanner=s&&s.dev_mode?'<div style="background:#5b3ec9;color:#fff;text-align:center;padding:4px 12px;font-size:12px;font-weight:700">🛠️ DEV MODE — testing only, not visible to students</div>':'';
   const timer=s.ends_at?'<span id="timer-el" class="timer">...</span>':'';
   const u=cu();const canControl=isAdmin(u);
   // Session open/pause/close is Chairman/President only (isChairman() already covers
@@ -4338,7 +4400,7 @@ function renderBanner(){
     const closeBtn=s.status!=='closed'?'<button class="btn btn-sm btn-danger" onclick="setSession(&quot;closed&quot;)">Close</button>':'';
     sessionBtns='<div style="display:flex;gap:6px">'+openBtn+' '+pauseBtn+' '+closeBtn+'</div>';
   }
-  return annHtml+'<div class="session-banner '+cls+'"><span>'+s.label+timer+'</span>'+sessionBtns+'</div>';
+  return _devBanner+_pracBanner+annHtml+'<div class="session-banner '+cls+'"><span>'+s.label+timer+'</span>'+sessionBtns+'</div>';
 }
 function renderNav(){
   const u=cu();
@@ -6176,6 +6238,15 @@ function renderAdminSession(students){
       </button>
     </div>
     <div class="divider"></div>
+    <div class="section-title" style="font-size:13px;margin-bottom:10px">🛠️ Dev mode</div>
+    <div class="ibox ibox-blue" style="margin-bottom:10px">Locks the exchange to Chairman/President and test accounts only (flagged below in the user list) — every other logged-in student is signed out within seconds and can't sign back in until Dev Mode ends. Starting it automatically saves a snapshot; ending it automatically restores that snapshot, same guarantee as Practice mode.</div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+      <div style="font-size:13px">${DB.session.dev_mode?'<span style="color:#5b3ec9;font-weight:500">🛠️ Dev mode is ON</span>':'Dev mode is off'}</div>
+      <button class="btn btn-sm ${DB.session.dev_mode?'btn-warning':'btn-primary'}" onclick="toggleDevMode()">
+        ${DB.session.dev_mode?'End dev mode':'Start dev mode'}
+      </button>
+    </div>
+    <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:6px;color:var(--red)">⚠ Danger zone</div>
     <div class="ibox ibox-red" style="margin-bottom:10px">Resets JEX to a clean slate. Deletes all students, companies, trades, and data. Chairman, President, Secretary, Treasurer and Compliance Officer accounts are kept.</div>
     <button class="btn btn-danger" onclick="resetExchange()">🗑 Reset JEX (full wipe)</button>
@@ -6305,6 +6376,7 @@ function renderAdminUsers(students,companies,officers,leadership){
         </select>
         <input type="number" id="cash-amt-${u.id}" placeholder="Amount" min="0" step="0.01" style="width:100px;font-size:12px;padding:5px 8px">
         <button class="btn btn-sm btn-primary" onclick="adjustCash('${u.id}')">Apply</button>
+        <button class="btn btn-sm ${u.is_test_account?'btn-warning':''}" title="Test accounts stay usable during Dev Mode" onclick="setTestAccount('${u.id}',${!u.is_test_account})">${u.is_test_account?'🛠️ Test account':'Mark as test account'}</button>
         <button class="btn btn-sm btn-danger" onclick="removeUser('${u.id}')">Remove</button>
       </div>
     </div>`).join(''):`<div class="empty">No students yet</div>`}
@@ -6324,6 +6396,7 @@ function renderAdminUsers(students,companies,officers,leadership){
         </select>
         <input type="number" id="co-cash-amt-${u.id}" placeholder="Amount" min="0" step="0.01" style="width:100px;font-size:12px;padding:5px 8px">
         <button class="btn btn-sm btn-primary" onclick="adjustCompanyCash('${u.id}')">Apply</button>
+        <button class="btn btn-sm ${u.is_test_account?'btn-warning':''}" title="Test accounts stay usable during Dev Mode" onclick="setTestAccount('${u.id}',${!u.is_test_account})">${u.is_test_account?'🛠️ Test account':'Mark as test account'}</button>
         <button class="btn btn-sm btn-danger" onclick="removeCompany('${u.id}')">Remove</button>
       </div>
     </div>`).join('')}
