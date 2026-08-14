@@ -188,7 +188,7 @@ let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[]
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
   companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],contactMessages:[],indexHistory:[],snapshots:[],clientErrors:[],
-  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},session_started_at:null,jxi_open_value:null,budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
+  session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},circuit_cooldowns:{},session_started_at:null,jxi_open_value:null,budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
     weekly_schedule:{sun:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},mon:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},tue:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},wed:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},thu:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},fri:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},sat:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}}},
     weekly_active:false,weekly_override:false}};
 let SHEETS_URL=null;
@@ -494,6 +494,12 @@ document.addEventListener('focusin',e=>{const b=e.target.closest&&e.target.close
 const cu=()=>DB.users.find(u=>u.id===UI.userId)||null;
 const getUser=id=>DB.users.find(u=>u.id===id);
 const getCo=t=>DB.companies.find(c=>c.ticker===t);
+// Test accounts/companies/funds (flagged is_test_account, see Dev Mode) stay
+// usable for testing at any time, but are only VISIBLE in consumer-facing
+// views (market, ticker bar, leaderboard, funds list) while Dev Mode is on --
+// pass the relevant owning user's id (a student's own id, a company's
+// owner_id, a fund's manager_id).
+const isHiddenTestEntity=userId=>!DB.session.dev_mode&&!!getUser(userId)?.is_test_account;
 // ── CSV Export ────────────────────────────────────────────
 function exportCSV(filename,rows,headers){
   const escape=v=>{
@@ -564,7 +570,10 @@ function computeJXI(){
   // JXI itself is now a real, tradeable ticker in DB.companies (see
   // is_index_fund) -- it must never appear in its own basket, or its price
   // would track a moving average that includes itself.
-  const listed=DB.companies.filter(c=>c.status==='listed'&&!getClassMeta(c.ticker)&&!c.is_index_fund);
+  // Test companies only weigh into JXI while Dev Mode is on (so testing can
+  // exercise JXI-related features against fake data) -- excluded otherwise,
+  // same visibility rule as everywhere else test entities show up.
+  const listed=DB.companies.filter(c=>c.status==='listed'&&!getClassMeta(c.ticker)&&!c.is_index_fund&&!isHiddenTestEntity(c.owner_id));
   if(!listed.length)return{value:1000,change:0,constituents:[]};
   const constituents=listed.map(c=>{
     const base=(c.price_history&&c.price_history[0]&&c.price_history[0].p)||c.price;
@@ -2530,8 +2539,19 @@ async function checkCircuitBreakers(){
   if(!isOpen())return;
   const threshold=DB.session.circuit_breaker_pct||20;
   const openPrices=DB.session.session_open_prices||{};
+  // Once a circuit-breaker halt on a ticker is resumed, that ticker gets a
+  // real cooldown window (set by rpc_admin_resume_stock) before the breaker
+  // can trip on it again -- without this, the underlying price never
+  // actually moves back toward session-open just because trading resumed,
+  // so the very next check (run right after any trade completes) saw the
+  // exact same >=threshold move and re-halted it immediately, over and
+  // over. Checked client-side first so a cooling-down ticker doesn't even
+  // attempt the halt RPC (which also re-validates this server-side).
+  const cooldowns=DB.session.circuit_cooldowns||{};
+  const now=Date.now();
   for(const co of DB.companies){
     if(isHalted(co.ticker))continue;
+    if(cooldowns[co.ticker]&&now<cooldowns[co.ticker])continue;
     const openPrice=openPrices[co.ticker];
     if(!openPrice)continue;
     const pctMove=Math.abs((co.price-openPrice)/openPrice*100);
@@ -2546,11 +2566,25 @@ async function checkCircuitBreakers(){
       const reason='Circuit breaker: '+co.ticker+' moved '+Math.round(pctMove)+'% from session open (threshold: '+threshold+'%)';
       await haltStock(co.ticker,reason,true);
       toast('⚡ Circuit breaker triggered on '+co.ticker+' — trading halted');
-      // Auto-resume after 5 minutes
-      setTimeout(async()=>{
-        if(isHalted(co.ticker))await resumeStock(co.ticker,true);
-      },5*60*1000);
     }
+  }
+}
+// Auto-resumes a circuit-breaker halt once 5 real minutes have elapsed.
+// Runs from the shared 3s poll (every connected client checks) instead of a
+// setTimeout scheduled only in whichever browser tab happened to trigger
+// the halt -- that timer was lost for good if that tab closed or reloaded
+// before the 5 minutes were up, leaving the stock halted indefinitely with
+// no other automatic path back. rpc_admin_resume_stock still re-validates
+// the real elapsed time itself, so a client with a stale/slow clock can't
+// force an early resume.
+async function checkCircuitBreakerAutoResume(){
+  if(!UI.userId)return;
+  const now=Date.now();
+  for(const h of DB.halts.slice()){
+    if(h.halted_by!=='System (Circuit Breaker)')continue;
+    const haltedAt=new Date(h.created_at||h.ts).getTime();
+    if(isNaN(haltedAt)||now-haltedAt<5*60*1000)continue;
+    await resumeStock(h.ticker,true);
   }
 }
 // jxi_open_value/session_started_at anchor the JXI headline %-change and the
@@ -2753,8 +2787,21 @@ async function resumeStock(ticker,systemTriggered=false){
   // as haltStock above: the RPC requires the halt to actually be a
   // circuit-breaker halt with at least 5 real minutes elapsed before
   // honoring a systemTriggered auto-resume, instead of trusting the flag.
-  try{await sb.rpc('rpc_admin_resume_stock',{p_ticker:ticker,p_system_triggered:!!systemTriggered});}
-  catch(e){return toast(rpcErrorMessage(e));}
+  // Also sets a 20-minute circuit-breaker cooldown on this ticker (returned
+  // in r.session) -- without it, the very next price check after resuming
+  // saw the exact same still-over-threshold move and re-halted it
+  // immediately, which is what "keeps triggering" actually was.
+  let r;
+  try{r=await sb.rpc('rpc_admin_resume_stock',{p_ticker:ticker,p_system_triggered:!!systemTriggered});}
+  catch(e){
+    // Multiple clients independently run this same auto-resume check (see
+    // checkCircuitBreakerAutoResume) -- one of them wins the race and the
+    // rest get a benign "already resumed"/"cooldown" error from the RPC.
+    // Only surface that as a toast for a deliberate MANUAL resume click.
+    if(!systemTriggered)return toast(rpcErrorMessage(e));
+    return;
+  }
+  if(r&&r.session)Object.assign(DB.session,r.session);
   DB.halts=DB.halts.filter(h=>h.ticker!==ticker);
   await logActivity('resume',ticker+' trading resumed',{ticker,userId:u?.id,userName:systemTriggered?'System (Circuit Breaker)':u.name});
   await pushNotificationToAll('resume','✅ '+ticker+' trading has resumed');
@@ -2921,7 +2968,7 @@ async function checkLimitOrders(){
     }
   }
 }
-setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();await checkPriceAlerts();checkShortSqueezes();},3000);
+setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();await checkPriceAlerts();checkShortSqueezes();checkCircuitBreakerAutoResume();},3000);
 
 // ═══════════════════════════════════════════════
 // TRADING
@@ -4833,7 +4880,7 @@ function renderCompanyPage(parentTicker){
   return html;
 }
 
-function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)).map(c=>{const chg=priceChg(c),w=isWatched(c.ticker),halted=isHalted(c.ticker);
+function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)&&!isHiddenTestEntity(c.owner_id)).map(c=>{const chg=priceChg(c),w=isWatched(c.ticker),halted=isHalted(c.ticker);
   const preMarket=!isOpen()?getPreMarketPrice(c.ticker):null;
   return `<div class="ticker-item ${UI.panelTicker===c.ticker?'active-t':''} ${w?'watched':''} ${halted?'halted-ticker':''}" onclick="openCompanyPage('${c.ticker}')" style="${c.brand_color?'border-color:'+c.brand_color+'30':''}">
   ${c.logo?`<img src="${c.logo}" style="width:24px;height:24px;object-fit:cover;border-radius:4px;margin-bottom:3px">`:``}
@@ -4879,7 +4926,7 @@ function renderIndexCard(){
 }
 function getMarketListed(u){
   const searchQ=(document.getElementById('market-search')?.value||'').toLowerCase();
-  return DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)
+  return DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)&&!isHiddenTestEntity(c.owner_id)
     &&(!searchQ||(c.name.toLowerCase().includes(searchQ)||c.ticker.toLowerCase().includes(searchQ))))
     // JXI pinned to the top, like a benchmark/reference instrument on a real
     // exchange -- everything else keeps its normal (creation) order.
@@ -5123,6 +5170,7 @@ function renderLeaderboard(){
   const lbSnap=DB.session.leaderboard_snapshot;
   const isFrozen=lbSnap&&DB.session.status!=='open';
   let ranked=isFrozen?lbSnap:DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nw(u),_divs:divRec(u),name:u.name,id:u.id,classroom_id:u.classroom_id})).sort((a,b)=>b._nw-a._nw);
+  ranked=ranked.filter(u=>!isHiddenTestEntity(u.id));
   if(UI.lbClassroom)ranked=ranked.filter(u=>u.classroom_id===UI.lbClassroom);
   const rc=i=>i===0?'r-gold':i===1?'r-silver':i===2?'r-bronze':'';
   const frozenBadge=isFrozen?'<span class="badge b-amber" style="font-size:11px;font-weight:400">📸 Frozen at close</span>':'';
@@ -5133,7 +5181,7 @@ function renderLeaderboard(){
   return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard</span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${u.name}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${getClassroomName(u.classroom_id)}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=10000?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
 }
 function renderFundLeaderboard(){
-  const ranked=(DB.funds||[]).map(f=>{
+  const ranked=(DB.funds||[]).filter(f=>!isHiddenTestEntity(f.manager_id)).map(f=>{
     const nav=currentFundNav(f);
     const ret=Math.round(((nav/10-1)*100)*100)/100;
     return{...f,_nav:nav,_ret:ret};
@@ -5157,8 +5205,9 @@ function renderFundsPage(){
 function fundAUM(f){return Math.round((f.cash+Object.entries(f.holdings||{}).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0))*100)/100;}
 function renderFundList(){
   const u=cu();
-  const activeFunds=DB.funds.filter(f=>f.status==='active');
-  const closedFunds=DB.funds.filter(f=>f.status!=='active');
+  const visibleFunds=DB.funds.filter(f=>!isHiddenTestEntity(f.manager_id));
+  const activeFunds=visibleFunds.filter(f=>f.status==='active');
+  const closedFunds=visibleFunds.filter(f=>f.status!=='active');
   let html='';
   if(u.role==='company'){
     html+=`<div class="card"><div class="section-title">Launch a fund</div>
@@ -6127,13 +6176,14 @@ function renderAdminSession(students){
     ${renderWeeklySchedule()}
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">Circuit breakers</div>
-    <div class="ibox ibox-blue" style="margin-bottom:10px">If any stock moves this % from its session-open price, trading is auto-halted for 5 minutes.</div>
+    <div class="ibox ibox-blue" style="margin-bottom:10px">If any stock moves this % from its session-open price, trading is auto-halted for 5 minutes, then gets a 20-minute cooldown before the breaker can trip on it again.</div>
     <div class="row" style="align-items:flex-end;margin-bottom:14px">
       <div class="frow" style="flex:1"><label class="flabel">Trigger threshold (%)</label><input type="number" id="cb-pct" value="${DB.session.circuit_breaker_pct||20}" min="1" max="100" step="1"></div>
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="saveCBPct()">Save</button></div>
       <div style="padding-bottom:12px;margin-left:4px"><button class="btn" onclick="saveSession({circuit_breaker_pct:null}).then(()=>toast('Circuit breakers disabled'))">Disable</button></div>
     </div>
     ${DB.session.circuit_breaker_pct?`<div style="font-size:12px;color:var(--text2);margin-bottom:4px">Active — halts if any stock moves ±${DB.session.circuit_breaker_pct}% from open</div>`:'<div style="font-size:12px;color:var(--text2);margin-bottom:4px">Circuit breakers disabled</div>'}
+    ${(()=>{const now=Date.now();const cooling=Object.entries(DB.session.circuit_cooldowns||{}).filter(([t,until])=>until>now);return cooling.length?`<div style="font-size:12px;color:var(--text2);margin-bottom:4px">Cooling down (won't re-trigger yet): ${cooling.map(([t,until])=>t+' for '+Math.ceil((until-now)/60000)+'m').join(', ')}</div>`:'';})()}
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">Price bands</div>
     <div class="ibox ibox-blue" style="margin-bottom:10px">Orders outside ±this% of the session-open price are rejected. Prevents accidental price collapses.</div>
