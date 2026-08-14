@@ -1381,24 +1381,75 @@ async function signInWithGoogle(){
   }catch(e){toast('Could not start Google Sign-In: '+(e.message||e));}
 }
 async function checkGoogleSession(){
-  if(!supaAuth)return;
+  // Captured before anything below can clear it -- this is the only signal
+  // for "did this page load actually land here as a redirect back from
+  // Google's consent screen," which is what decides whether a dead end
+  // below deserves an explanation or should just stay silent (an ordinary
+  // page load with no Google session at all is not an error).
+  const wasOauthReturn=_oauthReturnActive;
   // Never auto-login off a password-recovery session — see _passwordRecoveryActive above.
+  // (_oauthReturnActive is already false for a genuine recovery link -- see its
+  // own initializer above -- so there's nothing to resolve here either way.)
   if(_passwordRecoveryActive)return;
+  if(!supaAuth){_oauthReturnActive=false;if(wasOauthReturn)googleSignInFailed();return;}
   // Every path below returns through here -- see _oauthReturnActive above for
   // why this needs to clear no matter how this call resolves (matched,
   // pending, brand new signup, or no session at all), not just on success.
-  try{await checkGoogleSessionInner();}finally{_oauthReturnActive=false;}
+  // checkGoogleSessionInner() reports back whether it actually landed on some
+  // explained state (signed in, pending approval, new-signup form, or a
+  // Dev Mode notice) -- if this really was a return from Google and NONE of
+  // those happened, the "Connecting..." splash (still up this whole time,
+  // see render()) would otherwise just sit there forever with no
+  // explanation and no way out, which is exactly the "stuck loading" bug.
+  let resolved=false;
+  try{resolved=await checkGoogleSessionInner();}
+  finally{
+    _oauthReturnActive=false;
+    if(wasOauthReturn&&!resolved)googleSignInFailed();
+  }
 }
+// Drops the user onto the normal login screen (never a Google-only oauth
+// return, since renderLogin() always includes the full login form) with a
+// plain-language explanation instead of the "Connecting..." splash — and
+// strips the auth code/token out of the URL bar so refreshing the page
+// can't re-trigger the exact same stuck state.
+function googleSignInFailed(){
+  UI.loginError="Google sign-in didn't finish. This can happen if it was interrupted or timed out — please try again.";
+  try{
+    const url=new URL(window.location.href);
+    url.hash='';
+    url.searchParams.delete('code');
+    history.replaceState(null,'',url.pathname+(url.search?url.search:''));
+  }catch(e){}
+  render();
+}
+// Returns true once the sign-in attempt has landed on SOME explained state
+// (an existing account, a pending-approval notice, the new-signup form, or
+// a Dev Mode block) -- false means nothing conclusive happened, which is
+// only actually a problem when this page load was itself a Google redirect
+// return (see checkGoogleSession() above).
 async function checkGoogleSessionInner(){
   let session=null;
   try{
     const res=await supaAuth.auth.getSession();
     session=res&&res.data&&res.data.session;
-  }catch(e){console.warn('Google session check failed:',e);return;}
-  if(!session||!session.user||!session.user.email)return;
+    // Right after landing back from Google's consent screen, supabase-js can
+    // still be finishing the exchange of the URL's auth code into a real
+    // session -- give it a few short retries before concluding the sign-in
+    // genuinely failed, instead of giving up on the very first empty check.
+    if(!session&&_oauthReturnActive){
+      for(let i=0;i<3&&!session;i++){
+        await new Promise(r=>setTimeout(r,700));
+        const retry=await supaAuth.auth.getSession();
+        session=retry&&retry.data&&retry.data.session;
+      }
+    }
+  }catch(e){console.warn('Google session check failed:',e);return false;}
+  if(!session||!session.user||!session.user.email)return false;
   // Also refuse a session left over from an abandoned recovery link on a LATER page load
   // (see RECOVERY_TOKEN_KEY above) — the in-memory flag alone only covers the same load.
-  try{if(session.access_token&&session.access_token===localStorage.getItem(RECOVERY_TOKEN_KEY))return;}catch(e){}
+  // Not a Google-sign-in failure either way, so this counts as resolved.
+  try{if(session.access_token&&session.access_token===localStorage.getItem(RECOVERY_TOKEN_KEY))return true;}catch(e){}
   const email=norm(session.user.email);
   const meta=session.user.user_metadata||{};
   const name=String(meta.full_name||meta.name||email.split('@')[0]||'Google User');
@@ -1413,8 +1464,8 @@ async function checkGoogleSessionInner(){
   try{match=await sb.rpc('rpc_google_session_match',{});}
   catch(e){
     const msg=rpcErrorMessage(e);
-    if(msg&&msg.includes('Developer mode')){UI.loginError=msg;render();return;}
-    console.warn('Google session match failed:',e);return;
+    if(msg&&msg.includes('Developer mode')){UI.loginError=msg;render();return true;}
+    console.warn('Google session match failed:',e);return false;
   }
   if(match.status==='existing'){
     const existing=match.user;
@@ -1424,7 +1475,7 @@ async function checkGoogleSessionInner(){
     // nothing new to announce. Let boot()'s own session-validation path
     // (right after this call) handle it silently instead of re-toasting
     // "Signed in with Google" and re-resetting navTab on every click.
-    if(UI.userId===existing.id)return;
+    if(UI.userId===existing.id)return true;
     const idx=DB.users.findIndex(u=>u.id===existing.id);
     if(idx>=0)DB.users[idx]=existing;else DB.users.push(existing);
     UI.userId=existing.id;
@@ -1433,16 +1484,17 @@ async function checkGoogleSessionInner(){
     subscribeRealtime();
     toast('Signed in with Google as '+existing.name);
     render();
-    return;
+    return true;
   }
   if(match.status==='pending'){
     toast('Your registration is still awaiting Chairman/President approval');
     render();
-    return;
+    return true;
   }
   UI.googleAuth={email,name,authUid};
   UI.loginView='register';
   render();
+  return true;
 }
 function onRegEmailChanged(prefix){
   const state=UI.regVerify[prefix];
