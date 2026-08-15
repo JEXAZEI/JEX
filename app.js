@@ -566,13 +566,20 @@ const priceChg=c=>{
   const f=c.price_history[0].p,l=c.price_history[c.price_history.length-1].p;
   return f?((l-f)/f*100):0;
 };
-function computeJXI(){
-  // JXI itself is now a real, tradeable ticker in DB.companies (see
-  // is_index_fund) -- it must never appear in its own basket, or its price
-  // would track a moving average that includes itself.
-  // Test companies only weigh into JXI while Dev Mode is on (so testing can
-  // exercise JXI-related features against fake data) -- excluded otherwise,
-  // same visibility rule as everywhere else test entities show up.
+function computeIndex(classroomId){
+  // Generalized JXI math -- classroomId null means "whole exchange" (JXI
+  // itself); a classroom id scopes the basket to that classroom's
+  // companies only (via owner_id -> jex_users.classroom_id, since
+  // companies don't carry classroom_id directly). See
+  // classroom_index_migration.sql's server-side index_live_value() for the
+  // matching generalization.
+  //
+  // It must never appear in its own basket, or its price would track a
+  // moving average that includes itself.
+  // Test companies only weigh in while Dev Mode is on (so testing can
+  // exercise index-related features against fake data) -- excluded
+  // otherwise, same visibility rule as everywhere else test entities show
+  // up.
   //
   // Only a GENUINE additional share class (meta.parent_ticker !== ticker,
   // e.g. ACME.B) is excluded here to avoid double-counting the same
@@ -583,7 +590,8 @@ function computeJXI(){
   // getClassMeta() check, silently dropping the company's one real listing
   // out of JXI's basket entirely.
   const isDerivativeClass=c=>{const meta=getClassMeta(c.ticker);return!!meta&&meta.parent_ticker!==c.ticker;};
-  const listed=DB.companies.filter(c=>c.status==='listed'&&!isDerivativeClass(c)&&!c.is_index_fund&&!isHiddenTestEntity(c.owner_id));
+  const listed=DB.companies.filter(c=>c.status==='listed'&&!isDerivativeClass(c)&&!c.is_index_fund&&!isHiddenTestEntity(c.owner_id)
+    &&(classroomId==null||getUser(c.owner_id)?.classroom_id===classroomId));
   if(!listed.length)return{value:1000,change:0,constituents:[]};
   const constituents=listed.map(c=>{
     const base=(c.price_history&&c.price_history[0]&&c.price_history[0].p)||c.price;
@@ -595,6 +603,7 @@ function computeJXI(){
   const change=Math.round(((avgRatio-1)*100)*100)/100;
   return{value,change,constituents};
 }
+function computeJXI(){return computeIndex(null);}
 async function snapshotJXI(){
   const idx=computeJXI();
   if(!idx.constituents.length)return;
@@ -982,6 +991,23 @@ async function createClassroom(){
   await sb.post('jex_classrooms',rec);
   DB.classrooms.push(rec);
   toast('Classroom "'+name+'" created');render();
+}
+async function createClassroomIndex(){
+  if(!isAdmin(cu()))return toast('Admin access required');
+  const classroomId=get('cls-idx-classroom')?.value;
+  const ticker=(get('cls-idx-ticker')?.value||'').trim().toUpperCase();
+  const name=(get('cls-idx-name')?.value||'').trim();
+  if(!classroomId)return toast('Select a classroom');
+  if(!ticker)return toast('Enter a ticker');
+  if(!name)return toast('Enter a name');
+  let rec;
+  try{rec=await sb.rpc('rpc_admin_create_classroom_index',{p_classroom_id:classroomId,p_ticker:ticker,p_name:name});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.companies.push({id:uid(),name,ticker:rec.ticker,price:rec.price,shares:0,shares_avail:0,status:'listed',owner_id:null,
+    description:'Tracks the equal-weighted average of every listed company in '+(rec.classroom_name||'this classroom')+'. Price updates automatically to match the live index value and can\'t be manually adjusted. Buying mints new units at the live price; selling redeems them, so there\'s no fixed share supply.',
+    price_history:[{p:rec.price,t:'Listing'}],financials:[],is_index_fund:true,index_classroom_id:classroomId,fund_holdings:{}});
+  toast('Index '+rec.ticker+' created for '+(rec.classroom_name||'classroom'));
+  render();
 }
 async function deleteClassroom(id){
   if(!isAdmin(cu()))return toast('Admin access required');
@@ -4634,14 +4660,16 @@ function renderCompanyPage(parentTicker){
     // No owner, no IPO, no share classes, no shorting -- none of the usual
     // company-overview concepts apply to an index tracker. Composition
     // mirrors the constituents table on the market page's index card.
-    const idx=computeJXI();
+    // co.index_classroom_id scopes this to just that classroom's basket
+    // for a classroom index; null (JXI itself) means the whole exchange.
+    const idx=computeIndex(co.index_classroom_id||null);
     html+='<div class="grid4" style="margin-bottom:14px">'
       +'<div class="mcard"><div class="mlabel">Price</div><div class="mval" style="font-family:var(--mono)">'+fmt(co.price)+'</div></div>'
       +'<div class="mcard"><div class="mlabel">Holders</div><div class="mval">'+shareholders.length+'</div></div>'
       +'<div class="mcard"><div class="mlabel">Units outstanding</div><div class="mval">'+co.shares.toLocaleString()+'</div></div>'
       +'<div class="mcard"><div class="mlabel">Constituents</div><div class="mval">'+idx.constituents.length+'</div></div>'
       +'</div>'
-      +'<div class="ibox ibox-blue" style="margin-bottom:14px">Tracks the JEX Composite Index — an equal-weighted average of every listed company. Price updates automatically to match the live index value and can\'t be manually adjusted. Buying mints new units at the live price; selling redeems them, so there\'s no fixed share supply.</div>';
+      +'<div class="ibox ibox-blue" style="margin-bottom:14px">'+esc(co.description||'Tracks an equal-weighted average of its constituent companies. Price updates automatically to match the live index value and can\'t be manually adjusted. Buying mints new units at the live price; selling redeems them, so there\'s no fixed share supply.')+'</div>';
     html+='<div class="card"><div class="section-title">Composition</div><table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th class="r">Today</th></tr></thead>'
       +'<tbody>'+idx.constituents.map(c=>{const cco=getCo(c.ticker);const cchg=cco?priceChg(cco):0;return'<tr><td>'+esc(c.name)+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+esc(c.ticker)+'</span></td><td class="r" style="font-family:var(--mono)">'+fmt(c.price)+'</td><td class="r '+(cchg>=0?'price-up':'price-down')+'">'+(cchg>=0?'+':'')+cchg.toFixed(2)+'%</td></tr>';}).join('')
       +'</tbody></table></div>';
@@ -5014,6 +5042,7 @@ function renderMarketRows(u,listed){
   return listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
     const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
+    const idxBadge=c.is_index_fund?'<span class="badge b-blue" style="font-size:10px;margin-left:4px">'+(c.index_classroom_id?'Index — '+esc(getClassroomName(c.index_classroom_id)||''):'Index')+'</span>':'';
     // Ticker-style flash on the price cell when a price actually moves since
     // the last render (realtime pushes from other clients' trades, or the
     // 3s order-matching poll) — not on every re-render (search typing,
@@ -5021,7 +5050,7 @@ function renderMarketRows(u,listed){
     const prevPrice=_marketLastPrices[c.ticker];
     const flashClass=prevPrice!=null&&prevPrice!==c.price?(c.price>prevPrice?' flash-up':' flash-down'):'';
     _marketLastPrices[c.ticker]=c.price;
-    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${esc(c.name)}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${esc(c.description||"")}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="${flashClass}" style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')+(!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:'');
+    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${esc(c.name)}</span>${idxBadge}${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${esc(c.description||"")}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="${flashClass}" style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')+(!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:'');
 }
 function renderMarket(){
   const u=cu();
@@ -6356,6 +6385,20 @@ function renderAdminSession(students){
         </select>
       </div>
       <div><button class="btn btn-primary btn-sm" onclick="reassignClassroom()">Assign</button></div>
+    </div>
+    <div class="divider" style="margin:14px 0"></div>
+    <div class="section-title" style="font-size:12px;margin-bottom:8px">Create classroom index</div>
+    <div class="ibox ibox-blue" style="margin-bottom:12px">Same idea as JXI, scoped to one classroom — an equal-weighted tracker of just that classroom's listed companies. One index per classroom.</div>
+    <div class="row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">
+      <div class="frow" style="flex:2;min-width:150px"><label class="flabel">Classroom</label>
+        <select id="cls-idx-classroom">
+          <option value="">— Select —</option>
+          ${DB.classrooms.filter(c=>!DB.companies.some(co=>co.is_index_fund&&co.index_classroom_id===c.id)).map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="frow" style="min-width:100px"><label class="flabel">Ticker</label><input type="text" id="cls-idx-ticker" placeholder="e.g. PD1X" style="text-transform:uppercase" maxlength="8"></div>
+      <div class="frow" style="flex:2;min-width:150px"><label class="flabel">Name</label><input type="text" id="cls-idx-name" placeholder="e.g. Period 1 Index"></div>
+      <div><button class="btn btn-primary btn-sm" onclick="createClassroomIndex()">+ Create index</button></div>
     </div>
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">🎮 Practice mode</div>
