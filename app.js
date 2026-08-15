@@ -2755,7 +2755,7 @@ function isHalted(ticker){return !!DB.halts.find(h=>h.ticker===ticker);}
 async function resetExchange(){
   if(!isAdmin(cu()))return toast('Admin access required');
   const keepAdmins=await new Promise(resolve=>{
-    if(confirm('⚠️ FULL RESET\n\nEverything will be deleted:\n• All students and company accounts\n• All classrooms\n• All listed companies and price history\n• All trades, orders, dividends\n• All votes, news, announcements\n• All notifications, flags, minutes\n• All activity logs, price adjustments\n• All limit orders, stop-loss orders\n• All founder allocations, share classes\n• All snapshots and NW history\n\nChairman, President, Secretary, Treasurer and Compliance Officer accounts will be KEPT.\n\nThis CANNOT be undone.'))resolve(true);
+    if(confirm('⚠️ FULL RESET\n\nEverything will be deleted:\n• All students and company accounts\n• All classrooms\n• All listed companies and price history\n• All trades, orders, dividends\n• All votes, news, announcements\n• All notifications, flags, minutes\n• All activity logs, price adjustments\n• All limit orders, stop-loss orders\n• All founder allocations, share classes\n• All snapshots and NW history\n\nChairman, President, Secretary, Treasurer and Compliance Officer accounts will be KEPT.\n\nAccounts and companies marked 🛠️ Test account (see Admin → Users) will also be KEPT, exactly as they are — nothing about them is touched or reset.\n\nThis CANNOT be undone.'))resolve(true);
     else resolve(false);
   });
   if(!keepAdmins)return;
@@ -2780,14 +2780,21 @@ async function resetExchange(){
     // jex_price_alerts, jex_nw_history, jex_dividend_approvals, jex_votes,
     // jex_vote_ballots, jex_companies, jex_users, jex_classrooms.
     await sb.rpc('rpc_admin_full_reset',{});
-    // Clear local DB state entirely
-    DB.users=DB.users.filter(isAdmin);
-    DB.users.forEach(u=>{u.cash=0;u.holdings={};u.shorts={};u.watchlist=[];});
-    DB.companies=[];DB.trades=[];DB.dividends=[];DB.buybacks=[];
+    // Clear local DB state entirely -- test-flagged accounts, their listed
+    // companies, share classes, and funds survive a reset server-side now
+    // (see rpc_admin_full_reset), so mirror that here too instead of
+    // flashing them away for the moment before loadAll() below re-fetches
+    // the real post-reset state anyway.
+    DB.users=DB.users.filter(u=>isAdmin(u)||u.is_test_account);
+    DB.users.filter(isAdmin).forEach(u=>{u.cash=0;u.holdings={};u.shorts={};u.watchlist=[];});
+    DB.companies=DB.companies.filter(c=>getUser(c.owner_id)?.is_test_account);
+    DB.trades=[];DB.dividends=[];DB.buybacks=[];
     DB.limitOrders=[];DB.stopLossOrders=[];DB.notifications=[];
     DB.halts=[];DB.activity=[];DB.news=[];DB.announcements=[];
-    DB.minutes=[];DB.flags=[];DB.pending=[];DB.ipoApps=[];DB.bugReports=[];DB.funds=[];DB.contactMessages=[];DB.indexHistory=[];
-    DB.dilApps=[];DB.shareClasses=[];DB.classApps=[];
+    DB.minutes=[];DB.flags=[];DB.pending=[];DB.ipoApps=[];DB.bugReports=[];
+    DB.funds=DB.funds.filter(f=>getUser(f.manager_id)?.is_test_account);
+    DB.contactMessages=[];DB.indexHistory=[];
+    DB.dilApps=[];DB.shareClasses=DB.shareClasses.filter(sc=>DB.companies.some(c=>c.ticker===sc.parent_ticker));DB.classApps=[];
     DB.founderAllocations=[];DB.companyMembers=[];
     DB.priceAdjustments=[];DB.priceAlerts=[];
     DB.nwHistory=[];DB.votes=[];DB.ballots=[];
