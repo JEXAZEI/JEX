@@ -6804,7 +6804,7 @@ function renderAdminDashboard(){
   <div class="grid4" style="margin-bottom:14px">
     <div class="mcard"><div class="mlabel">🚩 Open flags</div><div class="mval" style="color:${(DB.flags||[]).filter(f=>f.status==='open').length?'var(--red)':'var(--text)'}">${(DB.flags||[]).filter(f=>f.status==='open').length}</div></div>
     <div class="mcard"><div class="mlabel">Price adjustments</div><div class="mval">${(DB.priceAdjustments||[]).length}</div></div>
-    <div class="mcard"><div class="mlabel">Halted stocks</div><div class="mval" style="color:${DB.halts.length?'var(--red)':'var(--text)'}">${DB.halts.length}</div></div>
+    <div class="mcard"><div class="mlabel">Active stop-loss orders</div><div class="mval">${(DB.stopLossOrders||[]).filter(o=>o.status==='active').length}</div></div>
     <div class="mcard"><div class="mlabel">Active limit orders</div><div class="mval">${DB.limitOrders.filter(o=>o.status==='open').length}</div></div>
   </div>
   <div class="grid3" style="margin-bottom:14px">
