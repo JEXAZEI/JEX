@@ -573,7 +573,17 @@ function computeJXI(){
   // Test companies only weigh into JXI while Dev Mode is on (so testing can
   // exercise JXI-related features against fake data) -- excluded otherwise,
   // same visibility rule as everywhere else test entities show up.
-  const listed=DB.companies.filter(c=>c.status==='listed'&&!getClassMeta(c.ticker)&&!c.is_index_fund&&!isHiddenTestEntity(c.owner_id));
+  //
+  // Only a GENUINE additional share class (meta.parent_ticker !== ticker,
+  // e.g. ACME.B) is excluded here to avoid double-counting the same
+  // company twice. A company can also "convert" its own base ticker into
+  // an explicit Class A (convertBaseClass(), e.g. to set an asymmetric
+  // votes-per-share structure) -- that row is self-referential
+  // (parent_ticker === ticker), and previously matched this same
+  // getClassMeta() check, silently dropping the company's one real listing
+  // out of JXI's basket entirely.
+  const isDerivativeClass=c=>{const meta=getClassMeta(c.ticker);return!!meta&&meta.parent_ticker!==c.ticker;};
+  const listed=DB.companies.filter(c=>c.status==='listed'&&!isDerivativeClass(c)&&!c.is_index_fund&&!isHiddenTestEntity(c.owner_id));
   if(!listed.length)return{value:1000,change:0,constituents:[]};
   const constituents=listed.map(c=>{
     const base=(c.price_history&&c.price_history[0]&&c.price_history[0].p)||c.price;
