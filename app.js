@@ -4517,8 +4517,9 @@ function renderNav(){
 // RENDER: NEWS (public feed)
 // ═══════════════════════════════════════════════
 function renderNewsFeed(){
-  const items=DB.news;
-  const u=cu();const canDelete=isAdmin(u);
+  const u=cu();
+  const items=DB.news.filter(n=>!isHiddenTestEntity(getCo(n.ticker)?.owner_id));
+  const canDelete=isAdmin(u);
   if(!items.length)return`<div class="card"><div class="empty">No company news yet. Companies can post updates from their News tab.</div></div>`;
   return items.map(n=>`<div class="news-item">
     <div class="news-headline">${esc(n.headline)}</div>
@@ -4540,6 +4541,13 @@ function renderNewsFeed(){
 function renderCompanyPage(parentTicker){
   const co=getCo(parentTicker);if(!co)return'<div class="empty">Company not found</div>';
   const u=cu();
+  // Blocks direct/deep-link access to a hidden test company's page (not just
+  // hiding it from the listing table) -- otherwise anyone who knew or
+  // guessed the ticker could still open ?ticker=TCO straight to its trade
+  // panel while Dev Mode is off. Same uniform dev_mode-gated rule as
+  // everywhere else test entities show up (see isHiddenTestEntity) -- no
+  // per-viewer exception, so the on/off switch stays a single simple gate.
+  if(isHiddenTestEntity(co.owner_id))return'<div class="empty">Company not found</div>';
   const allTickers=getCompanyTickers(parentTicker);
   const held=(holdings(u)[parentTicker])||0;
   const short=(shorts(u))[parentTicker];
@@ -5001,7 +5009,9 @@ function renderMarketRows(u,listed){
 function renderMarket(){
   const u=cu();
   const listed=getMarketListed(u);
-  const recentNews=DB.news.slice(0,5);
+  const visibleNews=DB.news.filter(n=>!isHiddenTestEntity(getCo(n.ticker)?.owner_id));
+  const recentNews=visibleNews.slice(0,5);
+  const visibleVotes=DB.votes.filter(v=>v.status==='open'&&!isHiddenTestEntity(getCo(v.parent_ticker)?.owner_id));
   return `${renderTickerBar()}
     ${renderIndexCard()}
     <div class="card"><div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
@@ -5013,10 +5023,10 @@ function renderMarket(){
     </div>
     ${(DB.minutes||[]).filter(m=>m.type==='official_notice').length?`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)"><div class="section-title">📋 Official notices</div>${DB.minutes.filter(m=>m.type==='official_notice').slice(0,2).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span class="badge b-blue" style="margin-right:6px;font-size:10px">Notice</span><strong style="font-size:13px">${esc(m.title)}</strong></div><span style="font-size:11px;color:var(--text2)">${m.ts}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${esc(m.body)}</div></div>`).join('')}</div>`:''}
     ${(DB.minutes||[]).filter(m=>m.type==='minutes').length?`<div class="card" style="margin-bottom:14px"><div class="section-title">📋 Meeting minutes</div>${DB.minutes.filter(m=>m.type==='minutes').slice(0,3).map(m=>`<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><strong style="font-size:13px">${esc(m.title)}</strong><span style="font-size:11px;color:var(--text2)">${m.ts} — ${esc(m.author_name)}</span></div><div style="font-size:12px;color:var(--text2);white-space:pre-line;max-height:80px;overflow:hidden">${esc(m.body)}</div></div>`).join('')}${DB.minutes.filter(m=>m.type==='minutes').length>3?`<div style="font-size:12px;color:var(--text2);text-align:center;padding-top:8px">${DB.minutes.filter(m=>m.type==='minutes').length-3} older entries</div>`:''}</div>`:''}
-    ${DB.votes.filter(v=>v.status==='open').length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
-      +DB.votes.filter(v=>v.status==='open').map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
+    ${visibleVotes.length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
+      +visibleVotes.map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
       +'</div>':''}
-    ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${DB.news.length} post${DB.news.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${esc(n.headline)}</div>${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${esc(n.company_name)}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${DB.news.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${DB.news.length} posts</div>`:''}</div>`:''}
+    ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${visibleNews.length} post${visibleNews.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${esc(n.headline)}</div>${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${esc(n.company_name)}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${visibleNews.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${visibleNews.length} posts</div>`:''}</div>`:''}
     <div id="trade-panel"></div>`;
 }
 function buildSparklines(){
@@ -6977,10 +6987,10 @@ function renderStudentOrders(){
 // RENDER: TRADING HISTORY (per stock)
 // ═══════════════════════════════════════════════
 function renderExchangeStats(){
-  const listed=DB.companies.filter(c=>c.status==='listed');
-  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+  const listed=DB.companies.filter(c=>c.status==='listed'&&!isHiddenTestEntity(c.owner_id));
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved'&&!isHiddenTestEntity(u.id));
   const today=new Date().toLocaleDateString();
-  const todayTrades=DB.trades.filter(t=>t.ts&&t.ts.includes(today));
+  const todayTrades=DB.trades.filter(t=>t.ts&&t.ts.includes(today)&&!isHiddenTestEntity(getCo(t.ticker)?.owner_id));
   const totalVol=todayTrades.reduce((s,t)=>s+t.price*t.qty,0);
   const totalMktCap=listed.filter(c=>!c.is_index_fund).reduce((s,c)=>s+c.price*c.shares,0);
   const movers=listed.map(c=>({ticker:c.ticker,name:c.name,chg:priceChg(c),price:c.price})).sort((a,b)=>Math.abs(b.chg)-Math.abs(a.chg));
