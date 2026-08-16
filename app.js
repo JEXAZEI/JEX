@@ -1638,7 +1638,7 @@ async function registerStudent(name,username,email,pw,secQ,secA,emailVerified,au
   const isMigrated=isGoogle||!!newAuthUid;
   const pwHash=isMigrated?null:await hashPw(pw);
   const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHash,role:'student',
-    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:norm(secA),
+    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:await hashPw(norm(secA)),
     email_verified:isGoogle?true:!!emailVerified,auth_provider:isGoogle?'google':null,auth_uid:newAuthUid,ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';UI.googleAuth=null;render();
@@ -1666,7 +1666,7 @@ async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerifi
   const isMigratedCo=isGoogle||!!newAuthUidCo;
   const pwHashCo=isMigratedCo?null:await hashPw(pw);
   const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHashCo,role:'company',description:desc.trim(),
-    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:norm(secA),
+    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:await hashPw(norm(secA)),
     email_verified:isGoogle?true:!!emailVerified,auth_provider:isGoogle?'google':null,auth_uid:newAuthUidCo,ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';UI.googleAuth=null;render();
