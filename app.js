@@ -3443,6 +3443,11 @@ function applyFundTradeResult(fundId,ticker,r){
   if(f){f.cash=r.cash;f.holdings=r.holdings;}
   if(co){co.price=r.price;if('shares_avail'in r)co.shares_avail=r.shares_avail;co.price_history=r.price_history;}
   if(r.owner_id&&r.owner_cash!=null){const owner=getUser(r.owner_id);if(owner)owner.cash=r.owner_cash;}
+  // Real backing: a fund minting/redeeming JXI actually buys/sells a
+  // basket of its constituents server-side too (see rpc_fund_buy/sell's
+  // is_index_fund branch) -- apply those price moves immediately, same as
+  // applyTradeResult() already does for a direct student trade.
+  if(r.constituents)r.constituents.forEach(cu2=>{const c2=getCo(cu2.ticker);if(c2){c2.price=cu2.price;c2.shares_avail=cu2.shares_avail;c2.price_history=cu2.price_history;}});
   if(r.trade)DB.trades.push(r.trade);
   checkPriceAlerts();
   checkCircuitBreakers();
@@ -3457,7 +3462,11 @@ async function fundBuy(fundId,ticker,qty){
   if(co.owner_id===f.manager_id)return toast('A fund cannot trade its own manager\'s company stock — conflict of interest');
   if(!canAccessTicker(ticker,f.manager_id))return toast('This share class is restricted — the fund manager is not on the whitelist.');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
-  if(co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
+  // JXI/classroom indexes mint units on demand rather than trading against
+  // a fixed float, so shares_avail isn't a real liquidity cap for them --
+  // same bypass placeBuy() already applies for a direct student purchase
+  // (app.js:3301).
+  if(!co.is_index_fund&&co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
   let r;
   try{r=await sb.rpc('rpc_fund_buy',{p_fund_id:fundId,p_ticker:ticker,p_qty:qty});}
   catch(e){return toast(rpcErrorMessage(e));}
@@ -5728,10 +5737,10 @@ function renderFundDetail(fundId){
   }
 
   if(isManager&&f.status==='active'){
-    // JXI excluded for now -- fund trading still goes through the standard
-    // price-impact rpc_trade_buy/sell path, which the JXI branch bypasses
-    // entirely (see the migration), so it isn't wired up for funds yet.
-    const tradable=DB.companies.filter(c=>c.status==='listed'&&c.owner_id!==f.manager_id&&!c.is_index_fund);
+    // JXI/classroom indexes included -- rpc_fund_buy/sell/short/cover_short
+    // all have their own is_index_fund branch (basket-backed buy/sell,
+    // NAV-priced short/cover), same as the direct student trade RPCs.
+    const tradable=DB.companies.filter(c=>c.status==='listed'&&c.owner_id!==f.manager_id);
     html+=`<div class="card"><div class="section-title">Trade on behalf of the fund</div>
       <div class="ibox ibox-amber" style="margin-bottom:12px">Fund cash available: <strong>${fmt(f.cash)}</strong>. You cannot trade your own company's stock through this fund.</div>
       <div class="frow"><label class="flabel">Ticker</label><select id="fund-trade-ticker">${tradable.map(c=>`<option value="${c.ticker}">${c.ticker} — ${esc(c.name)} (${fmt(c.price)})</option>`).join('')}</select></div>
