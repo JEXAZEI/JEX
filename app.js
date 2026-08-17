@@ -16,7 +16,7 @@ const APP_VERSION = '1.0.0';
 // gets them through a scoped RPC instead (see rpc_resolve_login_identity,
 // rpc_google_session_match, rpc_admin_get_all_emails,
 // rpc_get_company_team_contacts).
-const JEX_USERS_SAFE_SELECT = 'id,name,username,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,auth_provider,auth_uid,created_at,classroom_id,email_notifications,is_test_account';
+const JEX_USERS_SAFE_SELECT = 'id,name,username,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,auth_provider,auth_uid,created_at,classroom_id,email_notifications,is_test_account,last_login_at,departed_at';
 const JEX_PENDING_SAFE_SELECT = 'id,name,role,sec_q,description,ts,created_at,classroom_id,username,auth_provider,email_verified,auth_uid';
 
 // Headers carry the CURRENT user's own Supabase Auth access token when one exists
@@ -187,7 +187,7 @@ async function hashPw(pw){
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
-  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],contactMessages:[],indexHistory:[],snapshots:[],clientErrors:[],
+  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],indexHistory:[],snapshots:[],clientErrors:[],retentionCandidates:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},circuit_cooldowns:{},session_started_at:null,jxi_open_value:null,budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
     weekly_schedule:{sun:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},mon:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},tue:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},wed:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},thu:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},fri:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},sat:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}}},
     weekly_active:false,weekly_override:false}};
@@ -374,7 +374,7 @@ async function loadAll(){
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
     activity,shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds,contactMessages,indexHistory,snapshots,clientErrors]=await Promise.all([
+    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds,indexHistory,snapshots,clientErrors,retentionCandidates]=await Promise.all([
     sb.get('jex_pending','order=created_at.asc&select='+JEX_PENDING_SAFE_SELECT),
     sb.get('jex_news','order=created_at.desc&limit=50'),
     sb.get('jex_ipo_applications','order=created_at.asc'),
@@ -405,13 +405,13 @@ async function loadAll(){
     sb.get('jex_company_members','order=created_at.asc'),
     sb.get('jex_founder_allocations','order=created_at.desc'),
     sb.get('jex_price_adjustments','order=created_at.desc&limit=50'),
-    // jex_flags/jex_bug_reports/jex_contact_messages: table-level SELECT is
-    // revoked for anon/authenticated entirely now (see the
-    // email-pii-exposure-fix migration) -- these three RPCs are the only
-    // way to read them, and only resolve to real data for the admin roles
-    // each one actually gates on. Any other caller gets a permission error
-    // here, which safeRpc quietly turns into an empty array -- exactly the
-    // "nothing to show" state those users should see anyway.
+    // jex_flags/jex_bug_reports: table-level SELECT is revoked for
+    // anon/authenticated entirely now (see the email-pii-exposure-fix
+    // migration) -- these RPCs are the only way to read them, and only
+    // resolve to real data for the admin roles each one actually gates on.
+    // Any other caller gets a permission error here, which safeRpc quietly
+    // turns into an empty array -- exactly the "nothing to show" state
+    // those users should see anyway.
     safeRpc('rpc_admin_list_flags').then(r=>r||[]),
     sb.get('jex_classrooms','order=created_at.asc'),
     sb.get('jex_stop_loss','status=eq.active&order=created_at.asc'),
@@ -419,18 +419,20 @@ async function loadAll(){
     sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
     safeRpc('rpc_admin_list_bug_reports').then(r=>r||[]),
     sb.get('jex_funds','order=created_at.asc'),
-    safeRpc('rpc_admin_list_contact_messages').then(r=>r||[]),
     sb.get('jex_index_history','order=created_at.asc&limit=500'),
     sb.get('jex_snapshots','order=created_at.desc&limit=50'),
-    // Same pattern as flags/bug_reports/contact_messages -- admin-only
-    // (see the client-error-logging migration).
+    // Same pattern as flags/bug_reports -- admin-only (see the
+    // client-error-logging migration).
     safeRpc('rpc_admin_list_client_errors',{p_limit:100}).then(r=>r||[]),
+    // Chairman/President only (see the data-retention migration) -- safeRpc
+    // resolves to null (turned into [] below) for every other role.
+    safeRpc('rpc_admin_list_retention_candidates').then(r=>r||[]),
   ]);
   Object.assign(DB,{pending,news,ipoApps,dilApps,
     trades,dividends,buybacks,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds,contactMessages,indexHistory,snapshots,clientErrors});
+    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds,indexHistory,snapshots,clientErrors,retentionCandidates});
   // Chairman/President/Treasurer/Compliance Officer only (see
   // rpc_admin_get_all_emails): merges real email addresses into the
   // already-loaded (email-less) DB.users/DB.pending rows. safeRpc resolves
@@ -456,6 +458,21 @@ async function loadAll(){
       const self=DB.users.find(u=>u.id===UI.userId);
       if(self){self.email=info.email;self.notification_email=info.notification_email;}
     }
+    // Fire-and-forget: records this as activity for the data-retention
+    // inactivity check (see the data-retention migration). Runs on every
+    // loadAll() -- a fresh login (via finishLogin) and a page reload that
+    // restores an existing session both go through here, so "12 months
+    // inactive" tracks real use, not just how often someone re-types a
+    // password. No-ops harmlessly for accounts with no real auth_uid yet.
+    safeRpc('rpc_touch_last_login');
+    // Fire-and-forget: flips any vote whose 24-hour window has passed from
+    // 'open' to 'closed' server-side (see the vote-deadline migration).
+    // isVoteOpen() already makes the UI behave correctly the instant a
+    // deadline passes regardless of this, but running the sweep here keeps
+    // jex_votes.status itself from staying stale indefinitely. Safe for any
+    // caller -- it only enforces an already-public, already-decided
+    // deadline, nothing it does depends on who's asking.
+    safeRpc('rpc_auto_close_expired_votes');
   }
   render(); // re-render with full data
 }
@@ -467,6 +484,13 @@ const get=id=>document.getElementById(id);
 function togglePw(id){const el=get(id);if(!el)return;el.type=el.type==='password'?'text':'password';const btn=el.parentElement?.querySelector('.pw-eye');if(btn)btn.textContent=el.type==='password'?'👁':'🙈';}
 const fmt=n=>'$'+Number(n).toFixed(2);
 const fmtChg=n=>(n>=0?'+':'')+Number(n).toFixed(2)+'%';
+function daysAgo(ts2){
+  if(!ts2)return'';
+  const d=Math.floor((Date.now()-new Date(ts2).getTime())/86400000);
+  if(d<1)return'today';
+  if(d===1)return'1 day ago';
+  return d+' days ago';
+}
 const norm=s=>(s||'').trim().toLowerCase();
 const validEmail=e=>e&&e.includes('@')&&e.includes('.');
 const normalizeUsername=v=>{v=(v||'').trim();if(v.startsWith('@'))v=v.slice(1);return v;};
@@ -707,8 +731,52 @@ function getPreMarketPrice(ticker){
   if(bestBid&&bestAsk)return Math.round((bestBid+bestAsk)/2*100)/100;
   return bestBid||bestAsk||null;
 }
-const shareholders=ticker=>DB.users.filter(u=>u.role==='student'&&(holdings(u)[ticker]||0)>0);
-const divTotal=(ticker,ps)=>shareholders(ticker).reduce((s,u)=>s+Math.round(((holdings(u)[ticker])||0)*ps*100)/100,0);
+const shareholders=ticker=>DB.users.filter(u=>['student','company'].includes(u.role)&&(holdings(u)[ticker]||0)>0);
+// Direct student/company holders + shares (see fundBuy/fundSell) a
+// student-run fund holds directly for its depositors + whatever's left
+// over once every known holder is accounted for, attributed to index
+// funds (JXI and classroom indices "buy a basket of constituents" server-
+// side -- see rpc_trade_buy's is_index_fund branch -- but nothing records
+// per-ticker how many shares any specific index fund holds, so this is a
+// best-effort aggregate: circulating minus every known holder). Shared by
+// the company page's Shareholders tab and its async "fresh data" refetch
+// so the two can't drift out of sync with each other again.
+function buildShareholderMap(tickers,userSource){
+  const map={};
+  const users=userSource||DB.users;
+  tickers.forEach(ticker=>{
+    users.filter(u2=>['student','company'].includes(u2.role)&&(holdings(u2)[ticker]||0)>0).forEach(u2=>{
+      if(!map[u2.id])map[u2.id]={name:u2.name,shares:{}};
+      map[u2.id].shares[ticker]=(holdings(u2)[ticker]||0);
+    });
+    (DB.funds||[]).forEach(f=>{
+      const q=(f.holdings||{})[ticker]||0;
+      if(q>0){
+        const key='fund_'+f.id;
+        if(!map[key])map[key]={name:f.name+' (fund)',shares:{}};
+        map[key].shares[ticker]=q;
+      }
+    });
+  });
+  tickers.forEach(ticker=>{
+    const co2=getCo(ticker);if(!co2)return;
+    const knownHeld=Object.values(map).reduce((s,sh)=>s+(sh.shares[ticker]||0),0);
+    const circulating=co2.shares-co2.shares_avail;
+    const indexHeld=circulating-knownHeld;
+    if(indexHeld>0){
+      const key='index_'+ticker;
+      if(!map[key])map[key]={name:'Index funds (JXI / classroom indices)',shares:{}};
+      map[key].shares[ticker]=indexHeld;
+    }
+  });
+  return map;
+}
+const divTotal=(ticker,ps)=>{
+  const direct=shareholders(ticker).reduce((s,u)=>s+Math.round(((holdings(u)[ticker])||0)*ps*100)/100,0);
+  const map=buildShareholderMap([ticker]);
+  const indirect=Object.entries(map).filter(([k])=>k.startsWith('fund_')||k.startsWith('index_')).reduce((s,[,sh])=>s+Math.round(((sh.shares[ticker])||0)*ps*100)/100,0);
+  return Math.round((direct+indirect)*100)/100;
+};
 const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);return Math.max(0.01,Math.round((dir==='buy'?co.price*(1+impact):co.price*(1-impact))*100)/100);};
 const isWatched=ticker=>{const u=cu();return u&&watchlist(u).includes(ticker);};
 const sharesBar=co=>{
@@ -1291,7 +1359,7 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports,newFunds,newContactMessages]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports,newFunds]=await Promise.all([
       // Was a client-supplied user_id=eq. filter -- not a real security
       // boundary since SELECT was table-wide open (see the
       // notification-privacy-fix migration). rpc_get_my_notifications
@@ -1310,7 +1378,6 @@ async function autoRefresh(){
       sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
       safeRpc('rpc_admin_list_bug_reports').then(r=>r||[]),
       sb.get('jex_funds','order=created_at.asc'),
-      safeRpc('rpc_admin_list_contact_messages').then(r=>r||[]),
     ]);
     const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
@@ -1325,7 +1392,6 @@ async function autoRefresh(){
     DB.divApprovals=newDivApprovals;
     DB.bugReports=newBugReports;
     DB.funds=newFunds;
-    DB.contactMessages=newContactMessages;
     // Chairman/President only (see loadAll) -- keeps newly-arrived pending
     // registrations' emails visible without a full reload; a no-op safeRpc
     // resolves to null for everyone else.
@@ -2829,7 +2895,7 @@ async function resetExchange(){
     DB.halts=[];DB.activity=[];DB.news=[];DB.announcements=[];
     DB.minutes=[];DB.flags=[];DB.pending=[];DB.ipoApps=[];DB.bugReports=[];
     DB.funds=DB.funds.filter(f=>getUser(f.manager_id)?.is_test_account);
-    DB.contactMessages=[];DB.indexHistory=[];
+    DB.indexHistory=[];
     DB.dilApps=[];DB.shareClasses=DB.shareClasses.filter(sc=>DB.companies.some(c=>c.ticker===sc.parent_ticker));DB.classApps=[];
     DB.founderAllocations=[];DB.companyMembers=[];
     DB.priceAdjustments=[];DB.priceAlerts=[];
@@ -3539,6 +3605,7 @@ async function removeUser(uid2){
   catch(e){return toast(rpcErrorMessage(e));}
   DB.users=DB.users.filter(x=>x.id!==uid2);
   DB.dividends.forEach(d=>{d.payouts=(d.payouts||[]).filter(p=>p.userId!==uid2);});
+  DB.retentionCandidates=(DB.retentionCandidates||[]).filter(x=>x.id!==uid2);
   toast(u.name+' removed');render();
 }
 async function removeCompany(uid2){
@@ -3555,6 +3622,7 @@ async function removeCompany(uid2){
   DB.users=DB.users.filter(x=>x.id!==uid2);
   DB.ipoApps=DB.ipoApps.filter(a=>a.user_id!==uid2);
   DB.dilApps=DB.dilApps.filter(d=>d.user_id!==uid2);
+  DB.retentionCandidates=(DB.retentionCandidates||[]).filter(x=>x.id!==uid2);
   toast(u.name+' removed');render();
 }
 async function removeShareClass(ticker){
@@ -3993,18 +4061,42 @@ async function reviewClassApp(id,approve){
 }
 
 // ── Votes ─────────────────────────────────────────────────
-async function postVote(parentTicker,question,optA,optB,closesAt){
+// Votes always close 24 hours after being posted -- previously "closing
+// date" was a free-text, purely cosmetic field ("e.g. Friday 3pm") with no
+// enforcement anywhere, so votes could and did stay "open" indefinitely
+// until someone remembered to click Close. isVoteOpen() is the single
+// source of truth for "can this still be voted on / does it still count as
+// open" everywhere in the UI; every v.status==='open' check that means
+// "is this vote live" goes through it instead of the raw status field, so
+// the 24-hour window is enforced the moment it passes rather than only
+// after the next manual close. (See rpc_auto_close_expired_votes in the
+// vote-deadline migration for the server-side sweep that eventually
+// catches up jex_votes.status itself.)
+function isVoteOpen(v){
+  if(v.status!=='open')return false;
+  if(!v.closes_at)return true;
+  // closes_at was, until this feature, a free-text "informational" note
+  // ("e.g. Friday 3pm") -- old votes can still have that garbage in the
+  // column rather than a real timestamp. new Date() on non-parseable text
+  // is NaN, and any comparison with NaN is false, which would silently
+  // treat those old votes as permanently expired. Fall back to "no real
+  // deadline" (same as null) instead, matching how they behaved before.
+  const t=new Date(v.closes_at).getTime();
+  return isNaN(t)||Date.now()<t;
+}
+async function postVote(parentTicker,question,optA,optB){
   if(!question||question.trim().length<5)return toast('Enter a question');
   if(!optA||!optB)return toast('Enter both options');
   const co=getCo(parentTicker);if(!co)return;
   const u=cu();
   if(!canManageCompany(co))return toast('Only this company\'s owner or founders can post a vote');
+  const closesAt=new Date(Date.now()+24*60*60*1000).toISOString();
   // Runs server-side (rpc_post_vote), re-checking the same owner-or-
   // founder rule above -- it was client-side only, so a raw POST could
   // impersonate any company's governance action, posting a fake vote
   // shown to every shareholder exactly like a real one.
   let v;
-  try{v=await sb.rpc('rpc_post_vote',{p_ticker:parentTicker,p_question:question.trim(),p_option_a:optA.trim(),p_option_b:optB.trim(),p_closes_at:closesAt||null});}
+  try{v=await sb.rpc('rpc_post_vote',{p_ticker:parentTicker,p_question:question.trim(),p_option_a:optA.trim(),p_option_b:optB.trim(),p_closes_at:closesAt});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.votes.push(v);
   await logActivity('vote',co.name+' posted vote: '+question.trim(),{ticker:parentTicker,userId:u.id,userName:u.name});
@@ -4050,8 +4142,7 @@ function postVoteForm(parentTicker){
   postVote(parentTicker,
     document.getElementById('vote-q')?.value,
     document.getElementById('vote-a')?.value,
-    document.getElementById('vote-b')?.value,
-    document.getElementById('vote-closes')?.value);
+    document.getElementById('vote-b')?.value);
 }
 async function deleteVote(voteId){
   const targetV=DB.votes.find(x=>x.id===voteId);if(!targetV)return;
@@ -4081,12 +4172,13 @@ function renderVoteCard(v,isOwner,isAdminUser){
   const u=cu();
   const myBallot=DB.ballots.find(b=>b.vote_id===v.id&&b.voter_id===u?.id);
   const myPower=u?getVotingPower(u.id,v.parent_ticker):0;
-  const canVote=!myBallot&&myPower>0&&v.status==='open'&&u?.role==='student';
+  const openNow=isVoteOpen(v);
+  const canVote=!myBallot&&myPower>0&&openNow&&u?.role==='student';
   return '<div class="news-item" style="margin-bottom:12px">'
     +'<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">'
     +'<div><div style="font-weight:500;font-size:14px;margin-bottom:2px">'+esc(v.question)+'</div>'
-    +'<div style="font-size:11px;color:var(--text2)">'+esc(v.company_name)+' · '+v.ts+(v.closes_at?' · closes '+v.closes_at:'')+'</div></div>'
-    +'<span class="badge '+(v.status==='open'?'b-green':'b-gray')+'">'+v.status+'</span></div>'
+    +'<div style="font-size:11px;color:var(--text2)">'+esc(v.company_name)+' · '+v.ts+(v.closes_at?' · '+(openNow?'closes ':'closed ')+new Date(v.closes_at).toLocaleString():'')+'</div></div>'
+    +'<span class="badge '+(openNow?'b-green':'b-gray')+'">'+(openNow?'open':'closed')+'</span></div>'
     // Results bars
     +'<div style="margin-bottom:10px">'
     +'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>'+esc(v.option_a)+'</span><span style="font-family:var(--mono)">'+res.powerA+' votes ('+res.pctA+'%)</span></div>'
@@ -4490,19 +4582,6 @@ function renderContactAdminModalHTML(){
     </div>
   </div>`;
 }
-async function resolveContactMessage(msgId){
-  const m=DB.contactMessages.find(x=>x.id===msgId);if(!m)return;
-  const u=cu();
-  // Runs server-side (rpc_admin_resolve_contact_message) -- this had NO
-  // check at all before.
-  let r;
-  try{r=await sb.rpc('rpc_admin_resolve_contact_message',{p_msg_id:msgId});}
-  catch(e){return toast(rpcErrorMessage(e));}
-  if(!r.resolved)return toast('This message was already resolved');
-  m.status='resolved';m.resolved_by=u.name;
-  toast('Message marked resolved');render();
-}
-
 // ═══════════════════════════════════════════════
 // RENDER: LOGIN
 // ═══════════════════════════════════════════════
@@ -4674,13 +4753,7 @@ function renderCompanyPage(parentTicker){
   const companyDivs=DB.dividends.filter(d=>d.ticker===parentTicker).reverse();
   const companyTrades=[...DB.trades].filter(t=>allTickers.includes(t.ticker)).reverse().slice(0,30);
   // Shareholders
-  const shareholderMap={};
-  allTickers.forEach(ticker=>{
-    DB.users.filter(u2=>u2.role==='student'&&(holdings(u2)[ticker]||0)>0).forEach(u2=>{
-      if(!shareholderMap[u2.id])shareholderMap[u2.id]={name:u2.name,shares:{}};
-      shareholderMap[u2.id].shares[ticker]=(holdings(u2)[ticker]||0);
-    });
-  });
+  const shareholderMap=buildShareholderMap(allTickers);
   const shareholders=Object.values(shareholderMap);
   const totalCirculating=allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares-c.shares_avail:0);},0);
 
@@ -4711,7 +4784,7 @@ function renderCompanyPage(parentTicker){
     <button class="tab ${tab==='trade'?'active':''}" onclick="UI.companyPageTab='trade';render()">${canTrade?'Trade':'Trade'}</button>
 
     ${co.is_index_fund?'':`<button class="tab ${tab==='news'?'active':''}" onclick="UI.companyPageTab='news';render()">News ${companyNews.length?'<span class="badge b-amber" style="margin-left:4px">'+companyNews.length+'</span>':''}</button>
-    <button class="tab ${tab==='votes'?'active':''}" onclick="UI.companyPageTab='votes';render()">Votes ${companyVotes.filter(v=>v.status==='open').length?'<span class="badge b-green" style="margin-left:4px">'+companyVotes.filter(v=>v.status==='open').length+'</span>':''}</button>`}
+    <button class="tab ${tab==='votes'?'active':''}" onclick="UI.companyPageTab='votes';render()">Votes ${companyVotes.filter(isVoteOpen).length?'<span class="badge b-green" style="margin-left:4px">'+companyVotes.filter(isVoteOpen).length+'</span>':''}</button>`}
     <button class="tab ${tab==='shareholders'?'active':''}" onclick="UI.companyPageTab='shareholders';render()">${co.is_index_fund?'Holders':'Shareholders'}</button>
     ${co.is_index_fund?'':`<button class="tab ${tab==='team'?'active':''}" onclick="UI.companyPageTab='team';render()">Team</button>
     <button class="tab ${tab==='financials'?'active':''}" onclick="UI.companyPageTab='financials';render()">Financials ${co.financials&&co.financials.length?'<span class="badge b-gray" style="margin-left:4px">'+co.financials.length+'</span>':''}</button>
@@ -4988,13 +5061,7 @@ function renderCompanyPage(parentTicker){
     // Also trigger async fresh fetch
     sb.get('jex_users','role=in.(student,company)&status=eq.approved&select='+JEX_USERS_SAFE_SELECT).then(freshUsers=>{
       freshUsers.forEach(fu=>{const local=getUser(fu.id);if(local)Object.assign(local,fu);else DB.users.push(fu);});
-      const freshMap={};
-      allTickers.forEach(t=>{
-        DB.users.filter(u2=>(u2.role==='student'||u2.role==='company')&&(u2.holdings&&u2.holdings[t]||0)>0).forEach(u2=>{
-          if(!freshMap[u2.id])freshMap[u2.id]={name:u2.name,shares:{}};
-          freshMap[u2.id].shares[t]=(u2.holdings&&u2.holdings[t]||0);
-        });
-      });
+      const freshMap=buildShareholderMap(allTickers);
       const loadingLabel=document.getElementById('shareholder-loading');if(loadingLabel)loadingLabel.remove();
       const el=document.getElementById('shareholder-table');if(!el)return;
       const freshSh=Object.values(freshMap);
@@ -5126,7 +5193,7 @@ function renderMarket(){
   const listed=getMarketListed(u);
   const visibleNews=DB.news.filter(n=>!isHiddenTestEntity(getCo(n.ticker)?.owner_id));
   const recentNews=visibleNews.slice(0,5);
-  const visibleVotes=DB.votes.filter(v=>v.status==='open'&&!isHiddenTestEntity(getCo(v.parent_ticker)?.owner_id));
+  const visibleVotes=DB.votes.filter(v=>isVoteOpen(v)&&!isHiddenTestEntity(getCo(v.parent_ticker)?.owner_id));
   return `${renderTickerBar()}
     ${renderIndexCard()}
     <div class="card"><div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
@@ -6103,13 +6170,12 @@ function renderCompanyVotesTab(co){
   const u=cu();
   const myVotes=DB.votes.filter(v=>v.parent_ticker===co.ticker);
   return '<div class="card"><div class="section-title">Post a shareholder vote</div>'
-    +'<div class="ibox ibox-purple">Students vote weighted by shares × votes-per-share across all your share classes.</div>'
+    +'<div class="ibox ibox-purple">Students vote weighted by shares × votes-per-share across all your share classes. Every vote closes automatically 24 hours after you post it.</div>'
     +'<div class="frow"><label class="flabel">Question</label><input type="text" id="vote-q" placeholder="e.g. Should we expand to renewable energy?"></div>'
     +'<div class="grid2" style="margin-bottom:12px">'
     +'<div class="frow" style="margin-bottom:0"><label class="flabel">Option A</label><input type="text" id="vote-a" placeholder="Yes" value="Yes"></div>'
     +'<div class="frow" style="margin-bottom:0"><label class="flabel">Option B</label><input type="text" id="vote-b" placeholder="No" value="No"></div>'
     +'</div>'
-    +'<div class="frow"><label class="flabel">Closing date/time (optional, informational)</label><input type="text" id="vote-closes" placeholder="e.g. Friday 3pm"></div>'
     +'<button class="btn btn-primary" onclick="postVoteForm(&quot;'+co.ticker+'&quot;)">Post vote</button>'
     +'</div>'
     +(myVotes.length?'<div class="section-title" style="margin-bottom:10px">Active & past votes</div>'+myVotes.map(v=>renderVoteCard(v,true,false)).join('')
@@ -6161,14 +6227,19 @@ function renderDivTab(co,myDivs){
   const owner=cu();
   const allT=getCompanyTickers(co.ticker);
   const totalCirc=allT.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares-c.shares_avail:0);},0);
-  // Fetch fresh holders async and populate
-  sb.get('jex_users','role=eq.student&status=eq.approved&select='+JEX_USERS_SAFE_SELECT).then(freshUsers=>{
+  // Fetch fresh holders async and populate. role=in.(student,company) --
+  // was role=eq.student only, so a company whose stock is held entirely by
+  // a fund or an index (JXI/classroom) instead of directly by students
+  // showed zero shareholders and hid the whole Pay a dividend form, even
+  // though real circulating shares (and real economic owners, just one
+  // layer removed) existed.
+  sb.get('jex_users','role=in.(student,company)&status=eq.approved&select='+JEX_USERS_SAFE_SELECT).then(freshUsers=>{
     freshUsers.forEach(fu=>{const local=getUser(fu.id);if(local)Object.assign(local,fu);else DB.users.push(fu);});
-    const freshSh=freshUsers.filter(s=>allT.some(t=>s.holdings&&(s.holdings[t]||0)>0));
-    const el=document.getElementById('div-sh-count');if(el)el.textContent=freshSh.length;
+    const freshMap=buildShareholderMap(allT);
+    const el=document.getElementById('div-sh-count');if(el)el.textContent=Object.keys(freshMap).length;
     const form=document.getElementById('div-form');
     if(form){
-      if(freshSh.length){
+      if(totalCirc>0){
         form.innerHTML=`<div class="frow"><label class="flabel">Dividend per share ($)</label><input type="number" id="div-ps" placeholder="e.g. 0.50" min="0.01" step="0.01" oninput="updateDivPrev('${co.ticker}')"></div><div id="div-prev"></div><div class="frow" style="margin-top:10px"><label class="flabel">Note to investors</label><input type="text" id="div-note" placeholder="e.g. Q1 earnings dividend"></div><button class="btn btn-success" onclick="issueDividend('${co.ticker}',get('div-ps')?.value,get('div-note')?.value)">Pay dividend now</button>`;
       } else {
         form.innerHTML='<div class="empty">No shareholders yet.</div>';
@@ -6184,12 +6255,15 @@ function renderDivTab(co,myDivs){
   </div>${myDivs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Per share</th><th>Total</th><th>Recipients</th><th>Note</th></tr></thead><tbody>${myDivs.map(d=>`<tr><td style="color:var(--text2)">${d.ts}</td><td style="font-family:var(--mono)">${fmt(d.per_share)}</td><td style="color:var(--green);font-family:var(--mono)">${fmt(d.total)}</td><td>${(d.payouts||[]).length}</td><td style="font-size:12px;color:var(--text2)">${esc(d.note)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
 }
 function updateDivPrev(ticker){const co=getCo(ticker);if(!co)return;const ps=parseFloat(get('div-ps')?.value)||0,p=get('div-prev');if(!p)return;if(ps<=0){p.innerHTML='';return;}
-  // Use fresh students from DB for preview (may be stale but better than nothing)
+  // Use fresh DB state for preview (may be stale but better than nothing).
+  // Total is computed the same way (student/company/fund/index holders)
+  // regardless of role -- this used to only count direct student holders,
+  // so a company held entirely through a fund or an index showed a $0
+  // preview even though a real payment was about to go out.
   const allT=getCompanyTickers(ticker);
-  const freshSh=DB.users.filter(u=>u.role==='student'&&allT.some(t=>u.holdings&&(u.holdings[t]||0)>0));
-  const sh=freshSh;
-  const total=sh.reduce((s,u)=>s+allT.reduce((ts,t)=>ts+Math.round(((u.holdings&&u.holdings[t])||0)*ps*100)/100,0),0);
-  const owner=cu(),ok=owner.cash>=total;p.innerHTML=`<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px"><div><div style="color:var(--text2);margin-bottom:2px">Shareholders</div><div style="font-weight:500">${sh.length}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Total</div><div style="color:var(--green);font-family:var(--mono)">${fmt(total)}</div></div><div><div style="color:var(--text2);margin-bottom:2px">After</div><div style="font-family:var(--mono);color:${ok?'var(--text)':'var(--red)'}">${fmt(owner.cash-total)}</div></div></div>${!ok?`<div style="color:var(--red);font-weight:500">Insufficient funds</div>`:''}</div>`;}
+  const holderCount=Object.keys(buildShareholderMap(allT)).length;
+  const total=allT.reduce((s,t)=>s+divTotal(t,ps),0);
+  const owner=cu(),ok=owner.cash>=total;p.innerHTML=`<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px"><div><div style="color:var(--text2);margin-bottom:2px">Shareholders</div><div style="font-weight:500">${holderCount}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Total</div><div style="color:var(--green);font-family:var(--mono)">${fmt(total)}</div></div><div><div style="color:var(--text2);margin-bottom:2px">After</div><div style="font-family:var(--mono);color:${ok?'var(--text)':'var(--red)'}">${fmt(owner.cash-total)}</div></div></div>${!ok?`<div style="color:var(--red);font-weight:500">Insufficient funds</div>`:''}</div>`;}
 function renderFinancialsHistory(financials){
   if(!financials||!financials.length)return'<div class="card"><div class="empty">No financial reports posted yet.</div></div>';
   return financials.map(f=>`<div class="card" style="margin-bottom:10px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div class="section-title" style="margin-bottom:0">${esc(f.period)}</div><span style="font-size:11px;color:var(--text2)">${f.ts}</span></div><div class="grid3" style="margin-bottom:8px"><div class="mcard"><div class="mlabel">Revenue</div><div class="mval" style="font-family:var(--mono)">${fmt(f.revenue)}</div></div><div class="mcard"><div class="mlabel">Profit</div><div class="mval" style="font-family:var(--mono);color:${f.profit>=0?'var(--green)':'var(--red)'}">${fmt(f.profit)}</div></div><div class="mcard"><div class="mlabel">Margin</div><div class="mval" style="font-family:var(--mono)">${f.revenue>0?Math.round(f.profit/f.revenue*100)+'%':'—'}</div></div></div><div style="font-size:13px;color:var(--text2)">${esc(f.summary)}</div></div>`).join('');
@@ -6270,17 +6344,21 @@ function renderAdmin(){
 
   const openFlags=(DB.flags||[]).filter(f=>f.status==='open').length;
   const openBugReports=(DB.bugReports||[]).filter(b=>b.status==='open').length;
-  const openMessages=(DB.contactMessages||[]).filter(m=>m.status==='open').length;
-  const messagesTabEntry=['messages',openMessages?'Messages <span class="badge b-red">'+openMessages+'</span>':'Messages'];
   const errorCount=(DB.clientErrors||[]).length;
   const clientErrorsTabEntry=['client_errors',errorCount?'Errors <span class="badge b-red">'+errorCount+'</span>':'Errors'];
+  const retentionCount=(DB.retentionCandidates||[]).length;
+  const retentionTabEntry=['retention',retentionCount?'Data retention <span class="badge b-amber">'+retentionCount+'</span>':'Data retention'];
   // President can only see: session, balances, passwords
   const presidentTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
-  const secretaryTabs=[['announcements','Announcements'],['minutes','Minutes'],['notices','Official notices'],['shareholders','Shareholder registry'],['votes_all','Vote oversight'],['news','News'],messagesTabEntry];
-  const sectreTabs=u.role==='secretary'?secretaryTabs:[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log'],messagesTabEntry];
-  const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags'],messagesTabEntry,clientErrorsTabEntry];
-  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['bug_reports',openBugReports?'Bug reports <span class="badge b-red">'+openBugReports+'</span>':'Bug reports'],messagesTabEntry,['snapshots','Snapshots'],clientErrorsTabEntry];
-  const treasurerTabs=[['balances','Balances'],['cashflow','Cash flow'],['dividends_audit','Dividend audit'],['price_adj_log','Price adjustments'],['budget_warnings','Budget warnings'],['activity','Activity log'],messagesTabEntry,clientErrorsTabEntry];
+  const secretaryTabs=[['announcements','Announcements'],['minutes','Minutes'],['notices','Official notices'],['shareholders','Shareholder registry'],['votes_all','Vote oversight'],['news','News']];
+  const sectreTabs=u.role==='secretary'?secretaryTabs:[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
+  const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags'],clientErrorsTabEntry];
+  // retentionTabEntry is only ever added to chairmanTabs below -- Chairman
+  // and President are the only roles that reach chairmanTabs (see the
+  // `tabs=` line), so this keeps the data-retention panel restricted to
+  // exactly those two roles without a separate permission check here.
+  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['bug_reports',openBugReports?'Bug reports <span class="badge b-red">'+openBugReports+'</span>':'Bug reports'],retentionTabEntry,['snapshots','Snapshots'],clientErrorsTabEntry];
+  const treasurerTabs=[['balances','Balances'],['cashflow','Cash flow'],['dividends_audit','Dividend audit'],['price_adj_log','Price adjustments'],['budget_warnings','Budget warnings'],['activity','Activity log'],clientErrorsTabEntry];
   const tabs=(chair||isPresident(u))?chairmanTabs:u.role==='compliance_officer'?complianceTabs:u.role==='treasurer'?treasurerTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
   if(!allowedTabs.includes(UI.adminTab))UI.adminTab=tabs[0][0];
@@ -6297,7 +6375,7 @@ function renderAdmin(){
   :UI.adminTab==='flags'?renderAdminFlags()
   :UI.adminTab==='bug_reports'?renderAdminBugReports()
   :UI.adminTab==='client_errors'?renderAdminClientErrors()
-  :UI.adminTab==='messages'?renderAdminMessages()
+  :UI.adminTab==='retention'?renderAdminRetention()
   :UI.adminTab==='snapshots'?renderSnapshotTab()
   :UI.adminTab==='minutes'?renderAdminMinutes()
   :UI.adminTab==='notices'?renderAdminOfficialNotices()
@@ -6606,7 +6684,7 @@ function renderAdminUsers(students,companies,officers,leadership){
     <div class="ibox ibox-blue" style="margin-bottom:14px">Select an operation, enter an amount, and click Apply to update a student's cash balance. Subtract will not go below $0.</div>
     ${students.length?students.map(u=>`<div class="app-row">
       <div class="app-info">
-        <div class="app-name">${esc(u.name)}</div>
+        <div class="app-name">${esc(u.name)}${u.departed_at?' <span class="badge b-amber">left the program '+esc(daysAgo(u.departed_at))+'</span>':''}</div>
         <div class="app-meta">${esc(u.email)} &nbsp;|&nbsp; Cash: <strong style="font-family:var(--mono);color:var(--green)">${fmt(u.cash)}</strong> &nbsp;|&nbsp; Net worth: <strong style="font-family:var(--mono)">${fmt(nw(u))}</strong></div>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
@@ -6618,6 +6696,7 @@ function renderAdminUsers(students,companies,officers,leadership){
         <input type="number" id="cash-amt-${u.id}" placeholder="Amount" min="0" step="0.01" style="width:100px;font-size:12px;padding:5px 8px">
         <button class="btn btn-sm btn-primary" onclick="adjustCash('${u.id}')">Apply</button>
         <button class="btn btn-sm ${u.is_test_account?'btn-warning':''}" title="Test accounts stay usable during Dev Mode" onclick="setTestAccount('${u.id}',${!u.is_test_account})">${u.is_test_account?'🛠️ Test account':'Mark as test account'}</button>
+        <button class="btn btn-sm" title="Starts the Privacy Policy's 60-day deletion window" onclick="${u.departed_at?`unmarkDeparted('${u.id}')`:`markDeparted('${u.id}')`}">${u.departed_at?'Undo — still enrolled':'Mark left the program'}</button>
         <button class="btn btn-sm btn-danger" onclick="removeUser('${u.id}')">Remove</button>
       </div>
     </div>`).join(''):`<div class="empty">No students yet</div>`}
@@ -6626,7 +6705,7 @@ function renderAdminUsers(students,companies,officers,leadership){
     <div class="ibox ibox-blue">Adjust a company account&#39;s cash balance directly.</div>
     ${companies.map(u=>`<div class="app-row">
       <div class="app-info">
-        <div class="app-name">${esc(u.name)}</div>
+        <div class="app-name">${esc(u.name)}${u.departed_at?' <span class="badge b-amber">left the program '+esc(daysAgo(u.departed_at))+'</span>':''}</div>
         <div class="app-meta">${esc(u.email)} &nbsp;|&nbsp; Cash: <strong style="font-family:var(--mono);color:var(--green)">${fmt(u.cash)}</strong></div>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
@@ -6638,6 +6717,7 @@ function renderAdminUsers(students,companies,officers,leadership){
         <input type="number" id="co-cash-amt-${u.id}" placeholder="Amount" min="0" step="0.01" style="width:100px;font-size:12px;padding:5px 8px">
         <button class="btn btn-sm btn-primary" onclick="adjustCompanyCash('${u.id}')">Apply</button>
         <button class="btn btn-sm ${u.is_test_account?'btn-warning':''}" title="Test accounts stay usable during Dev Mode" onclick="setTestAccount('${u.id}',${!u.is_test_account})">${u.is_test_account?'🛠️ Test account':'Mark as test account'}</button>
+        <button class="btn btn-sm" title="Starts the Privacy Policy's 60-day deletion window" onclick="${u.departed_at?`unmarkDeparted('${u.id}')`:`markDeparted('${u.id}')`}">${u.departed_at?'Undo — still enrolled':'Mark left the program'}</button>
         <button class="btn btn-sm btn-danger" onclick="removeCompany('${u.id}')">Remove</button>
       </div>
     </div>`).join('')}
@@ -6839,40 +6919,51 @@ async function clearClientErrors(){
   DB.clientErrors=[];
   toast('Error log cleared');render();
 }
-function renderAdminMessages(){
-  const openMsgs=(DB.contactMessages||[]).filter(m=>m.status==='open');
-  const closedMsgs=(DB.contactMessages||[]).filter(m=>m.status!=='open');
-  let html=`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
-    Open messages ${openMsgs.length?`<span class="badge b-red">${openMsgs.length}</span>`:''}
-  </div>`;
-  if(!openMsgs.length){
-    html+='<div class="empty">No open messages</div>';
-  } else {
-    openMsgs.forEach(m=>{
-      html+=`<div style="padding:12px;border:1px solid var(--red);border-radius:var(--radius);margin-bottom:10px;background:rgba(255,77,106,0.04)">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-          <span style="font-size:16px">✉️</span>
-          <strong>${esc(m.from_name)}</strong>
-          <a href="mailto:${esc(m.from_email)}" class="legal-link" style="font-size:12px">${esc(m.from_email)}</a>
-          <span style="font-size:11px;color:var(--text2);margin-left:auto">${esc(m.ts)}</span>
-        </div>
-        <div style="font-size:13px;color:var(--text2);margin-bottom:10px;white-space:pre-wrap">${esc(m.message)}</div>
-        <button class="btn btn-sm btn-success" onclick="resolveContactMessage('${m.id}')">✓ Mark resolved</button>
-      </div>`;
-    });
+
+// ═══════════════════════════════════════════════
+// DATA RETENTION (Privacy Policy §"How long we keep it")
+// Chairman/President only -- see the data-retention migration.
+// ═══════════════════════════════════════════════
+async function refreshRetentionCandidates(){
+  DB.retentionCandidates=await safeRpc('rpc_admin_list_retention_candidates')||[];
+}
+async function markDeparted(uid2){
+  const u=getUser(uid2);if(!u)return;
+  if(!confirm(u.name+' has left the program? This starts the 60-day window before their account becomes eligible for deletion under the Privacy Policy — it does not delete anything now.'))return;
+  let r;
+  try{r=await sb.rpc('rpc_admin_mark_departed',{p_target_id:uid2});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  if(r&&r.departed_at)u.departed_at=r.departed_at;
+  await refreshRetentionCandidates();
+  toast(u.name+' marked as having left the program');render();
+}
+async function unmarkDeparted(uid2){
+  const u=getUser(uid2);if(!u)return;
+  try{await sb.rpc('rpc_admin_unmark_departed',{p_target_id:uid2});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.departed_at=null;
+  await refreshRetentionCandidates();
+  toast(u.name+' is still enrolled');render();
+}
+function renderAdminRetention(){
+  const rows=DB.retentionCandidates||[];
+  let html=`<div class="ibox ibox-blue" style="margin-bottom:14px">Accounts show up here once they're actually eligible for deletion under the Privacy Policy — 60+ days after being marked as having left the program (see the Users tab), or 12+ months since their last login with no departure marked. Nothing is ever deleted automatically; review each one and click Delete when you're ready.</div>`;
+  if(!rows.length){
+    html+='<div class="card"><div class="empty">No accounts currently eligible for deletion</div></div>';
+    return html;
   }
-  html+='</div>';
-  if(closedMsgs.length){
-    html+=`<div class="card"><div class="section-title">Resolved messages</div>
-      <table><thead><tr><th>From</th><th>Message</th><th>Resolved by</th><th>Time</th></tr></thead>
-      <tbody>${closedMsgs.map(m=>`<tr>
-        <td style="font-weight:500">${esc(m.from_name)}</td>
-        <td style="font-size:12px;color:var(--text2);max-width:300px">${esc(m.message)}</td>
-        <td style="font-size:12px;color:var(--text2)">${esc(m.resolved_by)||'—'}</td>
-        <td style="font-size:12px;color:var(--text2)">${esc(m.ts)||''}</td>
-      </tr>`).join('')}</tbody></table>
-    </div>`;
-  }
+  html+=`<div class="card"><table><thead><tr><th>Name</th><th>Role</th><th>Reason</th><th>Since</th><th></th></tr></thead><tbody>
+    ${rows.map(r=>`<tr>
+      <td style="font-weight:500">${esc(r.name)}</td>
+      <td>${esc(r.role)}</td>
+      <td>${r.reason==='departed'?'Left the program':'Inactive 12+ months'}</td>
+      <td style="font-size:12px;color:var(--text2)">${esc(daysAgo(r.reason==='departed'?r.departed_at:r.last_login_at))}</td>
+      <td style="display:flex;gap:6px;justify-content:flex-end">
+        ${r.reason==='departed'?`<button class="btn btn-sm" onclick="unmarkDeparted('${r.id}')">Not leaving after all</button>`:''}
+        <button class="btn btn-sm btn-danger" onclick="${r.role==='company'?`removeCompany('${r.id}')`:`removeUser('${r.id}')`}">Delete now</button>
+      </td>
+    </tr>`).join('')}
+  </tbody></table></div>`;
   return html;
 }
 function submitFlagForm(){
@@ -7412,8 +7503,8 @@ function renderAdminShareholderRegistry(){
   </div>`;
 }
 function renderAdminVoteOversight(){
-  const open=DB.votes.filter(v=>v.status==='open');
-  const closed=DB.votes.filter(v=>v.status!=='open');
+  const open=DB.votes.filter(isVoteOpen);
+  const closed=DB.votes.filter(v=>!isVoteOpen(v));
   function voteCard(v){
     const co=getCo(v.parent_ticker)||DB.companies.find(c=>c.ticker===v.parent_ticker);
     const ballots=DB.ballots.filter(b=>b.vote_id===v.id);
@@ -7423,7 +7514,7 @@ function renderAdminVoteOversight(){
     return`<div style="padding:12px;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div><strong>${v.question}</strong> <span class="badge b-gray" style="font-family:var(--mono)">${v.parent_ticker}</span></div>
-        <span class="badge ${v.status==='open'?'b-green':'b-gray'}">${v.status}</span>
+        <span class="badge ${isVoteOpen(v)?'b-green':'b-gray'}">${isVoteOpen(v)?'open':'closed'}</span>
       </div>
       <div style="font-size:12px;color:var(--text2);margin-bottom:8px">${co?.name||v.parent_ticker} · ${ballots.length} voters · ${v.ts}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
