@@ -51,13 +51,34 @@ async function sbAuthToken(){
   }catch(e){}
   return SUPABASE_ANON_KEY;
 }
+// A request that gets no response at all (a hung connection -- seen in the
+// field as an OPTIONS preflight that sent fine but never got a reply back)
+// leaves a bare fetch() awaiting forever, with nothing downstream able to
+// recover: loadAll() runs before checkGoogleSession() even starts, so its
+// own 15s timeout around checkGoogleSessionInner() never gets a chance to
+// fire if the hang happens here instead. Every sb.* method funnels through
+// this so any single stuck request anywhere in the app fails fast with a
+// clear error instead of leaving the page stuck on a loading screen
+// indefinitely.
+async function fetchWithTimeout(url,options,timeoutMs=20000){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+    return await fetch(url,{...options,signal:controller.signal});
+  }catch(e){
+    if(e.name==='AbortError')throw new Error('Request timed out — check your connection and try again');
+    throw e;
+  }finally{
+    clearTimeout(timer);
+  }
+}
 const sb = {
   url:(t,q='')=>SUPABASE_URL+'/rest/v1/'+t+(q?'?'+q:''),
   async headers(extra){
     const token=await sbAuthToken();
     return {'Content-Type':'application/json','apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+token,...(extra||{})};
   },
-  async get(t,q=''){const h=await this.headers({'Accept':'application/json'});const r=await fetch(this.url(t,q),{headers:h});if(!r.ok)throw new Error(await r.text());const d=await r.json();
+  async get(t,q=''){const h=await this.headers({'Accept':'application/json'});const r=await fetchWithTimeout(this.url(t,q),{headers:h});if(!r.ok)throw new Error(await r.text());const d=await r.json();
     // Defense in depth: the database itself now revokes SELECT on these columns
     // (see the password-hash-fix migration), so this is a no-op in practice —
     // kept in case that revoke is ever missing on a given project.
@@ -68,10 +89,10 @@ const sb = {
   // select=* does — same failure mode, so those two tables ask for no
   // representation at all. Nothing reads the POST/PATCH response body for
   // either table anyway (checked every call site before making this change).
-  async post(t,d){const minimal=t==='jex_users'||t==='jex_pending';const h=await this.headers({'Prefer':'return='+(minimal?'minimal':'representation')});const r=await fetch(this.url(t),{method:'POST',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return minimal?null:r.json();},
-  async patch(t,q,d){const minimal=t==='jex_users'||t==='jex_pending';const h=await this.headers({'Prefer':'return='+(minimal?'minimal':'representation')});const r=await fetch(this.url(t,q),{method:'PATCH',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return minimal?null:r.json();},
-  async del(t,q){const h=await this.headers();const r=await fetch(this.url(t,q),{method:'DELETE',headers:h});if(!r.ok)throw new Error(await r.text());},
-  async rpc(fn,params){const h=await this.headers({'Accept':'application/json'});const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:h,body:JSON.stringify(params||{})});if(!r.ok)throw new Error(await r.text());
+  async post(t,d){const minimal=t==='jex_users'||t==='jex_pending';const h=await this.headers({'Prefer':'return='+(minimal?'minimal':'representation')});const r=await fetchWithTimeout(this.url(t),{method:'POST',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return minimal?null:r.json();},
+  async patch(t,q,d){const minimal=t==='jex_users'||t==='jex_pending';const h=await this.headers({'Prefer':'return='+(minimal?'minimal':'representation')});const r=await fetchWithTimeout(this.url(t,q),{method:'PATCH',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return minimal?null:r.json();},
+  async del(t,q){const h=await this.headers();const r=await fetchWithTimeout(this.url(t,q),{method:'DELETE',headers:h});if(!r.ok)throw new Error(await r.text());},
+  async rpc(fn,params){const h=await this.headers({'Accept':'application/json'});const r=await fetchWithTimeout(SUPABASE_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:h,body:JSON.stringify(params||{})});if(!r.ok)throw new Error(await r.text());
     // `returns void` RPCs (e.g. rpc_admin_clear_client_errors) come back as an
     // empty 204 body -- r.json() on an empty body throws "Unexpected end of
     // JSON input", so read as text first and only parse if there's anything there.
