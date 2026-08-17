@@ -5062,6 +5062,19 @@ function renderCompanyPage(parentTicker){
       const stock=getCo(ticker);if(!stock)return;
       const meta=getClassMeta(ticker);
       const chartId='cp-chart-'+ticker;
+      // An index fund with zero live constituents has nothing real behind
+      // its price -- price_history can still hold points from before its
+      // last constituent delisted (e.g. Dev Mode testing companies that
+      // got hidden again once Dev Mode ended), and drawing those as a
+      // normal-looking chart implies live market movement that isn't
+      // actually happening right now. Matches renderIndexCard()'s own
+      // "if(!idx.constituents.length)return''" guard on the Market page.
+      if(stock.is_index_fund&&!computeIndex(stock.index_classroom_id||null).constituents.length){
+        html+='<div><div style="margin-bottom:4px">'
+          +'<div style="font-size:12px;font-weight:500;font-family:var(--mono);color:var(--text2)">'+ticker+'</div></div>'
+          +'<div class="ibox ibox-blue" style="font-size:12px">No live constituents right now — the chart will start once companies are listed.</div></div>';
+        return;
+      }
       html+='<div><div style="margin-bottom:4px">'
         +'<div style="font-size:12px;font-weight:500;font-family:var(--mono);color:var(--text2)">'+ticker+(meta?' Class '+meta.class:'')+'</div></div>'
         +buildChartIntervalBar(chartId,stock)
