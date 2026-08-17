@@ -1365,9 +1365,17 @@ function userIsFillingForm(){
   const formTabs=['mystock','register','settings'];
   if(formTabs.includes(UI.navTab))return true;
   if(UI.loginView==='register')return true;
-  // Check for any filled-in inputs (user has started typing something)
+  // Check for any filled-in inputs the user actually typed into -- compared
+  // against defaultValue (the rendered value="..." attribute, which JS
+  // setting .value later never changes), not just "is it non-empty".
+  // Trade-quantity fields (t-qty/cp-qty and friends) always render
+  // pre-filled with a sensible default like value="1" -- checking for any
+  // non-empty value at all meant this returned true the entire time any
+  // trade panel was simply open on screen, silently blocking every
+  // realtime/auto-refresh re-render for as long as it stayed open, with
+  // nothing the user had actually typed being at risk of being lost.
   const inputs=document.querySelectorAll('input[type="text"],input[type="number"],input[type="email"],input[type="password"],textarea');
-  for(const inp of inputs){if(inp.value&&inp.value.trim().length>0)return true;}
+  for(const inp of inputs){if(inp.value&&inp.value.trim().length>0&&inp.value!==inp.defaultValue)return true;}
   return false;
 }
 async function autoRefresh(){
