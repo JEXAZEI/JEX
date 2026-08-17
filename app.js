@@ -605,16 +605,15 @@ function computeIndex(classroomId){
   // otherwise, same visibility rule as everywhere else test entities show
   // up.
   //
-  // Only a GENUINE additional share class (meta.parent_ticker !== ticker,
-  // e.g. ACME.B) is excluded here to avoid double-counting the same
-  // company twice. A company can also "convert" its own base ticker into
-  // an explicit Class A (convertBaseClass(), e.g. to set an asymmetric
-  // votes-per-share structure) -- that row is self-referential
-  // (parent_ticker === ticker), and previously matched this same
-  // getClassMeta() check, silently dropping the company's one real listing
-  // out of JXI's basket entirely.
-  const isDerivativeClass=c=>{const meta=getClassMeta(c.ticker);return!!meta&&meta.parent_ticker!==c.ticker;};
-  const listed=DB.companies.filter(c=>c.status==='listed'&&!isDerivativeClass(c)&&!c.is_index_fund&&!isHiddenTestEntity(c.owner_id)
+  // Every listed ticker counts as its own constituent -- base class and any
+  // additional share classes (e.g. ACME.B) alike -- except a share class
+  // marked restricted (whitelist-only access, same flag canAccessTicker()
+  // gates trading on). A company with multiple listed classes does
+  // therefore get proportionally more weight in this equal-weighted
+  // average than a single-class company; that's the intended tradeoff of
+  // counting every class rather than one entry per company.
+  const isRestrictedClass=c=>{const meta=getClassMeta(c.ticker);return!!meta&&meta.restricted;};
+  const listed=DB.companies.filter(c=>c.status==='listed'&&!isRestrictedClass(c)&&!c.is_index_fund&&!isHiddenTestEntity(c.owner_id)
     &&(classroomId==null||getUser(c.owner_id)?.classroom_id===classroomId));
   if(!listed.length)return{value:1000,change:0,constituents:[]};
   const constituents=listed.map(c=>{
