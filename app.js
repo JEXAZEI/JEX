@@ -758,7 +758,7 @@ function getPreMarketPrice(ticker){
   if(bestBid&&bestAsk)return Math.round((bestBid+bestAsk)/2*100)/100;
   return bestBid||bestAsk||null;
 }
-const shareholders=ticker=>DB.users.filter(u=>['student','company'].includes(u.role)&&(holdings(u)[ticker]||0)>0);
+const shareholders=ticker=>DB.users.filter(u=>['student','company'].includes(u.role)&&(holdings(u)[ticker]||0)>0&&!isHiddenTestEntity(u.id));
 // Direct student/company holders + shares (see fundBuy/fundSell) a
 // student-run fund holds directly for its depositors + whatever's left
 // over once every known holder is accounted for, attributed to index
@@ -772,11 +772,12 @@ function buildShareholderMap(tickers,userSource){
   const map={};
   const users=userSource||DB.users;
   tickers.forEach(ticker=>{
-    users.filter(u2=>['student','company'].includes(u2.role)&&(holdings(u2)[ticker]||0)>0).forEach(u2=>{
+    users.filter(u2=>['student','company'].includes(u2.role)&&(holdings(u2)[ticker]||0)>0&&!isHiddenTestEntity(u2.id)).forEach(u2=>{
       if(!map[u2.id])map[u2.id]={name:u2.name,shares:{}};
       map[u2.id].shares[ticker]=(holdings(u2)[ticker]||0);
     });
     (DB.funds||[]).forEach(f=>{
+      if(isHiddenTestEntity(f.manager_id))return;
       const q=(f.holdings||{})[ticker]||0;
       if(q>0){
         const key='fund_'+f.id;
