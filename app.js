@@ -400,9 +400,9 @@ async function loadAll(){
 
   // ── Phase 2: everything else in parallel ───────────────
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
-    activity,shareClasses,classApps,votes,ballots,notifications,
+    shareClasses,classApps,votes,ballots,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds,indexHistory,snapshots,clientErrors,retentionCandidates]=await Promise.all([
+    priceAdjustments,classrooms,stopLossOrders,minutes,divApprovals,funds,indexHistory,snapshots]=await Promise.all([
     sb.get('jex_pending','order=created_at.asc&select='+JEX_PENDING_SAFE_SELECT),
     sb.get('jex_news','order=created_at.desc&limit=50'),
     sb.get('jex_ipo_applications','order=created_at.asc'),
@@ -411,56 +411,57 @@ async function loadAll(){
     sb.get('jex_dividends','order=created_at.asc'),
     sb.get('jex_buybacks','order=created_at.asc'),
     sb.get('jex_limit_orders','order=created_at.asc'),
-    // jex_activity SELECT is revoked entirely now (see the
-    // activity-log-privacy-fix migration) -- table-wide SELECT was wide
-    // open with no role check, leaking the same flag-reason/bug-report/
-    // price-adjustment content already locked down for jex_notifications/
-    // jex_flags to every user's browser memory regardless of role.
-    safeRpc('rpc_admin_list_activity',{p_limit:100}).then(r=>r||[]),
     sb.get('jex_share_classes','order=created_at.asc'),
     sb.get('jex_class_applications','order=created_at.asc'),
     sb.get('jex_votes','order=created_at.desc'),
     sb.get('jex_vote_ballots','order=created_at.asc'),
-    // jex_notifications SELECT is revoked entirely now (see the
-    // notification-privacy-fix migration) -- table-wide SELECT was
-    // wide open, no user_id filter enforced server-side, leaking every
-    // user's notification content (flag/bug-report/contact-admin
-    // summaries, price alert targets, trading activity) to anyone.
-    // safeRpc resolves to null pre-login, turned into [] below.
-    safeRpc('rpc_get_my_notifications',{p_limit:50}).then(r=>r||[]),
     sb.get('jex_price_alerts','order=created_at.asc'),
     sb.get('jex_nw_history','order=created_at.desc&limit=200'),
     sb.get('jex_company_members','order=created_at.asc'),
     sb.get('jex_founder_allocations','order=created_at.desc'),
     sb.get('jex_price_adjustments','order=created_at.desc&limit=50'),
-    // jex_flags/jex_bug_reports: table-level SELECT is revoked for
-    // anon/authenticated entirely now (see the email-pii-exposure-fix
-    // migration) -- these RPCs are the only way to read them, and only
-    // resolve to real data for the admin roles each one actually gates on.
-    // Any other caller gets a permission error here, which safeRpc quietly
-    // turns into an empty array -- exactly the "nothing to show" state
-    // those users should see anyway.
-    safeRpc('rpc_admin_list_flags').then(r=>r||[]),
     sb.get('jex_classrooms','order=created_at.asc'),
     sb.get('jex_stop_loss','status=eq.active&order=created_at.asc'),
     sb.get('jex_minutes','order=created_at.desc&limit=50'),
     sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
-    safeRpc('rpc_admin_list_bug_reports').then(r=>r||[]),
     sb.get('jex_funds','order=created_at.asc'),
     sb.get('jex_index_history','order=created_at.asc&limit=500'),
     sb.get('jex_snapshots','order=created_at.desc&limit=50'),
-    // Same pattern as flags/bug_reports -- admin-only (see the
-    // client-error-logging migration).
-    safeRpc('rpc_admin_list_client_errors',{p_limit:100}).then(r=>r||[]),
-    // Chairman/President only (see the data-retention migration) -- safeRpc
-    // resolves to null (turned into [] below) for every other role.
-    safeRpc('rpc_admin_list_retention_candidates').then(r=>r||[]),
   ]);
   Object.assign(DB,{pending,news,ipoApps,dilApps,
-    trades,dividends,buybacks,limitOrders,activity,
-    shareClasses,classApps,votes,ballots,notifications,
+    trades,dividends,buybacks,limitOrders,
+    shareClasses,classApps,votes,ballots,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds,indexHistory,snapshots,clientErrors,retentionCandidates});
+    priceAdjustments,minutes,divApprovals,stopLossOrders,classrooms,funds,indexHistory,snapshots});
+  await loadPrivateData();
+}
+// Everything here is either role-gated (only resolves to real data once
+// auth.uid()/role is known -- a permission error before that just becomes
+// [] via safeRpc) or scoped to the current user specifically. Split out of
+// loadAll() so finishLogin() can refresh just this after signing in,
+// instead of redoing the ~24 public fetches above that loadAll() already
+// ran seconds earlier at page load and can't have changed in the
+// meantime -- that redundant full refetch was the actual cause of the
+// page taking a while to become usable right after logging in.
+async function loadPrivateData(){
+  // jex_activity/jex_notifications/jex_flags/jex_bug_reports/
+  // jex_client_errors: table-wide SELECT is revoked entirely for all of
+  // these (see the activity-log-privacy-fix, notification-privacy-fix,
+  // email-pii-exposure-fix, and client-error-logging migrations) -- these
+  // RPCs are the only way to read them, and only resolve to real data for
+  // the specific role/user each one gates on. Any other caller gets a
+  // permission error, which safeRpc quietly turns into an empty array --
+  // exactly the "nothing to show" state those users should see anyway.
+  const [activity,notifications,flags,bugReports,clientErrors,retentionCandidates]=await Promise.all([
+    safeRpc('rpc_admin_list_activity',{p_limit:100}).then(r=>r||[]),
+    safeRpc('rpc_get_my_notifications',{p_limit:50}).then(r=>r||[]),
+    safeRpc('rpc_admin_list_flags').then(r=>r||[]),
+    safeRpc('rpc_admin_list_bug_reports').then(r=>r||[]),
+    safeRpc('rpc_admin_list_client_errors',{p_limit:100}).then(r=>r||[]),
+    // Chairman/President only (see the data-retention migration).
+    safeRpc('rpc_admin_list_retention_candidates').then(r=>r||[]),
+  ]);
+  Object.assign(DB,{activity,notifications,flags,bugReports,clientErrors,retentionCandidates});
   // Chairman/President/Treasurer/Compliance Officer only (see
   // rpc_admin_get_all_emails): merges real email addresses into the
   // already-loaded (email-less) DB.users/DB.pending rows. safeRpc resolves
@@ -474,12 +475,6 @@ async function loadAll(){
     DB.users.forEach(u=>{if(uMap.has(u.id))u.email=uMap.get(u.id);});
     DB.pending.forEach(p=>{if(pMap.has(p.id))p.email=pMap.get(p.id);});
   }
-  // The bulk fetch above just overwrote DB.users wholesale, including
-  // whatever richer row (with email) a just-completed login/Google-match
-  // RPC had merged in for the CURRENT user before calling loadAll() --
-  // finishLogin() sets UI.userId before this runs, so it's already known
-  // here. Re-merges it back in rather than leaving self email blank until
-  // the next full page reload.
   if(UI.userId){
     const info=await safeRpc('rpc_get_own_contact_info');
     if(info){
@@ -502,7 +497,7 @@ async function loadAll(){
     // deadline, nothing it does depends on who's asking.
     safeRpc('rpc_auto_close_expired_votes');
   }
-  render(); // re-render with full data
+  render();
 }
 
 // ═══════════════════════════════════════════════
@@ -1849,7 +1844,7 @@ function switchLoginTab(role){UI.loginTab=role;UI.loginError=null;render();}
 function finishLogin(u){
   UI.userId=u.id;const r=u.role;UI.navTab=isAdmin(u)?'admin':r==='company'?'mystock':'market';UI.loginView='select';UI.loginError=null;UI.loginUsername='';
   try{localStorage.setItem(SESSION_KEY,u.id);}catch(e){}
-  subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();return loadAll();
+  subscribeRealtime();if(typeof Notification!=='undefined'&&Notification.permission==='default')requestPushPermission();render();return loadPrivateData();
 }
 async function loginByForm(){
   const username=(get('login-username')?.value||'').trim();
