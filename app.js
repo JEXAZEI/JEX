@@ -1445,9 +1445,15 @@ let _lastRefresh=0;
 function userIsFillingForm(){
   const active=document.activeElement;
   if(active&&['INPUT','TEXTAREA','SELECT'].includes(active.tagName))return 'an input is currently focused ('+active.id+')';
-  // Also skip if on a form-heavy tab
-  const formTabs=['mystock','register','settings'];
-  if(formTabs.includes(UI.navTab))return 'on a form-heavy tab (UI.navTab='+UI.navTab+')';
+  // A blanket block on 'mystock'/'settings' used to sit here too, on top of
+  // the two checks below -- but both of those already cover real
+  // unsaved-input protection across the ENTIRE page (a focused field, or
+  // any field anywhere with genuinely-typed content), so the tab-level
+  // block added no real protection while actively costing something real:
+  // a company account sitting on its own My Stock page (exactly where
+  // someone waits for the market to open) never saw a live session
+  // open/close update, or anything else, for as long as they stayed on
+  // that tab with nothing even being filled in.
   // Only relevant pre-login -- UI.loginView is leftover state from the
   // login/register screen with no guaranteed reset on every login path
   // (e.g. checkGoogleSessionInner's "existing session" branch never
