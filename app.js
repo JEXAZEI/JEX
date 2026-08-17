@@ -1848,9 +1848,9 @@ async function loginByForm(){
   // on the legacy path and just can't trade until an admin migrates it by hand).
   if(supaAuth&&!u.auth_uid&&u.email){
     try{
-      let authUid=null;
+      let authUid=null,freshSession=null;
       const{data,error}=await supaAuth.auth.signUp({email:u.email,password:pw});
-      if(!error&&data&&data.user)authUid=data.user.id;
+      if(!error&&data&&data.user){authUid=data.user.id;freshSession=data.session;}
       else{
         // supabase-js resolves with {error} here instead of throwing, so the
         // signUp rejection reason was previously discarded silently the
@@ -1862,9 +1862,21 @@ async function loginByForm(){
         // didn't finish backfilling auth_uid (e.g. the PATCH below raced or
         // failed) — try signing into it before giving up.
         const signInRes=await supaAuth.auth.signInWithPassword({email:u.email,password:pw});
-        if(!signInRes.error&&signInRes.data&&signInRes.data.session)authUid=signInRes.data.session.user.id;
+        if(!signInRes.error&&signInRes.data&&signInRes.data.session){authUid=signInRes.data.session.user.id;freshSession=signInRes.data.session;}
         else if(signInRes.error)console.warn('legacy account auth migration: signInWithPassword fallback also failed:',signInRes.error.message||signInRes.error);
       }
+      // _authTokenCache only updates via the onAuthStateChange listener
+      // (see its definition above), which fires asynchronously in response
+      // to the session signUp/signInWithPassword just established -- not
+      // guaranteed to have already run by the time execution gets here, one
+      // line after the await that created it. rpc_link_own_auth_uid below
+      // was consistently losing that race: it ran with the still-stale
+      // (pre-login, anonymous) cached token, so its own auth.uid() check
+      // saw no session and rejected with "Not authenticated" -- even though
+      // sign-up/sign-in had just genuinely succeeded. Pre-warming the cache
+      // directly from the response's own session data, instead of waiting
+      // for the listener to catch up, is what actually closes that race.
+      if(freshSession&&freshSession.access_token)_authTokenCache={ready:true,token:freshSession.access_token};
       // Runs server-side (rpc_link_own_auth_uid) -- same JWT-email check as
       // the Google backfill above, now backed by the fresh Supabase Auth
       // session signUp/signInWithPassword just established for this email.
