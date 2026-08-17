@@ -1554,8 +1554,21 @@ async function checkGoogleSession(){
   // those happened, the "Connecting..." splash (still up this whole time,
   // see render()) would otherwise just sit there forever with no
   // explanation and no way out, which is exactly the "stuck loading" bug.
+  // checkGoogleSessionInner() itself can hang indefinitely rather than
+  // ever resolving or throwing -- e.g. supabase-js's session-refresh
+  // locking getting stuck (a known cross-browser issue, Firefox
+  // especially). A hang there means this whole function never reaches the
+  // finally block below, so the "stuck loading, no explanation" case this
+  // function exists to prevent was still reachable. Racing against a
+  // timeout guarantees SOME outcome even if the inner call never settles
+  // on its own.
   let resolved=false;
-  try{resolved=await checkGoogleSessionInner();}
+  try{
+    resolved=await Promise.race([
+      checkGoogleSessionInner(),
+      new Promise(r=>setTimeout(()=>r(false),15000)),
+    ]);
+  }
   finally{
     _oauthReturnActive=false;
     if(wasOauthReturn&&!resolved)googleSignInFailed();
