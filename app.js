@@ -285,6 +285,12 @@ function subscribeRealtime(){
 }
 
 function handleRealtimeUpdate(table,event,newRow,oldRow){
+  // The one remaining gap in realtime's visibility: everything up through
+  // the channel join being confirmed was already logged, but a
+  // postgres_changes event actually arriving here (or not) was silent
+  // either way -- needed to tell "events aren't arriving at all" apart
+  // from "they arrive but something after this point doesn't apply them."
+  console.log('JEX Realtime: received',event,'on',table,UI.userId?'':'(ignored -- not logged in)');
   if(!UI.userId)return;
   const wasRendering=false;
   switch(table){
