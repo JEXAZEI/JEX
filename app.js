@@ -465,6 +465,14 @@ async function loadAll(){
     // inactive" tracks real use, not just how often someone re-types a
     // password. No-ops harmlessly for accounts with no real auth_uid yet.
     safeRpc('rpc_touch_last_login');
+    // Fire-and-forget: flips any vote whose 24-hour window has passed from
+    // 'open' to 'closed' server-side (see the vote-deadline migration).
+    // isVoteOpen() already makes the UI behave correctly the instant a
+    // deadline passes regardless of this, but running the sweep here keeps
+    // jex_votes.status itself from staying stale indefinitely. Safe for any
+    // caller -- it only enforces an already-public, already-decided
+    // deadline, nothing it does depends on who's asking.
+    safeRpc('rpc_auto_close_expired_votes');
   }
   render(); // re-render with full data
 }
@@ -723,8 +731,52 @@ function getPreMarketPrice(ticker){
   if(bestBid&&bestAsk)return Math.round((bestBid+bestAsk)/2*100)/100;
   return bestBid||bestAsk||null;
 }
-const shareholders=ticker=>DB.users.filter(u=>u.role==='student'&&(holdings(u)[ticker]||0)>0);
-const divTotal=(ticker,ps)=>shareholders(ticker).reduce((s,u)=>s+Math.round(((holdings(u)[ticker])||0)*ps*100)/100,0);
+const shareholders=ticker=>DB.users.filter(u=>['student','company'].includes(u.role)&&(holdings(u)[ticker]||0)>0);
+// Direct student/company holders + shares (see fundBuy/fundSell) a
+// student-run fund holds directly for its depositors + whatever's left
+// over once every known holder is accounted for, attributed to index
+// funds (JXI and classroom indices "buy a basket of constituents" server-
+// side -- see rpc_trade_buy's is_index_fund branch -- but nothing records
+// per-ticker how many shares any specific index fund holds, so this is a
+// best-effort aggregate: circulating minus every known holder). Shared by
+// the company page's Shareholders tab and its async "fresh data" refetch
+// so the two can't drift out of sync with each other again.
+function buildShareholderMap(tickers,userSource){
+  const map={};
+  const users=userSource||DB.users;
+  tickers.forEach(ticker=>{
+    users.filter(u2=>['student','company'].includes(u2.role)&&(holdings(u2)[ticker]||0)>0).forEach(u2=>{
+      if(!map[u2.id])map[u2.id]={name:u2.name,shares:{}};
+      map[u2.id].shares[ticker]=(holdings(u2)[ticker]||0);
+    });
+    (DB.funds||[]).forEach(f=>{
+      const q=(f.holdings||{})[ticker]||0;
+      if(q>0){
+        const key='fund_'+f.id;
+        if(!map[key])map[key]={name:f.name+' (fund)',shares:{}};
+        map[key].shares[ticker]=q;
+      }
+    });
+  });
+  tickers.forEach(ticker=>{
+    const co2=getCo(ticker);if(!co2)return;
+    const knownHeld=Object.values(map).reduce((s,sh)=>s+(sh.shares[ticker]||0),0);
+    const circulating=co2.shares-co2.shares_avail;
+    const indexHeld=circulating-knownHeld;
+    if(indexHeld>0){
+      const key='index_'+ticker;
+      if(!map[key])map[key]={name:'Index funds (JXI / classroom indices)',shares:{}};
+      map[key].shares[ticker]=indexHeld;
+    }
+  });
+  return map;
+}
+const divTotal=(ticker,ps)=>{
+  const direct=shareholders(ticker).reduce((s,u)=>s+Math.round(((holdings(u)[ticker])||0)*ps*100)/100,0);
+  const map=buildShareholderMap([ticker]);
+  const indirect=Object.entries(map).filter(([k])=>k.startsWith('fund_')||k.startsWith('index_')).reduce((s,[,sh])=>s+Math.round(((sh.shares[ticker])||0)*ps*100)/100,0);
+  return Math.round((direct+indirect)*100)/100;
+};
 const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);return Math.max(0.01,Math.round((dir==='buy'?co.price*(1+impact):co.price*(1-impact))*100)/100);};
 const isWatched=ticker=>{const u=cu();return u&&watchlist(u).includes(ticker);};
 const sharesBar=co=>{
@@ -4009,18 +4061,31 @@ async function reviewClassApp(id,approve){
 }
 
 // ── Votes ─────────────────────────────────────────────────
-async function postVote(parentTicker,question,optA,optB,closesAt){
+// Votes always close 24 hours after being posted -- previously "closing
+// date" was a free-text, purely cosmetic field ("e.g. Friday 3pm") with no
+// enforcement anywhere, so votes could and did stay "open" indefinitely
+// until someone remembered to click Close. isVoteOpen() is the single
+// source of truth for "can this still be voted on / does it still count as
+// open" everywhere in the UI; every v.status==='open' check that means
+// "is this vote live" goes through it instead of the raw status field, so
+// the 24-hour window is enforced the moment it passes rather than only
+// after the next manual close. (See rpc_auto_close_expired_votes in the
+// vote-deadline migration for the server-side sweep that eventually
+// catches up jex_votes.status itself.)
+function isVoteOpen(v){return v.status==='open'&&(!v.closes_at||Date.now()<new Date(v.closes_at).getTime());}
+async function postVote(parentTicker,question,optA,optB){
   if(!question||question.trim().length<5)return toast('Enter a question');
   if(!optA||!optB)return toast('Enter both options');
   const co=getCo(parentTicker);if(!co)return;
   const u=cu();
   if(!canManageCompany(co))return toast('Only this company\'s owner or founders can post a vote');
+  const closesAt=new Date(Date.now()+24*60*60*1000).toISOString();
   // Runs server-side (rpc_post_vote), re-checking the same owner-or-
   // founder rule above -- it was client-side only, so a raw POST could
   // impersonate any company's governance action, posting a fake vote
   // shown to every shareholder exactly like a real one.
   let v;
-  try{v=await sb.rpc('rpc_post_vote',{p_ticker:parentTicker,p_question:question.trim(),p_option_a:optA.trim(),p_option_b:optB.trim(),p_closes_at:closesAt||null});}
+  try{v=await sb.rpc('rpc_post_vote',{p_ticker:parentTicker,p_question:question.trim(),p_option_a:optA.trim(),p_option_b:optB.trim(),p_closes_at:closesAt});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.votes.push(v);
   await logActivity('vote',co.name+' posted vote: '+question.trim(),{ticker:parentTicker,userId:u.id,userName:u.name});
@@ -4066,8 +4131,7 @@ function postVoteForm(parentTicker){
   postVote(parentTicker,
     document.getElementById('vote-q')?.value,
     document.getElementById('vote-a')?.value,
-    document.getElementById('vote-b')?.value,
-    document.getElementById('vote-closes')?.value);
+    document.getElementById('vote-b')?.value);
 }
 async function deleteVote(voteId){
   const targetV=DB.votes.find(x=>x.id===voteId);if(!targetV)return;
@@ -4097,12 +4161,13 @@ function renderVoteCard(v,isOwner,isAdminUser){
   const u=cu();
   const myBallot=DB.ballots.find(b=>b.vote_id===v.id&&b.voter_id===u?.id);
   const myPower=u?getVotingPower(u.id,v.parent_ticker):0;
-  const canVote=!myBallot&&myPower>0&&v.status==='open'&&u?.role==='student';
+  const openNow=isVoteOpen(v);
+  const canVote=!myBallot&&myPower>0&&openNow&&u?.role==='student';
   return '<div class="news-item" style="margin-bottom:12px">'
     +'<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">'
     +'<div><div style="font-weight:500;font-size:14px;margin-bottom:2px">'+esc(v.question)+'</div>'
-    +'<div style="font-size:11px;color:var(--text2)">'+esc(v.company_name)+' · '+v.ts+(v.closes_at?' · closes '+v.closes_at:'')+'</div></div>'
-    +'<span class="badge '+(v.status==='open'?'b-green':'b-gray')+'">'+v.status+'</span></div>'
+    +'<div style="font-size:11px;color:var(--text2)">'+esc(v.company_name)+' · '+v.ts+(v.closes_at?' · '+(openNow?'closes ':'closed ')+new Date(v.closes_at).toLocaleString():'')+'</div></div>'
+    +'<span class="badge '+(openNow?'b-green':'b-gray')+'">'+(openNow?'open':'closed')+'</span></div>'
     // Results bars
     +'<div style="margin-bottom:10px">'
     +'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>'+esc(v.option_a)+'</span><span style="font-family:var(--mono)">'+res.powerA+' votes ('+res.pctA+'%)</span></div>'
@@ -4677,13 +4742,7 @@ function renderCompanyPage(parentTicker){
   const companyDivs=DB.dividends.filter(d=>d.ticker===parentTicker).reverse();
   const companyTrades=[...DB.trades].filter(t=>allTickers.includes(t.ticker)).reverse().slice(0,30);
   // Shareholders
-  const shareholderMap={};
-  allTickers.forEach(ticker=>{
-    DB.users.filter(u2=>u2.role==='student'&&(holdings(u2)[ticker]||0)>0).forEach(u2=>{
-      if(!shareholderMap[u2.id])shareholderMap[u2.id]={name:u2.name,shares:{}};
-      shareholderMap[u2.id].shares[ticker]=(holdings(u2)[ticker]||0);
-    });
-  });
+  const shareholderMap=buildShareholderMap(allTickers);
   const shareholders=Object.values(shareholderMap);
   const totalCirculating=allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares-c.shares_avail:0);},0);
 
@@ -4714,7 +4773,7 @@ function renderCompanyPage(parentTicker){
     <button class="tab ${tab==='trade'?'active':''}" onclick="UI.companyPageTab='trade';render()">${canTrade?'Trade':'Trade'}</button>
 
     ${co.is_index_fund?'':`<button class="tab ${tab==='news'?'active':''}" onclick="UI.companyPageTab='news';render()">News ${companyNews.length?'<span class="badge b-amber" style="margin-left:4px">'+companyNews.length+'</span>':''}</button>
-    <button class="tab ${tab==='votes'?'active':''}" onclick="UI.companyPageTab='votes';render()">Votes ${companyVotes.filter(v=>v.status==='open').length?'<span class="badge b-green" style="margin-left:4px">'+companyVotes.filter(v=>v.status==='open').length+'</span>':''}</button>`}
+    <button class="tab ${tab==='votes'?'active':''}" onclick="UI.companyPageTab='votes';render()">Votes ${companyVotes.filter(isVoteOpen).length?'<span class="badge b-green" style="margin-left:4px">'+companyVotes.filter(isVoteOpen).length+'</span>':''}</button>`}
     <button class="tab ${tab==='shareholders'?'active':''}" onclick="UI.companyPageTab='shareholders';render()">${co.is_index_fund?'Holders':'Shareholders'}</button>
     ${co.is_index_fund?'':`<button class="tab ${tab==='team'?'active':''}" onclick="UI.companyPageTab='team';render()">Team</button>
     <button class="tab ${tab==='financials'?'active':''}" onclick="UI.companyPageTab='financials';render()">Financials ${co.financials&&co.financials.length?'<span class="badge b-gray" style="margin-left:4px">'+co.financials.length+'</span>':''}</button>
@@ -4991,13 +5050,7 @@ function renderCompanyPage(parentTicker){
     // Also trigger async fresh fetch
     sb.get('jex_users','role=in.(student,company)&status=eq.approved&select='+JEX_USERS_SAFE_SELECT).then(freshUsers=>{
       freshUsers.forEach(fu=>{const local=getUser(fu.id);if(local)Object.assign(local,fu);else DB.users.push(fu);});
-      const freshMap={};
-      allTickers.forEach(t=>{
-        DB.users.filter(u2=>(u2.role==='student'||u2.role==='company')&&(u2.holdings&&u2.holdings[t]||0)>0).forEach(u2=>{
-          if(!freshMap[u2.id])freshMap[u2.id]={name:u2.name,shares:{}};
-          freshMap[u2.id].shares[t]=(u2.holdings&&u2.holdings[t]||0);
-        });
-      });
+      const freshMap=buildShareholderMap(allTickers);
       const loadingLabel=document.getElementById('shareholder-loading');if(loadingLabel)loadingLabel.remove();
       const el=document.getElementById('shareholder-table');if(!el)return;
       const freshSh=Object.values(freshMap);
@@ -5129,7 +5182,7 @@ function renderMarket(){
   const listed=getMarketListed(u);
   const visibleNews=DB.news.filter(n=>!isHiddenTestEntity(getCo(n.ticker)?.owner_id));
   const recentNews=visibleNews.slice(0,5);
-  const visibleVotes=DB.votes.filter(v=>v.status==='open'&&!isHiddenTestEntity(getCo(v.parent_ticker)?.owner_id));
+  const visibleVotes=DB.votes.filter(v=>isVoteOpen(v)&&!isHiddenTestEntity(getCo(v.parent_ticker)?.owner_id));
   return `${renderTickerBar()}
     ${renderIndexCard()}
     <div class="card"><div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
@@ -6106,13 +6159,12 @@ function renderCompanyVotesTab(co){
   const u=cu();
   const myVotes=DB.votes.filter(v=>v.parent_ticker===co.ticker);
   return '<div class="card"><div class="section-title">Post a shareholder vote</div>'
-    +'<div class="ibox ibox-purple">Students vote weighted by shares × votes-per-share across all your share classes.</div>'
+    +'<div class="ibox ibox-purple">Students vote weighted by shares × votes-per-share across all your share classes. Every vote closes automatically 24 hours after you post it.</div>'
     +'<div class="frow"><label class="flabel">Question</label><input type="text" id="vote-q" placeholder="e.g. Should we expand to renewable energy?"></div>'
     +'<div class="grid2" style="margin-bottom:12px">'
     +'<div class="frow" style="margin-bottom:0"><label class="flabel">Option A</label><input type="text" id="vote-a" placeholder="Yes" value="Yes"></div>'
     +'<div class="frow" style="margin-bottom:0"><label class="flabel">Option B</label><input type="text" id="vote-b" placeholder="No" value="No"></div>'
     +'</div>'
-    +'<div class="frow"><label class="flabel">Closing date/time (optional, informational)</label><input type="text" id="vote-closes" placeholder="e.g. Friday 3pm"></div>'
     +'<button class="btn btn-primary" onclick="postVoteForm(&quot;'+co.ticker+'&quot;)">Post vote</button>'
     +'</div>'
     +(myVotes.length?'<div class="section-title" style="margin-bottom:10px">Active & past votes</div>'+myVotes.map(v=>renderVoteCard(v,true,false)).join('')
@@ -6164,14 +6216,19 @@ function renderDivTab(co,myDivs){
   const owner=cu();
   const allT=getCompanyTickers(co.ticker);
   const totalCirc=allT.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares-c.shares_avail:0);},0);
-  // Fetch fresh holders async and populate
-  sb.get('jex_users','role=eq.student&status=eq.approved&select='+JEX_USERS_SAFE_SELECT).then(freshUsers=>{
+  // Fetch fresh holders async and populate. role=in.(student,company) --
+  // was role=eq.student only, so a company whose stock is held entirely by
+  // a fund or an index (JXI/classroom) instead of directly by students
+  // showed zero shareholders and hid the whole Pay a dividend form, even
+  // though real circulating shares (and real economic owners, just one
+  // layer removed) existed.
+  sb.get('jex_users','role=in.(student,company)&status=eq.approved&select='+JEX_USERS_SAFE_SELECT).then(freshUsers=>{
     freshUsers.forEach(fu=>{const local=getUser(fu.id);if(local)Object.assign(local,fu);else DB.users.push(fu);});
-    const freshSh=freshUsers.filter(s=>allT.some(t=>s.holdings&&(s.holdings[t]||0)>0));
-    const el=document.getElementById('div-sh-count');if(el)el.textContent=freshSh.length;
+    const freshMap=buildShareholderMap(allT);
+    const el=document.getElementById('div-sh-count');if(el)el.textContent=Object.keys(freshMap).length;
     const form=document.getElementById('div-form');
     if(form){
-      if(freshSh.length){
+      if(totalCirc>0){
         form.innerHTML=`<div class="frow"><label class="flabel">Dividend per share ($)</label><input type="number" id="div-ps" placeholder="e.g. 0.50" min="0.01" step="0.01" oninput="updateDivPrev('${co.ticker}')"></div><div id="div-prev"></div><div class="frow" style="margin-top:10px"><label class="flabel">Note to investors</label><input type="text" id="div-note" placeholder="e.g. Q1 earnings dividend"></div><button class="btn btn-success" onclick="issueDividend('${co.ticker}',get('div-ps')?.value,get('div-note')?.value)">Pay dividend now</button>`;
       } else {
         form.innerHTML='<div class="empty">No shareholders yet.</div>';
@@ -6187,12 +6244,15 @@ function renderDivTab(co,myDivs){
   </div>${myDivs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Per share</th><th>Total</th><th>Recipients</th><th>Note</th></tr></thead><tbody>${myDivs.map(d=>`<tr><td style="color:var(--text2)">${d.ts}</td><td style="font-family:var(--mono)">${fmt(d.per_share)}</td><td style="color:var(--green);font-family:var(--mono)">${fmt(d.total)}</td><td>${(d.payouts||[]).length}</td><td style="font-size:12px;color:var(--text2)">${esc(d.note)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
 }
 function updateDivPrev(ticker){const co=getCo(ticker);if(!co)return;const ps=parseFloat(get('div-ps')?.value)||0,p=get('div-prev');if(!p)return;if(ps<=0){p.innerHTML='';return;}
-  // Use fresh students from DB for preview (may be stale but better than nothing)
+  // Use fresh DB state for preview (may be stale but better than nothing).
+  // Total is computed the same way (student/company/fund/index holders)
+  // regardless of role -- this used to only count direct student holders,
+  // so a company held entirely through a fund or an index showed a $0
+  // preview even though a real payment was about to go out.
   const allT=getCompanyTickers(ticker);
-  const freshSh=DB.users.filter(u=>u.role==='student'&&allT.some(t=>u.holdings&&(u.holdings[t]||0)>0));
-  const sh=freshSh;
-  const total=sh.reduce((s,u)=>s+allT.reduce((ts,t)=>ts+Math.round(((u.holdings&&u.holdings[t])||0)*ps*100)/100,0),0);
-  const owner=cu(),ok=owner.cash>=total;p.innerHTML=`<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px"><div><div style="color:var(--text2);margin-bottom:2px">Shareholders</div><div style="font-weight:500">${sh.length}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Total</div><div style="color:var(--green);font-family:var(--mono)">${fmt(total)}</div></div><div><div style="color:var(--text2);margin-bottom:2px">After</div><div style="font-family:var(--mono);color:${ok?'var(--text)':'var(--red)'}">${fmt(owner.cash-total)}</div></div></div>${!ok?`<div style="color:var(--red);font-weight:500">Insufficient funds</div>`:''}</div>`;}
+  const holderCount=Object.keys(buildShareholderMap(allT)).length;
+  const total=allT.reduce((s,t)=>s+divTotal(t,ps),0);
+  const owner=cu(),ok=owner.cash>=total;p.innerHTML=`<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px"><div><div style="color:var(--text2);margin-bottom:2px">Shareholders</div><div style="font-weight:500">${holderCount}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Total</div><div style="color:var(--green);font-family:var(--mono)">${fmt(total)}</div></div><div><div style="color:var(--text2);margin-bottom:2px">After</div><div style="font-family:var(--mono);color:${ok?'var(--text)':'var(--red)'}">${fmt(owner.cash-total)}</div></div></div>${!ok?`<div style="color:var(--red);font-weight:500">Insufficient funds</div>`:''}</div>`;}
 function renderFinancialsHistory(financials){
   if(!financials||!financials.length)return'<div class="card"><div class="empty">No financial reports posted yet.</div></div>';
   return financials.map(f=>`<div class="card" style="margin-bottom:10px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div class="section-title" style="margin-bottom:0">${esc(f.period)}</div><span style="font-size:11px;color:var(--text2)">${f.ts}</span></div><div class="grid3" style="margin-bottom:8px"><div class="mcard"><div class="mlabel">Revenue</div><div class="mval" style="font-family:var(--mono)">${fmt(f.revenue)}</div></div><div class="mcard"><div class="mlabel">Profit</div><div class="mval" style="font-family:var(--mono);color:${f.profit>=0?'var(--green)':'var(--red)'}">${fmt(f.profit)}</div></div><div class="mcard"><div class="mlabel">Margin</div><div class="mval" style="font-family:var(--mono)">${f.revenue>0?Math.round(f.profit/f.revenue*100)+'%':'—'}</div></div></div><div style="font-size:13px;color:var(--text2)">${esc(f.summary)}</div></div>`).join('');
@@ -7432,8 +7492,8 @@ function renderAdminShareholderRegistry(){
   </div>`;
 }
 function renderAdminVoteOversight(){
-  const open=DB.votes.filter(v=>v.status==='open');
-  const closed=DB.votes.filter(v=>v.status!=='open');
+  const open=DB.votes.filter(isVoteOpen);
+  const closed=DB.votes.filter(v=>!isVoteOpen(v));
   function voteCard(v){
     const co=getCo(v.parent_ticker)||DB.companies.find(c=>c.ticker===v.parent_ticker);
     const ballots=DB.ballots.filter(b=>b.vote_id===v.id);
@@ -7443,7 +7503,7 @@ function renderAdminVoteOversight(){
     return`<div style="padding:12px;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div><strong>${v.question}</strong> <span class="badge b-gray" style="font-family:var(--mono)">${v.parent_ticker}</span></div>
-        <span class="badge ${v.status==='open'?'b-green':'b-gray'}">${v.status}</span>
+        <span class="badge ${isVoteOpen(v)?'b-green':'b-gray'}">${isVoteOpen(v)?'open':'closed'}</span>
       </div>
       <div style="font-size:12px;color:var(--text2);margin-bottom:8px">${co?.name||v.parent_ticker} · ${ballots.length} voters · ${v.ts}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
