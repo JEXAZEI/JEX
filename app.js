@@ -412,12 +412,17 @@ const pageHref=k=>k==='market'?'index.html':k+'.html';
 // still works unchanged.
 async function batchedAll(factories,batchSize){
   const results=[];
+  const totalBatches=Math.ceil(factories.length/batchSize);
   for(let i=0;i<factories.length;i+=batchSize){
+    const batchNum=i/batchSize+1;
+    console.log('JEX boot: loadAll batch',batchNum,'of',totalBatches,'starting');
     results.push(...await Promise.all(factories.slice(i,i+batchSize).map(f=>f())));
+    console.log('JEX boot: loadAll batch',batchNum,'of',totalBatches,'done');
   }
   return results;
 }
 async function loadAll(){
+  console.log('JEX boot: loadAll phase 1 starting');
   // ── Phase 1: critical data needed to render login ──────
   const [users,session,companies,announcements,halts]=await Promise.all([
     sb.get('jex_users','order=created_at.asc&select='+JEX_USERS_SAFE_SELECT),
@@ -435,6 +440,7 @@ async function loadAll(){
   SHEETS_URL=DB.session.sheets_url||null;
   if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
   render(); // render login screen immediately with phase 1 data
+  console.log('JEX boot: loadAll phase 1 done, phase 2 starting');
 
   // ── Phase 2: everything else in parallel ───────────────
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
@@ -471,7 +477,9 @@ async function loadAll(){
     shareClasses,classApps,votes,ballots,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
     priceAdjustments,minutes,divApprovals,stopLossOrders,classrooms,funds,indexHistory,snapshots});
+  console.log('JEX boot: loadAll phase 2 done, loadPrivateData starting');
   await loadPrivateData();
+  console.log('JEX boot: loadPrivateData done');
 }
 // Everything here is either role-gated (only resolves to real data once
 // auth.uid()/role is known -- a permission error before that just becomes
@@ -1595,14 +1603,16 @@ async function checkGoogleSession(){
   // function exists to prevent was still reachable. Racing against a
   // timeout guarantees SOME outcome even if the inner call never settles
   // on its own.
+  console.log('JEX boot: checkGoogleSession starting (wasOauthReturn='+wasOauthReturn+')');
   let resolved=false;
   try{
     resolved=await Promise.race([
       checkGoogleSessionInner(),
-      new Promise(r=>setTimeout(()=>r(false),15000)),
+      new Promise(r=>setTimeout(()=>{console.log('JEX boot: checkGoogleSessionInner hit its 15s timeout');r(false);},15000)),
     ]);
   }
   finally{
+    console.log('JEX boot: checkGoogleSession done (resolved='+resolved+')');
     _oauthReturnActive=false;
     if(wasOauthReturn&&!resolved)googleSignInFailed();
   }
@@ -1629,8 +1639,10 @@ function googleSignInFailed(){
 // return (see checkGoogleSession() above).
 async function checkGoogleSessionInner(){
   let session=null;
+  console.log('JEX boot: checkGoogleSessionInner calling supaAuth.auth.getSession()');
   try{
     const res=await supaAuth.auth.getSession();
+    console.log('JEX boot: supaAuth.auth.getSession() returned, session present =',!!(res&&res.data&&res.data.session));
     session=res&&res.data&&res.data.session;
     // Right after landing back from Google's consent screen, supabase-js can
     // still be finishing the exchange of the URL's auth code into a real
@@ -8100,8 +8112,22 @@ async function boot(){
     if(savedId){
       UI.userId=savedId; // will be validated after users load
     }
-    await loadAll();
-    await checkGoogleSession();
+    // Each individual sb.* request already times out on its own (see
+    // fetchWithTimeout, 20s), but loadAll() makes dozens of them across
+    // several sequential batches -- if the underlying connection is bad
+    // enough that several of those each hit their own timeout in turn, the
+    // individually-reasonable 20s ceilings can still stack into a minute or
+    // more with the user just staring at the "Connecting..." splash the
+    // entire time (every render() call during this stretch shows the same
+    // splash regardless of which phase is actually running -- see render()
+    // -- so there's no way to tell it's making any progress at all). This
+    // outer race guarantees SOME visible outcome -- success or the
+    // Connection Failed screen's Retry button -- within a bounded total
+    // time, however badly the underlying requests are behaving.
+    await Promise.race([
+      (async()=>{await loadAll();await checkGoogleSession();})(),
+      new Promise((_,reject)=>setTimeout(()=>reject(new Error('Loading timed out — check your connection and try again')),30000)),
+    ]);
     // Validate saved session after load
     if(UI.userId){
       const u=DB.users.find(u=>u.id===UI.userId);
