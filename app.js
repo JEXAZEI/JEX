@@ -1380,7 +1380,14 @@ function userIsFillingForm(){
   // Also skip if on a form-heavy tab
   const formTabs=['mystock','register','settings'];
   if(formTabs.includes(UI.navTab))return 'on a form-heavy tab (UI.navTab='+UI.navTab+')';
-  if(UI.loginView==='register')return 'on the registration view';
+  // Only relevant pre-login -- UI.loginView is leftover state from the
+  // login/register screen with no guaranteed reset on every login path
+  // (e.g. checkGoogleSessionInner's "existing session" branch never
+  // touches it), so once a tab ever sets it to 'register' it can stay
+  // stuck there for the rest of that tab's life, well past actually
+  // logging in -- permanently blocking every realtime re-render even on
+  // Market with nothing actually being filled in.
+  if(!UI.userId&&UI.loginView==='register')return 'on the registration view';
   // Check for any filled-in inputs the user actually typed into -- compared
   // against defaultValue (the rendered value="..." attribute, which JS
   // setting .value later never changes), not just "is it non-empty".
