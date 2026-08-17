@@ -263,7 +263,8 @@ function subscribeRealtime(){
   // alone can't fully close (whether jex_notifications is actually in the
   // supabase_realtime publication needs checking directly).
   const tables=['jex_companies','jex_trades','jex_announcements',
-    'jex_halts','jex_session','jex_limit_orders','jex_news','jex_votes'];
+    'jex_halts','jex_session','jex_limit_orders','jex_news','jex_votes',
+    'jex_dividends','jex_buybacks','jex_founder_allocations','jex_share_classes'];
   // Build a single channel for all tables
   const channelName='jex-realtime-'+Math.random().toString(36).slice(2);
   const eventsUrl=SUPABASE_URL+'/realtime/v1/websocket?vsn=1.0.0&apikey='+SUPABASE_ANON_KEY;
@@ -389,6 +390,30 @@ function handleRealtimeUpdate(table,event,newRow,oldRow){
       break;
     case 'jex_votes':
       if(newRow){const idx=DB.votes.findIndex(v=>v.id===newRow.id);if(idx>=0)Object.assign(DB.votes[idx],newRow);else if(event==='INSERT')DB.votes.unshift(newRow);}
+      break;
+    // Dividends/buybacks are insert-only -- paying one or completing a
+    // buyback creates the record and it's never edited afterward, so
+    // there's no matching UPDATE case to handle (mirrors DB.dividends.push
+    // /DB.buybacks.push at every existing call site -- nothing anywhere
+    // else in the app patches an existing row in either table).
+    case 'jex_dividends':
+      if(newRow&&event==='INSERT'&&!DB.dividends.find(d=>d.id===newRow.id))DB.dividends.push(newRow);
+      break;
+    case 'jex_buybacks':
+      if(newRow&&event==='INSERT'&&!DB.buybacks.find(b=>b.id===newRow.id))DB.buybacks.push(newRow);
+      break;
+    // A founder allocation is proposed (INSERT, status='pending') then
+    // later reviewed (UPDATE, status flips to 'approved'/'rejected') --
+    // see rpc_review_founder_allocation.
+    case 'jex_founder_allocations':
+      if(newRow){const idx=DB.founderAllocations.findIndex(a=>a.id===newRow.id);if(idx>=0)Object.assign(DB.founderAllocations[idx],newRow);else if(event==='INSERT')DB.founderAllocations.push(newRow);}
+      break;
+    // Share classes are keyed by their own ticker (e.g. ACME.B), not a
+    // separate id column -- matches the existing local mutation pattern
+    // (app.js's own DB.shareClasses.filter(c=>c.ticker!==ticker) delete).
+    case 'jex_share_classes':
+      if(event==='DELETE'&&oldRow){DB.shareClasses=DB.shareClasses.filter(c=>c.ticker!==oldRow.ticker);}
+      else if(newRow){const idx=DB.shareClasses.findIndex(c=>c.ticker===newRow.ticker);if(idx>=0)Object.assign(DB.shareClasses[idx],newRow);else if(event==='INSERT')DB.shareClasses.push(newRow);}
       break;
   }
   // Debounced re-render
