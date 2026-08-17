@@ -345,7 +345,9 @@ function handleRealtimeUpdate(table,event,newRow,oldRow){
       break;
   }
   // Debounced re-render
-  if(!userIsFillingForm()){
+  const blockReason=userIsFillingForm();
+  if(blockReason)console.warn('JEX Realtime: applied the update but skipped re-rendering because',blockReason);
+  if(!blockReason){
     clearTimeout(window._rtRenderTimer);
     window._rtRenderTimer=setTimeout(()=>render(),150);
   }
@@ -1363,14 +1365,22 @@ setInterval(()=>{sessionAutoTick();if(DB.session.ends_at&&DB.session.status==='o
 
 // ── Auto-refresh: pull latest data every 20 seconds ──────
 let _lastRefresh=0;
+// Returns a short reason string when a realtime/auto-refresh re-render
+// should be skipped, or '' (falsy, so existing `if(!userIsFillingForm())`
+// call sites keep working unchanged) when it's safe to render. Returning
+// the reason -- not just true/false -- is what let a report of "realtime
+// receives the event but the screen still never updates" actually get
+// diagnosed instead of guessed at a third time: whichever of these four
+// conditions is silently true for as long as someone's, say, sitting on
+// their own "My Stock" page is otherwise indistinguishable from render()
+// itself being broken.
 function userIsFillingForm(){
-  // Check if any input, textarea, or select has focus or has content typed in it
   const active=document.activeElement;
-  if(active&&['INPUT','TEXTAREA','SELECT'].includes(active.tagName))return true;
+  if(active&&['INPUT','TEXTAREA','SELECT'].includes(active.tagName))return 'an input is currently focused ('+active.id+')';
   // Also skip if on a form-heavy tab
   const formTabs=['mystock','register','settings'];
-  if(formTabs.includes(UI.navTab))return true;
-  if(UI.loginView==='register')return true;
+  if(formTabs.includes(UI.navTab))return 'on a form-heavy tab (UI.navTab='+UI.navTab+')';
+  if(UI.loginView==='register')return 'on the registration view';
   // Check for any filled-in inputs the user actually typed into -- compared
   // against defaultValue (the rendered value="..." attribute, which JS
   // setting .value later never changes), not just "is it non-empty".
@@ -1381,8 +1391,8 @@ function userIsFillingForm(){
   // realtime/auto-refresh re-render for as long as it stayed open, with
   // nothing the user had actually typed being at risk of being lost.
   const inputs=document.querySelectorAll('input[type="text"],input[type="number"],input[type="email"],input[type="password"],textarea');
-  for(const inp of inputs){if(inp.value&&inp.value.trim().length>0&&inp.value!==inp.defaultValue)return true;}
-  return false;
+  for(const inp of inputs){if(inp.value&&inp.value.trim().length>0&&inp.value!==inp.defaultValue)return 'input #'+inp.id+' has user-typed content ("'+inp.value+'")';}
+  return '';
 }
 async function autoRefresh(){
   if(!UI.userId)return; // not logged in
