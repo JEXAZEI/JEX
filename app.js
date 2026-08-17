@@ -4072,7 +4072,18 @@ async function reviewClassApp(id,approve){
 // after the next manual close. (See rpc_auto_close_expired_votes in the
 // vote-deadline migration for the server-side sweep that eventually
 // catches up jex_votes.status itself.)
-function isVoteOpen(v){return v.status==='open'&&(!v.closes_at||Date.now()<new Date(v.closes_at).getTime());}
+function isVoteOpen(v){
+  if(v.status!=='open')return false;
+  if(!v.closes_at)return true;
+  // closes_at was, until this feature, a free-text "informational" note
+  // ("e.g. Friday 3pm") -- old votes can still have that garbage in the
+  // column rather than a real timestamp. new Date() on non-parseable text
+  // is NaN, and any comparison with NaN is false, which would silently
+  // treat those old votes as permanently expired. Fall back to "no real
+  // deadline" (same as null) instead, matching how they behaved before.
+  const t=new Date(v.closes_at).getTime();
+  return isNaN(t)||Date.now()<t;
+}
 async function postVote(parentTicker,question,optA,optB){
   if(!question||question.trim().length<5)return toast('Enter a question');
   if(!optA||!optB)return toast('Enter both options');
