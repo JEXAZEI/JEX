@@ -72,13 +72,39 @@ async function fetchWithTimeout(url,options,timeoutMs=20000){
     clearTimeout(timer);
   }
 }
+// A read is always safe to retry -- unlike a write, there's no risk of a
+// retried GET double-applying anything if the first attempt actually
+// succeeded server-side but the response got lost. Seen in the field as an
+// intermittent 502 from Supabase's own edge on an otherwise-ordinary GET
+// (a real backend hiccup, not a CORS/browser/extension issue). Covers two
+// distinct failure shapes: a 502 with no CORS headers on the error page
+// makes fetch() itself reject (network-level "Failed to fetch"), while a
+// clean 5xx WITH proper headers resolves normally and only fails the
+// `!r.ok` check afterward -- retrying the whole operation, not just the
+// raw fetch, catches both. Deliberately NOT applied to post/patch/del/rpc:
+// those can have side effects, and blindly retrying a write whose response
+// was lost (rather than a write that never happened at all) risks
+// applying it twice.
+async function retryable(fn,attempts=3,baseDelayMs=400){
+  let lastErr;
+  for(let i=0;i<attempts;i++){
+    try{return await fn();}
+    catch(e){lastErr=e;if(i<attempts-1)await new Promise(r=>setTimeout(r,baseDelayMs*(i+1)));}
+  }
+  throw lastErr;
+}
 const sb = {
   url:(t,q='')=>SUPABASE_URL+'/rest/v1/'+t+(q?'?'+q:''),
   async headers(extra){
     const token=await sbAuthToken();
     return {'Content-Type':'application/json','apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+token,...(extra||{})};
   },
-  async get(t,q=''){const h=await this.headers({'Accept':'application/json'});const r=await fetchWithTimeout(this.url(t,q),{headers:h});if(!r.ok)throw new Error(await r.text());const d=await r.json();
+  async get(t,q=''){const d=await retryable(async()=>{
+      const h=await this.headers({'Accept':'application/json'});
+      const r=await fetchWithTimeout(this.url(t,q),{headers:h});
+      if(!r.ok)throw new Error(await r.text());
+      return r.json();
+    });
     // Defense in depth: the database itself now revokes SELECT on these columns
     // (see the password-hash-fix migration), so this is a no-op in practice —
     // kept in case that revoke is ever missing on a given project.
