@@ -7935,6 +7935,7 @@ function getPageContent(){
   return '';
 }
 function render(){
+  if(window._rtRenderTimer)console.log('JEX Realtime: render() executing (navTab='+UI.navTab+')');
   destroyCharts();
   const app=document.getElementById('app');
   if(!UI.userId){
