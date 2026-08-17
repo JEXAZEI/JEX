@@ -566,13 +566,20 @@ const priceChg=c=>{
   const f=c.price_history[0].p,l=c.price_history[c.price_history.length-1].p;
   return f?((l-f)/f*100):0;
 };
-function computeJXI(){
-  // JXI itself is now a real, tradeable ticker in DB.companies (see
-  // is_index_fund) -- it must never appear in its own basket, or its price
-  // would track a moving average that includes itself.
-  // Test companies only weigh into JXI while Dev Mode is on (so testing can
-  // exercise JXI-related features against fake data) -- excluded otherwise,
-  // same visibility rule as everywhere else test entities show up.
+function computeIndex(classroomId){
+  // Generalized JXI math -- classroomId null means "whole exchange" (JXI
+  // itself); a classroom id scopes the basket to that classroom's
+  // companies only (via owner_id -> jex_users.classroom_id, since
+  // companies don't carry classroom_id directly). See
+  // classroom_index_migration.sql's server-side index_live_value() for the
+  // matching generalization.
+  //
+  // It must never appear in its own basket, or its price would track a
+  // moving average that includes itself.
+  // Test companies only weigh in while Dev Mode is on (so testing can
+  // exercise index-related features against fake data) -- excluded
+  // otherwise, same visibility rule as everywhere else test entities show
+  // up.
   //
   // Only a GENUINE additional share class (meta.parent_ticker !== ticker,
   // e.g. ACME.B) is excluded here to avoid double-counting the same
@@ -583,7 +590,8 @@ function computeJXI(){
   // getClassMeta() check, silently dropping the company's one real listing
   // out of JXI's basket entirely.
   const isDerivativeClass=c=>{const meta=getClassMeta(c.ticker);return!!meta&&meta.parent_ticker!==c.ticker;};
-  const listed=DB.companies.filter(c=>c.status==='listed'&&!isDerivativeClass(c)&&!c.is_index_fund&&!isHiddenTestEntity(c.owner_id));
+  const listed=DB.companies.filter(c=>c.status==='listed'&&!isDerivativeClass(c)&&!c.is_index_fund&&!isHiddenTestEntity(c.owner_id)
+    &&(classroomId==null||getUser(c.owner_id)?.classroom_id===classroomId));
   if(!listed.length)return{value:1000,change:0,constituents:[]};
   const constituents=listed.map(c=>{
     const base=(c.price_history&&c.price_history[0]&&c.price_history[0].p)||c.price;
@@ -595,6 +603,7 @@ function computeJXI(){
   const change=Math.round(((avgRatio-1)*100)*100)/100;
   return{value,change,constituents};
 }
+function computeJXI(){return computeIndex(null);}
 async function snapshotJXI(){
   const idx=computeJXI();
   if(!idx.constituents.length)return;
@@ -982,6 +991,23 @@ async function createClassroom(){
   await sb.post('jex_classrooms',rec);
   DB.classrooms.push(rec);
   toast('Classroom "'+name+'" created');render();
+}
+async function createClassroomIndex(){
+  if(!isAdmin(cu()))return toast('Admin access required');
+  const classroomId=get('cls-idx-classroom')?.value;
+  const ticker=(get('cls-idx-ticker')?.value||'').trim().toUpperCase();
+  const name=(get('cls-idx-name')?.value||'').trim();
+  if(!classroomId)return toast('Select a classroom');
+  if(!ticker)return toast('Enter a ticker');
+  if(!name)return toast('Enter a name');
+  let rec;
+  try{rec=await sb.rpc('rpc_admin_create_classroom_index',{p_classroom_id:classroomId,p_ticker:ticker,p_name:name});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.companies.push({id:uid(),name,ticker:rec.ticker,price:rec.price,shares:0,shares_avail:0,status:'listed',owner_id:null,
+    description:'Tracks the equal-weighted average of every listed company in '+(rec.classroom_name||'this classroom')+'. Price updates automatically to match the live index value and can\'t be manually adjusted. Buying mints new units at the live price; selling redeems them, so there\'s no fixed share supply.',
+    price_history:[{p:rec.price,t:'Listing'}],financials:[],is_index_fund:true,index_classroom_id:classroomId,fund_holdings:{}});
+  toast('Index '+rec.ticker+' created for '+(rec.classroom_name||'classroom'));
+  render();
 }
 async function deleteClassroom(id){
   if(!isAdmin(cu()))return toast('Admin access required');
@@ -1612,7 +1638,7 @@ async function registerStudent(name,username,email,pw,secQ,secA,emailVerified,au
   const isMigrated=isGoogle||!!newAuthUid;
   const pwHash=isMigrated?null:await hashPw(pw);
   const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHash,role:'student',
-    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:norm(secA),
+    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:await hashPw(norm(secA)),
     email_verified:isGoogle?true:!!emailVerified,auth_provider:isGoogle?'google':null,auth_uid:newAuthUid,ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';UI.googleAuth=null;render();
@@ -1640,7 +1666,7 @@ async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerifi
   const isMigratedCo=isGoogle||!!newAuthUidCo;
   const pwHashCo=isMigratedCo?null:await hashPw(pw);
   const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHashCo,role:'company',description:desc.trim(),
-    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:norm(secA),
+    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:await hashPw(norm(secA)),
     email_verified:isGoogle?true:!!emailVerified,auth_provider:isGoogle?'google':null,auth_uid:newAuthUidCo,ts:ts()};
   await sb.post('jex_pending',rec);DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';UI.googleAuth=null;render();
@@ -4211,19 +4237,19 @@ const TOS_HTML=`
   </tbody></table>
 
   <h3>6. Privacy &amp; Data</h3>
-  <p>JEX collects only the information necessary to operate the exchange: name, email, password (hashed), and trading activity.</p>
+  <p>JEX collects the information needed to run the exchange and the classroom activity built on it — your name, school email, login credentials, classroom assignment, and everything you do on the exchange (trades, orders, holdings, company filings, votes, messages to admins). The full list of what's collected, who can see it, which outside services JEX relies on, and how to request a copy or deletion of your data is in the <a onclick="openLegalModal('privacy')">Privacy Policy</a> — read it alongside these Terms.</p>
   <ul>
-    <li>Account data is stored securely in a Supabase database accessible only to exchange officers and the instructor.</li>
-    <li>Trading history, portfolio data, and net worth records may be reviewed by officers at any time.</li>
-    <li>No personal data is sold or shared with third parties outside the classroom program.</li>
-    <li>The exchange may be fully reset at the end of a program period, wiping all account data.</li>
+    <li>Account data is stored in a Supabase database. Within JEX, access is limited to accounts holding an exchange officer role — Chairman, President, Secretary, Treasurer, or Compliance Officer, typically held by fellow students as part of the exchange's peer-governance design — and to the instructor running this program.</li>
+    <li>Trading history, portfolio data, and net worth records may be reviewed by officers at any time as part of normal exchange operation and compliance review.</li>
+    <li>JEX does not sell your data or use it for advertising. A short list of service providers JEX relies on to operate (database hosting, email delivery, sign-in) is disclosed in the Privacy Policy.</li>
+    <li>Your account stays active as long as you're enrolled in the program. If you leave the program (graduate, transfer, or withdraw) or stop using JEX, your account and data are deleted after a limited window, as described in the Privacy Policy's retention section.</li>
   </ul>
 
   <h3>7. Amendments</h3>
   <p>The Chairman, President, or the Board of Trusted Securities (BoTS), pursuant to Article II of the Bylaws — Corporate Governance section of the School Securities Exchange Application, reserves the right to amend, update, or replace these Terms of Service at any time. Changes will be announced via the JEX announcements system. Continued use of the exchange after an amendment constitutes acceptance of the updated terms. Participants who disagree with material changes should raise their concerns with the Compliance Officer or instructor.</p>
 
   <h3>8. Disclaimer</h3>
-  <p>JEX is a <strong>simulated educational environment</strong>. All currency, stocks, and financial instruments within JEX are fictional and carry no real monetary value. No real money is involved. The exchange is operated solely for educational purposes as part of the JTED program. Any resemblance to real-world companies, stocks, or financial events is coincidental.</p>
+  <p>JEX is a <strong>simulated educational environment</strong>. All currency, stocks, and financial instruments within JEX are fictional and can never be withdrawn or exchanged for real money. No real money is involved. The exchange is operated solely for educational purposes as part of the JTED program. Any resemblance to real-world companies, stocks, or financial events is coincidental. A company's simulated balance may, at the instructor's sole discretion, factor into decisions about real classroom resources (such as materials or machine time) for that company's engineering project — but nothing on JEX entitles a participant to real money, and no real-world allocation is guaranteed by simulated performance alone.</p>
   <div class="legal-warn">Strategies or behaviours practised in JEX should not be applied to real financial markets without appropriate professional guidance. The exchange operators assume no liability for decisions made based on JEX participation.</div>
 
   <h4>By agreeing to the Terms of Service at registration, I confirm that:</h4>
@@ -4254,6 +4280,73 @@ const BYLAWS_HTML=`
   </ul>
   <div class="legal-meta">JTED Securities and Exchange Commission · 3300 S Park Ave, Tucson, AZ 85713</div>
 `;
+const PRIVACY_HTML=`
+  <h2>JEX Privacy Policy</h2>
+  <div class="legal-meta">Effective August 16, 2026 · Applies to Ariel Ramirez-Angulo, instructor for Pima JTED Engineering/Mechatronics &amp; Design's JTED Stock Exchange (JEX) · Read together with the Terms of Service.</div>
+  <p>JEX is a simulated classroom stock exchange, built and operated independently by the instructor above as part of their own program — not by the school or district directly. This policy explains what information it collects from participants, why, who can see it, which outside services it relies on, and what choices you have.</p>
+
+  <h3>Who this applies to</h3>
+  <p>JEX is built for students 13 and older enrolled in Pima JTED Engineering/Mechatronics &amp; Design. It is not intended for use by anyone under 13. If you believe a child under 13 has registered an account, contact <a href="mailto:jexazei@gmail.com">jexazei@gmail.com</a> and it will be removed.</p>
+
+  <h3>What we collect</h3>
+  <ul>
+    <li><strong>Account information:</strong> your real name, username, school email address, and classroom assignment.</li>
+    <li><strong>Login credentials:</strong> a password (or, if you sign in with Google, your Google account identity), and a security question and answer used to recover your account. Both are stored hashed, not in plain text.</li>
+    <li><strong>Exchange activity:</strong> everything you do on JEX — trades, orders, holdings, short positions, watchlist, dividends, and (if you operate a company account) company filings, financials, and applications.</li>
+    <li><strong>Governance activity:</strong> votes you cast, and, if you hold an officer role, the actions you take as an officer.</li>
+    <li><strong>Anything you submit to us directly:</strong> bug reports and messages sent through "Contact Admin."</li>
+    <li><strong>A record of officer/admin actions</strong>, kept so that use of elevated account permissions is traceable and reviewable.</li>
+  </ul>
+  <p>We do not run advertising trackers or analytics on JEX, and we don't collect any information beyond what's listed above.</p>
+
+  <h3>Why we collect it</h3>
+  <p>To run the exchange itself (you can't trade a stock without a holdings record), to run the program built on top of it (officer roles, compliance review, recordkeeping — none of this affects your grade), and to keep the exchange fair (the audit trail exists specifically to catch misuse of officer permissions).</p>
+
+  <h3>About the money on JEX</h3>
+  <p>Everything you trade on JEX — cash, stock, dividends — is simulated. Nobody pays real money to get it, and it can never be withdrawn or cashed out as real money. However, a company's simulated balance is not purely for show: with the instructor's approval on a case-by-case basis, it can be used to help justify spending real classroom resources on that company's actual engineering project — for example materials, 3D-print time, or CNC machine time. That approval process happens directly between a company and the instructor, outside of JEX itself — JEX doesn't track spending requests as data.</p>
+
+  <h3>Who can see it</h3>
+  <ul>
+    <li><strong>Exchange officers</strong> (Chairman, President, Secretary, Treasurer, Compliance Officer) can see other participants' balances, holdings, and trade history as part of running the exchange. These roles are held by fellow students and function more like a semi-independent, student-run club than a directly instructor-managed process — peer governance is a deliberate part of how the exchange is designed to teach responsibility and oversight, not an oversight gap. Nothing you do on JEX affects your grade, but your activity is still visible to whichever students hold these roles. If you're not comfortable with that, talk to your instructor before participating.</li>
+    <li>The instructor operating JEX, as its administrator, retains the ability to access any participant's data for the purposes of running the program, whether or not they personally hold an officer role day to day.</li>
+    <li>We do not sell your information, and we do not share it with anyone outside of running JEX and the program it's part of.</li>
+  </ul>
+
+  <h3>Service providers we use</h3>
+  <p>Operating JEX means some data passes through a small number of outside services, each used only for the specific job listed:</p>
+  <table><thead><tr><th>Service</th><th>What it's used for</th><th>What it sees</th></tr></thead><tbody>
+    <tr><td>Supabase</td><td>Database, authentication, hosting</td><td>Everything listed under "What we collect"</td></tr>
+    <tr><td>Google (Sign in with Google)</td><td>Optional sign-in method</td><td>Your name and email, if you choose to sign in this way</td></tr>
+    <tr><td>EmailJS</td><td>Sending verification and opt-in trade-alert emails</td><td>Your email address and the content of those emails</td></tr>
+    <tr><td>Google Fonts, Cloudflare, jsDelivr</td><td>Loading fonts and code libraries used by the app</td><td>Standard web request information (e.g., IP address) — no JEX account data</td></tr>
+  </tbody></table>
+
+  <h3>How long we keep it</h3>
+  <p>Your account and data are kept as long as you're an active participant in the program — including across multiple program periods if you continue in the program (for example, returning the following semester or year). We don't tie deletion to a fixed calendar date for everyone, since not every participant leaves the program at the same time. Instead:</p>
+  <ul>
+    <li><strong>When you leave the program</strong> (you graduate, transfer, or withdraw), your account and data are deleted within 60 days of us learning that. If you want a copy of your data before that happens, ask before the 60 days are up.</li>
+    <li><strong>If an account goes inactive</strong> (no login for 12 months) without us being told the participant left, it's deleted automatically on that basis — so data doesn't sit around indefinitely just because nobody updated a record.</li>
+    <li><strong>You can ask for deletion at any time</strong>, whether or not you're leaving the program, by contacting <a href="mailto:jexazei@gmail.com">jexazei@gmail.com</a> or an exchange officer; we'll confirm once it's done. If you're a parent or guardian of a participant, you can make this request on their behalf.</li>
+  </ul>
+
+  <h3>Your choices and rights</h3>
+  <ul>
+    <li>You can review and update your account information at any time while your account is active.</li>
+    <li>You can opt in or out of email alerts in Settings.</li>
+    <li>You can request a copy of your data or ask for it to be deleted by contacting <a href="mailto:jexazei@gmail.com">jexazei@gmail.com</a>.</li>
+    <li>If you're a parent or guardian of a participant, you can make the same requests on their behalf.</li>
+  </ul>
+
+  <h3>Security</h3>
+  <p>Passwords and security-question answers are both hashed, not stored in plain text. Access to officer-level data is limited to accounts holding officer roles, and all officer/admin actions are logged.</p>
+
+  <h3>Changes to this policy</h3>
+  <p>If this policy changes in a material way, we'll announce it through JEX's announcements system, the same way changes to the Terms of Service are announced.</p>
+
+  <h3>Contact</h3>
+  <p>Questions about this policy or your data: <a href="mailto:jexazei@gmail.com">jexazei@gmail.com</a>.</p>
+  <div class="legal-meta">JEX — JTED Stock Exchange | Privacy Policy v1.0</div>
+`;
 function openLegalModal(type){
   const root=document.getElementById('legal-modal-root');if(!root)return;
   root.innerHTML=renderLegalModalHTML(type);
@@ -4261,22 +4354,24 @@ function openLegalModal(type){
 function switchLegalTab(type){openLegalModal(type);}
 function closeLegalModal(){const root=document.getElementById('legal-modal-root');if(root)root.innerHTML='';}
 function renderLegalModalHTML(type){
-  const isTos=type!=='bylaws';
+  const tab=['tos','bylaws','privacy'].includes(type)?type:'tos';
+  const html=tab==='tos'?TOS_HTML:tab==='bylaws'?BYLAWS_HTML:PRIVACY_HTML;
   return `<div class="legal-overlay" onclick="if(event.target===this)closeLegalModal()">
     <div class="legal-box">
       <div class="legal-header">
         <div class="legal-tabs">
-          <button class="legal-tab ${isTos?'active':''}" onclick="switchLegalTab('tos')">Terms of Service</button>
-          <button class="legal-tab ${!isTos?'active':''}" onclick="switchLegalTab('bylaws')">Bylaws</button>
+          <button class="legal-tab ${tab==='tos'?'active':''}" onclick="switchLegalTab('tos')">Terms of Service</button>
+          <button class="legal-tab ${tab==='bylaws'?'active':''}" onclick="switchLegalTab('bylaws')">Bylaws</button>
+          <button class="legal-tab ${tab==='privacy'?'active':''}" onclick="switchLegalTab('privacy')">Privacy Policy</button>
         </div>
         <button class="legal-close" onclick="closeLegalModal()">✕</button>
       </div>
-      <div class="legal-body">${isTos?TOS_HTML:BYLAWS_HTML}</div>
+      <div class="legal-body">${html}</div>
     </div>
   </div>`;
 }
 function renderLegalFooter(){
-  return `<div class="app-footer">JEX — JTED Stock Exchange &nbsp;·&nbsp; <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a> &nbsp;·&nbsp; <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a> &nbsp;·&nbsp; <a class="legal-link" onclick="openContactAdminModal()">Contact Admin</a> &nbsp;·&nbsp; <span style="opacity:0.5">v${APP_VERSION}</span></div>`;
+  return `<div class="app-footer">JEX — JTED Stock Exchange &nbsp;·&nbsp; <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a> &nbsp;·&nbsp; <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a> &nbsp;·&nbsp; <a class="legal-link" onclick="openLegalModal('privacy')">Privacy Policy</a> &nbsp;·&nbsp; <a class="legal-link" onclick="openContactAdminModal()">Contact Admin</a> &nbsp;·&nbsp; <span style="opacity:0.5">v${APP_VERSION}</span></div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -4432,7 +4527,7 @@ function renderLogin(){
 <div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div>`;
     const coSecretFields=ga?'':`<div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div>`;
     const coSecQFields=ga?'':`<div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div>`;
-    return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div>${gaBanner}<div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name" value="${gaName}"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-username" placeholder="e.g. arielk" autocomplete="username" value="${gaUsername}"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu" value="${gaEmail}" ${ga?'readonly':''} oninput="onRegEmailChanged('reg')"></div><div id="reg-email-verify">${ga?'':renderRegEmailVerifyHTML('reg')}</div>${studentSecretFields}</div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp" value="${gaName}"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-co-username" placeholder="e.g. acmecorp" autocomplete="username" value="${gaUsername}"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu" value="${gaEmail}" ${ga?'readonly':''} oninput="onRegEmailChanged('reg-co')"></div><div id="reg-co-email-verify">${ga?'':renderRegEmailVerifyHTML('reg-co')}</div>${coSecretFields}<div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div>${coSecQFields}</div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in. Your classroom will be assigned by your teacher after approval.</div><div class="frow" style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" id="reg-agree-tos" aria-label="I agree to the Terms of Service and Bylaws" style="width:auto;margin-top:2px"><span style="font-size:12px;color:var(--text2)">I agree to the <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a> and <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a>.</span></div><div class="login-actions"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.googleAuth=null;UI.loginView='select';render()">Back</button></div></div></div>`;}
+    return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div>${gaBanner}<div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name" value="${gaName}"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-username" placeholder="e.g. arielk" autocomplete="username" value="${gaUsername}"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu" value="${gaEmail}" ${ga?'readonly':''} oninput="onRegEmailChanged('reg')"></div><div id="reg-email-verify">${ga?'':renderRegEmailVerifyHTML('reg')}</div>${studentSecretFields}</div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp" value="${gaName}"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-co-username" placeholder="e.g. acmecorp" autocomplete="username" value="${gaUsername}"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu" value="${gaEmail}" ${ga?'readonly':''} oninput="onRegEmailChanged('reg-co')"></div><div id="reg-co-email-verify">${ga?'':renderRegEmailVerifyHTML('reg-co')}</div>${coSecretFields}<div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div>${coSecQFields}</div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in. Your classroom will be assigned by your teacher after approval.</div><div class="frow" style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" id="reg-agree-tos" aria-label="I agree to the Terms of Service, Bylaws, and Privacy Policy" style="width:auto;margin-top:2px"><span style="font-size:12px;color:var(--text2)">I agree to the <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a>, <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a>, and <a class="legal-link" onclick="openLegalModal('privacy')">Privacy Policy</a>.</span></div><div class="login-actions"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.googleAuth=null;UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(!['admin','company','student'].includes(UI.loginTab))UI.loginTab='student';
   const tabCounts={admin:admins.length,company:companies.length,student:students.length};
   return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-tagline">JTED Stock Exchange</div>
@@ -4634,14 +4729,16 @@ function renderCompanyPage(parentTicker){
     // No owner, no IPO, no share classes, no shorting -- none of the usual
     // company-overview concepts apply to an index tracker. Composition
     // mirrors the constituents table on the market page's index card.
-    const idx=computeJXI();
+    // co.index_classroom_id scopes this to just that classroom's basket
+    // for a classroom index; null (JXI itself) means the whole exchange.
+    const idx=computeIndex(co.index_classroom_id||null);
     html+='<div class="grid4" style="margin-bottom:14px">'
       +'<div class="mcard"><div class="mlabel">Price</div><div class="mval" style="font-family:var(--mono)">'+fmt(co.price)+'</div></div>'
       +'<div class="mcard"><div class="mlabel">Holders</div><div class="mval">'+shareholders.length+'</div></div>'
       +'<div class="mcard"><div class="mlabel">Units outstanding</div><div class="mval">'+co.shares.toLocaleString()+'</div></div>'
       +'<div class="mcard"><div class="mlabel">Constituents</div><div class="mval">'+idx.constituents.length+'</div></div>'
       +'</div>'
-      +'<div class="ibox ibox-blue" style="margin-bottom:14px">Tracks the JEX Composite Index — an equal-weighted average of every listed company. Price updates automatically to match the live index value and can\'t be manually adjusted. Buying mints new units at the live price; selling redeems them, so there\'s no fixed share supply.</div>';
+      +'<div class="ibox ibox-blue" style="margin-bottom:14px">'+esc(co.description||'Tracks an equal-weighted average of its constituent companies. Price updates automatically to match the live index value and can\'t be manually adjusted. Buying mints new units at the live price; selling redeems them, so there\'s no fixed share supply.')+'</div>';
     html+='<div class="card"><div class="section-title">Composition</div><table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th class="r">Today</th></tr></thead>'
       +'<tbody>'+idx.constituents.map(c=>{const cco=getCo(c.ticker);const cchg=cco?priceChg(cco):0;return'<tr><td>'+esc(c.name)+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+esc(c.ticker)+'</span></td><td class="r" style="font-family:var(--mono)">'+fmt(c.price)+'</td><td class="r '+(cchg>=0?'price-up':'price-down')+'">'+(cchg>=0?'+':'')+cchg.toFixed(2)+'%</td></tr>';}).join('')
       +'</tbody></table></div>';
@@ -5014,6 +5111,7 @@ function renderMarketRows(u,listed){
   return listed.map((c,ci)=>{const chg=priceChg(c),fin=c.financials&&c.financials[0];const meta=getClassMeta(c.ticker);
     const classBadge=meta?'<span class="badge" style="font-size:10px;background:rgba(240,165,0,0.12);color:var(--amber);margin-left:4px">Class '+meta.class+' · '+meta.votes_per_share+'v</span>':'';
     const restrictBadge=meta&&meta.restricted?'<span class="badge b-red" style="font-size:10px;margin-left:4px">Restricted</span>':'';
+    const idxBadge=c.is_index_fund?'<span class="badge b-blue" style="font-size:10px;margin-left:4px">'+(c.index_classroom_id?'Index — '+esc(getClassroomName(c.index_classroom_id)||''):'Index')+'</span>':'';
     // Ticker-style flash on the price cell when a price actually moves since
     // the last render (realtime pushes from other clients' trades, or the
     // 3s order-matching poll) — not on every re-render (search typing,
@@ -5021,7 +5119,7 @@ function renderMarketRows(u,listed){
     const prevPrice=_marketLastPrices[c.ticker];
     const flashClass=prevPrice!=null&&prevPrice!==c.price?(c.price>prevPrice?' flash-up':' flash-down'):'';
     _marketLastPrices[c.ticker]=c.price;
-    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${esc(c.name)}</span>${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${esc(c.description||"")}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="${flashClass}" style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')+(!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:'');
+    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${esc(c.name)}</span>${idxBadge}${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${esc(c.description||"")}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="${flashClass}" style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')+(!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:'');
 }
 function renderMarket(){
   const u=cu();
@@ -6356,6 +6454,20 @@ function renderAdminSession(students){
         </select>
       </div>
       <div><button class="btn btn-primary btn-sm" onclick="reassignClassroom()">Assign</button></div>
+    </div>
+    <div class="divider" style="margin:14px 0"></div>
+    <div class="section-title" style="font-size:12px;margin-bottom:8px">Create classroom index</div>
+    <div class="ibox ibox-blue" style="margin-bottom:12px">Same idea as JXI, scoped to one classroom — an equal-weighted tracker of just that classroom's listed companies. One index per classroom.</div>
+    <div class="row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">
+      <div class="frow" style="flex:2;min-width:150px"><label class="flabel">Classroom</label>
+        <select id="cls-idx-classroom">
+          <option value="">— Select —</option>
+          ${DB.classrooms.filter(c=>!DB.companies.some(co=>co.is_index_fund&&co.index_classroom_id===c.id)).map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="frow" style="min-width:100px"><label class="flabel">Ticker</label><input type="text" id="cls-idx-ticker" placeholder="e.g. PD1X" style="text-transform:uppercase" maxlength="8"></div>
+      <div class="frow" style="flex:2;min-width:150px"><label class="flabel">Name</label><input type="text" id="cls-idx-name" placeholder="e.g. Period 1 Index"></div>
+      <div><button class="btn btn-primary btn-sm" onclick="createClassroomIndex()">+ Create index</button></div>
     </div>
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">🎮 Practice mode</div>
