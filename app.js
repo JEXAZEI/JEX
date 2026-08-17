@@ -3967,6 +3967,44 @@ function impactPreview(co,qty,dir){
   return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">Fill: <strong>${fmt(np)}</strong> <span class="${cls}">${delta>=0?'+':''}${fmt(delta)} (${delta>=0?'+':''}${pct}%)</span> &nbsp;|&nbsp; Total: <strong>${fmt(np*qty)}</strong></div>`;
 }
 function shortPrev(co,qty){if(!qty||qty<=0)return'';const c=Math.round(co.price*qty*1.5*100)/100;return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:rgba(83,74,183,0.1);border-radius:var(--radius);color:#AFA9EC">Short ${qty} @ ${fmt(co.price)} | Collateral: <strong>${fmt(c)}</strong></div>`;}
+// ── Quick-quantity buttons (1/5/10/Max·All) shared by both trade panels
+// (renderCompanyPage's Trade tab and openPanel's market-page side panel) --
+// sets the quantity input and recomputes the preview in one click instead
+// of typing a number and waiting for the next render.
+function quickQtyButtonsHTML(ticker,mode,qtyInputId,previewId){
+  const lastLabel=mode==='sell'?'All':'Max';
+  const lastVal=mode==='sell'?'all':'max';
+  return '<div style="display:flex;gap:6px;margin-top:6px">'
+    +[1,5,10].map(n=>'<button type="button" class="btn btn-sm" onclick="quickSetQty(&quot;'+ticker+'&quot;,&quot;'+mode+'&quot;,&quot;'+qtyInputId+'&quot;,&quot;'+previewId+'&quot;,'+n+')">'+n+'</button>').join('')
+    +'<button type="button" class="btn btn-sm" onclick="quickSetQty(&quot;'+ticker+'&quot;,&quot;'+mode+'&quot;,&quot;'+qtyInputId+'&quot;,&quot;'+previewId+'&quot;,&quot;'+lastVal+'&quot;)">'+lastLabel+'</button>'
+    +'</div>';
+}
+function quickSetQty(ticker,mode,qtyInputId,previewId,value){
+  const co=getCo(ticker);if(!co)return;
+  const u=cu();if(!u)return;
+  let qty;
+  if(value==='max'){
+    const affordable=co.price>0?Math.floor(u.cash/co.price):0;
+    if(mode==='buy'){
+      qty=co.is_index_fund?affordable:Math.min(affordable,co.shares_avail);
+    } else if(mode==='short'){
+      // 1.5x collateral requirement, same math as shortPrev()
+      const collateralPerShare=co.price*1.5;
+      qty=collateralPerShare>0?Math.floor(u.cash/collateralPerShare):0;
+    }
+  } else if(value==='all'&&mode==='sell'){
+    qty=(holdings(u)[ticker])||0;
+  } else {
+    qty=parseInt(value)||0;
+  }
+  qty=Math.max(0,qty||0);
+  const input=get(qtyInputId);if(input)input.value=qty;
+  const preview=get(previewId);
+  if(preview){
+    if(mode==='short')preview.innerHTML=shortPrev(co,qty);
+    else preview.innerHTML=impactPreview(co,qty,mode==='buy'?'buy':'sell');
+  }
+}
 function dilPreview(co,ns){if(!ns||ns<=0)return'';const ta=co.shares+ns,np=Math.max(0.01,Math.round(co.price*(co.shares/ta)*100)/100);return `<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px"><div><div style="color:var(--text2);margin-bottom:2px">Total after</div><div style="font-weight:500">${ta.toLocaleString()}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Increase</div><div style="font-weight:500;color:var(--amber)">+${Math.round((ns/co.shares)*100)}%</div></div><div><div style="color:var(--text2);margin-bottom:2px">Est. price</div><div style="font-weight:500;color:var(--red)">${fmt(np)}</div></div></div>`;}
 
 // ═══════════════════════════════════════════════
@@ -4976,6 +5014,7 @@ function renderCompanyPage(parentTicker){
           '<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Available: <strong>'+co.shares_avail+'</strong> of '+co.shares.toLocaleString()+'</p>')
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="cp-qty" value="1" min="1"'+(idxFund?'':' max="'+co.shares_avail+'"')+'></div>'
           +'<div style="padding-bottom:12px"><button class="btn btn-success" onclick="disableTradeBtn(this);cpTrade(&quot;buy&quot;)">Buy now</button></div></div>'
+          +quickQtyButtonsHTML(parentTicker,'buy','cp-qty','cp-preview')
           +'<div id="cp-preview">'+impactPreview(co,1,'buy')+'</div>'
           +(idxFund?'':'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy'+infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')+'</div>'
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-qty" value="1" min="1"></div>'
@@ -4987,6 +5026,7 @@ function renderCompanyPage(parentTicker){
         if(held>0){
           html+='<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="cp-qty" value="1" min="1" max="'+held+'"></div>'
             +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="disableTradeBtn(this);cpTrade(&quot;sell&quot;)">Sell now</button></div></div>'
+            +quickQtyButtonsHTML(parentTicker,'sell','cp-qty','cp-preview')
             +'<div id="cp-preview">'+impactPreview(co,1,'sell')+'</div>'
             +(idxFund?'':'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell'+infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')+'</div>'
             +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-sty" value="1" min="1" max="'+held+'"></div>'
@@ -5000,6 +5040,7 @@ function renderCompanyPage(parentTicker){
         html+='<div class="ibox ibox-purple">Short selling'+infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. You borrow shares and sell them now; later you buy them back to cover, hopefully at a lower price. The difference is your profit or loss, but losses are uncapped since a price can rise indefinitely.')+' — borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div>'
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="cp-qty" value="1" min="1"></div>'
           +'<div style="padding-bottom:12px"><button class="btn btn-purple" onclick="cpTrade(&quot;short&quot;)">Short sell</button></div></div>'
+          +quickQtyButtonsHTML(parentTicker,'short','cp-qty','cp-preview')
           +'<div id="cp-preview">'+shortPrev(co,1)+'</div>';
       } else if(short){
         html+='<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div>'
@@ -5381,7 +5422,8 @@ function openPanel(ticker){
       ${short?`<button class="ot-btn ${effMode==='cover'?'ot-cover':''}" onclick="UI.panelMode='cover';openPanel('${ticker}')">Cover</button>`:''}
     </div>
     ${effMode==='buy'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?`Buys mint new units at the live index price — there's no fixed supply to run out of.`:`Buy pushes price up. Available: <strong>${c.shares_avail}</strong> of ${c.shares.toLocaleString()}.`}</p>
-    <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1"${idxFund?'':` max="${c.shares_avail}"`} oninput="document.getElementById('cp-preview')&&(document.getElementById('cp-preview').innerHTML=impactPreview(getCo('${ticker}'),parseInt(this.value)||1,'buy'))"></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="disableTradeBtn(this);placeBuy('${ticker}',get('t-qty')?.value)">Buy now</button></div></div>
+    <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1"${idxFund?'':` max="${c.shares_avail}"`}></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="disableTradeBtn(this);placeBuy('${ticker}',get('t-qty')?.value)">Buy now</button></div></div>
+    ${quickQtyButtonsHTML(ticker,'buy','t-qty','t-preview')}
     <div id="t-preview">${impactPreview(c,1,'buy')}</div>
     ${idxFund?'':`<hr class="divider" style="margin:10px 0">
     <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy${infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')}</div>
@@ -5391,6 +5433,7 @@ function openPanel(ticker){
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="placeLimitOrder('${ticker}','buy',get('t-lmt-qty')?.value,get('t-lmt-price')?.value)">Place limit</button></div>
     </div>`}`
     :effMode==='sell'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?'Sells redeem your units at the live index price.':'Sell pushes price down.'} You hold: <strong>${held}</strong>.</p>${held>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${held}"></div><div style="padding-bottom:12px"><button class="btn btn-danger" onclick="placeSell('${ticker}',get('t-qty')?.value)">Sell now</button></div></div>
+    ${quickQtyButtonsHTML(ticker,'sell','t-qty','t-preview')}
     <div id="t-preview">${impactPreview(c,1,'sell')}</div>
     ${idxFund?'':`<hr class="divider" style="margin:10px 0">
     <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell${infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')}</div>
@@ -5399,7 +5442,7 @@ function openPanel(ticker){
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="placeLimitOrder('${ticker}','sell',get('t-lmt-qty')?.value,get('t-lmt-price')?.value)">Place limit</button></div>
     </div>`}`:`<div class="empty" style="padding:16px">You don't hold any ${ticker}.</div>`}`
-    :effMode==='short'?`<div class="ibox ibox-purple">Short selling${infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. You borrow shares and sell them now; later you buy them back to cover, hopefully at a lower price. The difference is your profit or loss, but losses are uncapped since a price can rise indefinitely.')} — borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="placeShort('${ticker}',get('t-qty')?.value)">Short sell</button></div></div><div id="t-preview">${shortPrev(c,1)}</div>`
+    :effMode==='short'?`<div class="ibox ibox-purple">Short selling${infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. You borrow shares and sell them now; later you buy them back to cover, hopefully at a lower price. The difference is your profit or loss, but losses are uncapped since a price can rise indefinitely.')} — borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="placeShort('${ticker}',get('t-qty')?.value)">Short sell</button></div></div>${quickQtyButtonsHTML(ticker,'short','t-qty','t-preview')}<div id="t-preview">${shortPrev(c,1)}</div>`
     :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="coverShort('${ticker}',get('t-qty')?.value)">Cover short</button></div></div><div id="t-preview">${impactPreview(c,short.qty,'buy')}</div>`:''}
   </div>`;
   const qi=get('t-qty');if(qi){qi.addEventListener('input',()=>{const q=parseInt(qi.value)||0,p=get('t-preview');if(!p)return;if(effMode==='buy')p.innerHTML=impactPreview(c,q,'buy');else if(effMode==='sell')p.innerHTML=impactPreview(c,q,'sell');else if(effMode==='short')p.innerHTML=shortPrev(c,q);else if(effMode==='cover')p.innerHTML=impactPreview(c,q,'buy');});}
