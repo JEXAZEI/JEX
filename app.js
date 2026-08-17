@@ -379,6 +379,23 @@ const PAGE_ROUTES=new Set(['settings','admin','exchange','leaderboard','trades',
 // bookmarks/links keep working), so its route target is the root file.
 const pageHref=k=>k==='market'?'index.html':k+'.html';
 
+// Runs an array of request-producing functions with limited concurrency
+// instead of firing all of them at once via a single Promise.all -- a hard
+// refresh otherwise sends 24+ simultaneous first-time requests (each
+// needing its own CORS preflight) to Supabase's Cloudflare-fronted edge,
+// a burst big enough to trip a connection/rate-limit threshold there and
+// come back as a browser-side "Failed to fetch"/CORS error, even though a
+// single request to the same endpoint succeeds every time. Batch N+1
+// doesn't start until batch N settles, and results stay in the original
+// order, so a destructuring assignment against the original argument list
+// still works unchanged.
+async function batchedAll(factories,batchSize){
+  const results=[];
+  for(let i=0;i<factories.length;i+=batchSize){
+    results.push(...await Promise.all(factories.slice(i,i+batchSize).map(f=>f())));
+  }
+  return results;
+}
 async function loadAll(){
   // ── Phase 1: critical data needed to render login ──────
   const [users,session,companies,announcements,halts]=await Promise.all([
@@ -402,32 +419,32 @@ async function loadAll(){
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
     shareClasses,classApps,votes,ballots,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,classrooms,stopLossOrders,minutes,divApprovals,funds,indexHistory,snapshots]=await Promise.all([
-    sb.get('jex_pending','order=created_at.asc&select='+JEX_PENDING_SAFE_SELECT),
-    sb.get('jex_news','order=created_at.desc&limit=50'),
-    sb.get('jex_ipo_applications','order=created_at.asc'),
-    sb.get('jex_dilution_applications','order=created_at.asc'),
-    sb.get('jex_trades','order=created_at.desc&limit=200&select=id,ticker,qty,price,buyer_id,seller_id,type,ts'),  // only last 200 trades
-    sb.get('jex_dividends','order=created_at.asc'),
-    sb.get('jex_buybacks','order=created_at.asc'),
-    sb.get('jex_limit_orders','order=created_at.asc'),
-    sb.get('jex_share_classes','order=created_at.asc'),
-    sb.get('jex_class_applications','order=created_at.asc'),
-    sb.get('jex_votes','order=created_at.desc'),
-    sb.get('jex_vote_ballots','order=created_at.asc'),
-    sb.get('jex_price_alerts','order=created_at.asc'),
-    sb.get('jex_nw_history','order=created_at.desc&limit=200'),
-    sb.get('jex_company_members','order=created_at.asc'),
-    sb.get('jex_founder_allocations','order=created_at.desc'),
-    sb.get('jex_price_adjustments','order=created_at.desc&limit=50'),
-    sb.get('jex_classrooms','order=created_at.asc'),
-    sb.get('jex_stop_loss','status=eq.active&order=created_at.asc'),
-    sb.get('jex_minutes','order=created_at.desc&limit=50'),
-    sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
-    sb.get('jex_funds','order=created_at.asc'),
-    sb.get('jex_index_history','order=created_at.asc&limit=500'),
-    sb.get('jex_snapshots','order=created_at.desc&limit=50'),
-  ]);
+    priceAdjustments,classrooms,stopLossOrders,minutes,divApprovals,funds,indexHistory,snapshots]=await batchedAll([
+    ()=>sb.get('jex_pending','order=created_at.asc&select='+JEX_PENDING_SAFE_SELECT),
+    ()=>sb.get('jex_news','order=created_at.desc&limit=50'),
+    ()=>sb.get('jex_ipo_applications','order=created_at.asc'),
+    ()=>sb.get('jex_dilution_applications','order=created_at.asc'),
+    ()=>sb.get('jex_trades','order=created_at.desc&limit=200&select=id,ticker,qty,price,buyer_id,seller_id,type,ts'),  // only last 200 trades
+    ()=>sb.get('jex_dividends','order=created_at.asc'),
+    ()=>sb.get('jex_buybacks','order=created_at.asc'),
+    ()=>sb.get('jex_limit_orders','order=created_at.asc'),
+    ()=>sb.get('jex_share_classes','order=created_at.asc'),
+    ()=>sb.get('jex_class_applications','order=created_at.asc'),
+    ()=>sb.get('jex_votes','order=created_at.desc'),
+    ()=>sb.get('jex_vote_ballots','order=created_at.asc'),
+    ()=>sb.get('jex_price_alerts','order=created_at.asc'),
+    ()=>sb.get('jex_nw_history','order=created_at.desc&limit=200'),
+    ()=>sb.get('jex_company_members','order=created_at.asc'),
+    ()=>sb.get('jex_founder_allocations','order=created_at.desc'),
+    ()=>sb.get('jex_price_adjustments','order=created_at.desc&limit=50'),
+    ()=>sb.get('jex_classrooms','order=created_at.asc'),
+    ()=>sb.get('jex_stop_loss','status=eq.active&order=created_at.asc'),
+    ()=>sb.get('jex_minutes','order=created_at.desc&limit=50'),
+    ()=>sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
+    ()=>sb.get('jex_funds','order=created_at.asc'),
+    ()=>sb.get('jex_index_history','order=created_at.asc&limit=500'),
+    ()=>sb.get('jex_snapshots','order=created_at.desc&limit=50'),
+  ],6);
   Object.assign(DB,{pending,news,ipoApps,dilApps,
     trades,dividends,buybacks,limitOrders,
     shareClasses,classApps,votes,ballots,
