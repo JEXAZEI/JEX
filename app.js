@@ -1685,7 +1685,15 @@ async function registerStudent(name,username,email,pw,secQ,secA,emailVerified,au
   if(!validEmail(email))return toast('Enter a valid email');
   const isGoogle=authProvider==='google';
   if(!isGoogle){
-    if(!pw||pw.length<4)return toast('Password must be at least 4 characters');
+    // Registration immediately tries to create a real Supabase Auth account
+    // alongside the legacy one (tryCreateAuthAccount, below) -- Supabase
+    // Auth itself requires 6+ characters, so anything shorter fails that
+    // silently and leaves the account permanently stuck on the legacy,
+    // non-auth.uid() path: it can still log in, but any server action that
+    // checks a real authenticated identity (trading foremost among them)
+    // rejects it with "Not authenticated," with nothing connecting that
+    // error back to the password that caused it.
+    if(!pw||pw.length<6)return toast('Password must be at least 6 characters');
     if(!secQ)return toast('Select a security question');
     if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   }
@@ -1717,7 +1725,15 @@ async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerifi
   if(!desc||desc.trim().length<5)return toast('Please add a description');
   const isGoogle=authProvider==='google';
   if(!isGoogle){
-    if(!pw||pw.length<4)return toast('Password must be at least 4 characters');
+    // Registration immediately tries to create a real Supabase Auth account
+    // alongside the legacy one (tryCreateAuthAccount, below) -- Supabase
+    // Auth itself requires 6+ characters, so anything shorter fails that
+    // silently and leaves the account permanently stuck on the legacy,
+    // non-auth.uid() path: it can still log in, but any server action that
+    // checks a real authenticated identity (trading foremost among them)
+    // rejects it with "Not authenticated," with nothing connecting that
+    // error back to the password that caused it.
+    if(!pw||pw.length<6)return toast('Password must be at least 6 characters');
     if(!secQ)return toast('Select a security question');
     if(!secA||secA.trim().length<2)return toast('Enter a security answer');
   }
@@ -1914,7 +1930,12 @@ async function adminResetPw(uid2,pw){
   // password-hash column has no effect on — setting it here would silently do nothing
   // while telling the officer it worked. Route those through a real reset email instead.
   if(u.auth_provider==='google'||u.auth_uid)return toast('This account uses real sign-in — use "Send password reset email" instead');
-  if(!pw||pw.length<4)return toast('Min 4 characters');
+  // Anything under 6 characters can still be set here (this only writes the
+  // legacy password column) but dooms the account: the next login's silent
+  // migration attempt (see loginByForm) requires Supabase Auth's own 6-char
+  // minimum and would just fail again, leaving it stuck unable to trade
+  // with no obvious link back to this reset.
+  if(!pw||pw.length<6)return toast('Min 6 characters (shorter passwords can\'t migrate to real sign-in, which trading requires)');
   // Runs server-side (rpc_admin_reset_password), re-checking every rule
   // above -- they were client-side only.
   try{await sb.rpc('rpc_admin_reset_password',{p_user_id:uid2,p_new_pw:pw});}
@@ -2007,7 +2028,13 @@ async function forgotStep2(answer){const u=getUser(UI.forgotUserId);if(!u)return
   UI.loginView='forgot-newpw';render();}
 async function forgotStep3(pw,conf){
   const u=getUser(UI.forgotUserId);if(!u)return;
-  if(!pw||pw.length<4)return toast('Min 4 characters');
+  // Same 6-char floor as registration/adminResetPw, and for the same
+  // reason: an unmigrated account's next login silently tries to create a
+  // real Supabase Auth identity using this password (see loginByForm),
+  // which requires 6+ characters -- anything shorter here would "succeed"
+  // at resetting the password while quietly leaving the account unable to
+  // trade, with nothing connecting the two.
+  if(!pw||pw.length<6)return toast('Min 6 characters (shorter passwords can\'t migrate to real sign-in, which trading requires)');
   if(pw!==conf)return toast('Passwords do not match');
   if(u.auth_uid){
     // Migrated account: the real credential lives in Supabase Auth, not
