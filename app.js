@@ -240,22 +240,42 @@ function subscribeRealtime(){
       heartbeatInterval=setInterval(()=>{
         if(ws.readyState===1)ws.send(JSON.stringify({topic:'phoenix',event:'heartbeat',payload:{},ref:'hb'}));
       },30000);
-      console.log('JEX Realtime connected');
+      // Only means the raw WebSocket opened -- NOT that the phx_join above
+      // was actually accepted. A rejected join (bad config, permission
+      // issue, etc.) leaves the socket open and this log still fires, with
+      // no events ever arriving and nothing else printed anywhere -- see
+      // the ref:'1' reply handling in onmessage below, which is what
+      // actually confirms the join succeeded or says why it didn't.
+      console.log('JEX Realtime connected (socket open; waiting on join confirmation)');
     };
-    
+
     ws.onmessage=e=>{
       try{
         const msg=JSON.parse(e.data);
+        // Phoenix's reply to the phx_join sent in onopen (ref:'1') --
+        // previously ignored entirely, so a rejected join (the socket
+        // stays open either way) was indistinguishable from a working one
+        // until events silently never arrived.
+        if(msg.ref==='1'&&msg.event==='phx_reply'){
+          if(msg.payload?.status==='ok')console.log('JEX Realtime: channel join confirmed, subscribed to',tables.join(', '));
+          else console.warn('JEX Realtime: channel join REJECTED:',JSON.stringify(msg.payload));
+          return;
+        }
         if(msg.event==='postgres_changes'||msg.event==='INSERT'||msg.event==='UPDATE'||msg.event==='DELETE'){
           const {table,new:newRow,old:oldRow,eventType}=msg.payload?.data||msg.payload||{};
           handleRealtimeUpdate(table,eventType||msg.event,newRow,oldRow);
         }
-      }catch(err){}
+      }catch(err){console.warn('JEX Realtime: failed to parse message:',err.message,e.data);}
     };
-    
-    ws.onerror=()=>{ clearInterval(heartbeatInterval); };
-    ws.onclose=()=>{ 
+
+    ws.onerror=(e)=>{ clearInterval(heartbeatInterval); console.warn('JEX Realtime: WebSocket error',e); };
+    ws.onclose=(e)=>{
       clearInterval(heartbeatInterval);
+      // CloseEvent carries a real code/reason (e.g. 1006 abnormal closure,
+      // 1002 protocol error, or an application-specific 4xxx code) --
+      // logged since this fires on every disconnect, including ones a
+      // firewall/proxy caused before the connection ever really opened.
+      console.warn('JEX Realtime: connection closed (code '+e.code+(e.reason?', reason: '+e.reason:'')+') -- reconnecting in 5s');
       // Reconnect after 5s if still logged in
       if(UI.userId)setTimeout(subscribeRealtime,5000);
     };
