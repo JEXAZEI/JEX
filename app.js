@@ -1852,16 +1852,24 @@ async function loginByForm(){
       const{data,error}=await supaAuth.auth.signUp({email:u.email,password:pw});
       if(!error&&data&&data.user)authUid=data.user.id;
       else{
+        // supabase-js resolves with {error} here instead of throwing, so the
+        // signUp rejection reason was previously discarded silently the
+        // moment this else-branch ran -- logged now so a failure here is at
+        // least visible in the console instead of indistinguishable from
+        // success.
+        if(error)console.warn('legacy account auth migration: signUp failed:',error.message||error);
         // An Auth account may already exist from a prior migration attempt that
         // didn't finish backfilling auth_uid (e.g. the PATCH below raced or
         // failed) — try signing into it before giving up.
         const signInRes=await supaAuth.auth.signInWithPassword({email:u.email,password:pw});
         if(!signInRes.error&&signInRes.data&&signInRes.data.session)authUid=signInRes.data.session.user.id;
+        else if(signInRes.error)console.warn('legacy account auth migration: signInWithPassword fallback also failed:',signInRes.error.message||signInRes.error);
       }
       // Runs server-side (rpc_link_own_auth_uid) -- same JWT-email check as
       // the Google backfill above, now backed by the fresh Supabase Auth
       // session signUp/signInWithPassword just established for this email.
       if(authUid){await sb.rpc('rpc_link_own_auth_uid',{p_user_id:u.id});u.auth_uid=authUid;}
+      else console.warn('legacy account auth migration: no authUid obtained from either signUp or signInWithPassword -- see warnings above for why');
     }catch(e){console.warn('legacy account auth migration failed:',e);}
   }
   return finishLogin(u);
