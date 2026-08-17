@@ -16,7 +16,7 @@ const APP_VERSION = '1.0.0';
 // gets them through a scoped RPC instead (see rpc_resolve_login_identity,
 // rpc_google_session_match, rpc_admin_get_all_emails,
 // rpc_get_company_team_contacts).
-const JEX_USERS_SAFE_SELECT = 'id,name,username,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,auth_provider,auth_uid,created_at,classroom_id,email_notifications,is_test_account';
+const JEX_USERS_SAFE_SELECT = 'id,name,username,role,status,cash,holdings,shorts,watchlist,fund_units,description,app_status,sec_q,auth_provider,auth_uid,created_at,classroom_id,email_notifications,is_test_account,last_login_at,departed_at';
 const JEX_PENDING_SAFE_SELECT = 'id,name,role,sec_q,description,ts,created_at,classroom_id,username,auth_provider,email_verified,auth_uid';
 
 // Headers carry the CURRENT user's own Supabase Auth access token when one exists
@@ -187,7 +187,7 @@ async function hashPw(pw){
 let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
-  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],contactMessages:[],indexHistory:[],snapshots:[],clientErrors:[],
+  companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],indexHistory:[],snapshots:[],clientErrors:[],retentionCandidates:[],
   session:{id:1,status:'closed',label:'Session closed',ends_at:null,scheduled_open:null,scheduled_close:null,starting_cash:10000,sheets_url:null,circuit_breaker_pct:20,session_open_prices:{},circuit_cooldowns:{},session_started_at:null,jxi_open_value:null,budget_warning_threshold:500,dividend_approval_threshold:1000,price_band_pct:30,order_rate_limit:10,
     weekly_schedule:{sun:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},mon:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},tue:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},wed:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},thu:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},fri:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}},sat:{enabled:false,open:{h:16,m:0},close:{h:18,m:30}}},
     weekly_active:false,weekly_override:false}};
@@ -374,7 +374,7 @@ async function loadAll(){
   const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
     activity,shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds,contactMessages,indexHistory,snapshots,clientErrors]=await Promise.all([
+    priceAdjustments,flags,classrooms,stopLossOrders,minutes,divApprovals,bugReports,funds,indexHistory,snapshots,clientErrors,retentionCandidates]=await Promise.all([
     sb.get('jex_pending','order=created_at.asc&select='+JEX_PENDING_SAFE_SELECT),
     sb.get('jex_news','order=created_at.desc&limit=50'),
     sb.get('jex_ipo_applications','order=created_at.asc'),
@@ -405,13 +405,13 @@ async function loadAll(){
     sb.get('jex_company_members','order=created_at.asc'),
     sb.get('jex_founder_allocations','order=created_at.desc'),
     sb.get('jex_price_adjustments','order=created_at.desc&limit=50'),
-    // jex_flags/jex_bug_reports/jex_contact_messages: table-level SELECT is
-    // revoked for anon/authenticated entirely now (see the
-    // email-pii-exposure-fix migration) -- these three RPCs are the only
-    // way to read them, and only resolve to real data for the admin roles
-    // each one actually gates on. Any other caller gets a permission error
-    // here, which safeRpc quietly turns into an empty array -- exactly the
-    // "nothing to show" state those users should see anyway.
+    // jex_flags/jex_bug_reports: table-level SELECT is revoked for
+    // anon/authenticated entirely now (see the email-pii-exposure-fix
+    // migration) -- these RPCs are the only way to read them, and only
+    // resolve to real data for the admin roles each one actually gates on.
+    // Any other caller gets a permission error here, which safeRpc quietly
+    // turns into an empty array -- exactly the "nothing to show" state
+    // those users should see anyway.
     safeRpc('rpc_admin_list_flags').then(r=>r||[]),
     sb.get('jex_classrooms','order=created_at.asc'),
     sb.get('jex_stop_loss','status=eq.active&order=created_at.asc'),
@@ -419,18 +419,20 @@ async function loadAll(){
     sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
     safeRpc('rpc_admin_list_bug_reports').then(r=>r||[]),
     sb.get('jex_funds','order=created_at.asc'),
-    safeRpc('rpc_admin_list_contact_messages').then(r=>r||[]),
     sb.get('jex_index_history','order=created_at.asc&limit=500'),
     sb.get('jex_snapshots','order=created_at.desc&limit=50'),
-    // Same pattern as flags/bug_reports/contact_messages -- admin-only
-    // (see the client-error-logging migration).
+    // Same pattern as flags/bug_reports -- admin-only (see the
+    // client-error-logging migration).
     safeRpc('rpc_admin_list_client_errors',{p_limit:100}).then(r=>r||[]),
+    // Chairman/President only (see the data-retention migration) -- safeRpc
+    // resolves to null (turned into [] below) for every other role.
+    safeRpc('rpc_admin_list_retention_candidates').then(r=>r||[]),
   ]);
   Object.assign(DB,{pending,news,ipoApps,dilApps,
     trades,dividends,buybacks,limitOrders,activity,
     shareClasses,classApps,votes,ballots,notifications,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds,contactMessages,indexHistory,snapshots,clientErrors});
+    priceAdjustments,flags,minutes,divApprovals,stopLossOrders,classrooms,bugReports,funds,indexHistory,snapshots,clientErrors,retentionCandidates});
   // Chairman/President/Treasurer/Compliance Officer only (see
   // rpc_admin_get_all_emails): merges real email addresses into the
   // already-loaded (email-less) DB.users/DB.pending rows. safeRpc resolves
@@ -456,6 +458,13 @@ async function loadAll(){
       const self=DB.users.find(u=>u.id===UI.userId);
       if(self){self.email=info.email;self.notification_email=info.notification_email;}
     }
+    // Fire-and-forget: records this as activity for the data-retention
+    // inactivity check (see the data-retention migration). Runs on every
+    // loadAll() -- a fresh login (via finishLogin) and a page reload that
+    // restores an existing session both go through here, so "12 months
+    // inactive" tracks real use, not just how often someone re-types a
+    // password. No-ops harmlessly for accounts with no real auth_uid yet.
+    safeRpc('rpc_touch_last_login');
   }
   render(); // re-render with full data
 }
@@ -467,6 +476,13 @@ const get=id=>document.getElementById(id);
 function togglePw(id){const el=get(id);if(!el)return;el.type=el.type==='password'?'text':'password';const btn=el.parentElement?.querySelector('.pw-eye');if(btn)btn.textContent=el.type==='password'?'👁':'🙈';}
 const fmt=n=>'$'+Number(n).toFixed(2);
 const fmtChg=n=>(n>=0?'+':'')+Number(n).toFixed(2)+'%';
+function daysAgo(ts2){
+  if(!ts2)return'';
+  const d=Math.floor((Date.now()-new Date(ts2).getTime())/86400000);
+  if(d<1)return'today';
+  if(d===1)return'1 day ago';
+  return d+' days ago';
+}
 const norm=s=>(s||'').trim().toLowerCase();
 const validEmail=e=>e&&e.includes('@')&&e.includes('.');
 const normalizeUsername=v=>{v=(v||'').trim();if(v.startsWith('@'))v=v.slice(1);return v;};
@@ -1291,7 +1307,7 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports,newFunds,newContactMessages]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports,newFunds]=await Promise.all([
       // Was a client-supplied user_id=eq. filter -- not a real security
       // boundary since SELECT was table-wide open (see the
       // notification-privacy-fix migration). rpc_get_my_notifications
@@ -1310,7 +1326,6 @@ async function autoRefresh(){
       sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
       safeRpc('rpc_admin_list_bug_reports').then(r=>r||[]),
       sb.get('jex_funds','order=created_at.asc'),
-      safeRpc('rpc_admin_list_contact_messages').then(r=>r||[]),
     ]);
     const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
@@ -1325,7 +1340,6 @@ async function autoRefresh(){
     DB.divApprovals=newDivApprovals;
     DB.bugReports=newBugReports;
     DB.funds=newFunds;
-    DB.contactMessages=newContactMessages;
     // Chairman/President only (see loadAll) -- keeps newly-arrived pending
     // registrations' emails visible without a full reload; a no-op safeRpc
     // resolves to null for everyone else.
@@ -2829,7 +2843,7 @@ async function resetExchange(){
     DB.halts=[];DB.activity=[];DB.news=[];DB.announcements=[];
     DB.minutes=[];DB.flags=[];DB.pending=[];DB.ipoApps=[];DB.bugReports=[];
     DB.funds=DB.funds.filter(f=>getUser(f.manager_id)?.is_test_account);
-    DB.contactMessages=[];DB.indexHistory=[];
+    DB.indexHistory=[];
     DB.dilApps=[];DB.shareClasses=DB.shareClasses.filter(sc=>DB.companies.some(c=>c.ticker===sc.parent_ticker));DB.classApps=[];
     DB.founderAllocations=[];DB.companyMembers=[];
     DB.priceAdjustments=[];DB.priceAlerts=[];
@@ -3539,6 +3553,7 @@ async function removeUser(uid2){
   catch(e){return toast(rpcErrorMessage(e));}
   DB.users=DB.users.filter(x=>x.id!==uid2);
   DB.dividends.forEach(d=>{d.payouts=(d.payouts||[]).filter(p=>p.userId!==uid2);});
+  DB.retentionCandidates=(DB.retentionCandidates||[]).filter(x=>x.id!==uid2);
   toast(u.name+' removed');render();
 }
 async function removeCompany(uid2){
@@ -3555,6 +3570,7 @@ async function removeCompany(uid2){
   DB.users=DB.users.filter(x=>x.id!==uid2);
   DB.ipoApps=DB.ipoApps.filter(a=>a.user_id!==uid2);
   DB.dilApps=DB.dilApps.filter(d=>d.user_id!==uid2);
+  DB.retentionCandidates=(DB.retentionCandidates||[]).filter(x=>x.id!==uid2);
   toast(u.name+' removed');render();
 }
 async function removeShareClass(ticker){
@@ -4490,19 +4506,6 @@ function renderContactAdminModalHTML(){
     </div>
   </div>`;
 }
-async function resolveContactMessage(msgId){
-  const m=DB.contactMessages.find(x=>x.id===msgId);if(!m)return;
-  const u=cu();
-  // Runs server-side (rpc_admin_resolve_contact_message) -- this had NO
-  // check at all before.
-  let r;
-  try{r=await sb.rpc('rpc_admin_resolve_contact_message',{p_msg_id:msgId});}
-  catch(e){return toast(rpcErrorMessage(e));}
-  if(!r.resolved)return toast('This message was already resolved');
-  m.status='resolved';m.resolved_by=u.name;
-  toast('Message marked resolved');render();
-}
-
 // ═══════════════════════════════════════════════
 // RENDER: LOGIN
 // ═══════════════════════════════════════════════
@@ -6270,17 +6273,21 @@ function renderAdmin(){
 
   const openFlags=(DB.flags||[]).filter(f=>f.status==='open').length;
   const openBugReports=(DB.bugReports||[]).filter(b=>b.status==='open').length;
-  const openMessages=(DB.contactMessages||[]).filter(m=>m.status==='open').length;
-  const messagesTabEntry=['messages',openMessages?'Messages <span class="badge b-red">'+openMessages+'</span>':'Messages'];
   const errorCount=(DB.clientErrors||[]).length;
   const clientErrorsTabEntry=['client_errors',errorCount?'Errors <span class="badge b-red">'+errorCount+'</span>':'Errors'];
+  const retentionCount=(DB.retentionCandidates||[]).length;
+  const retentionTabEntry=['retention',retentionCount?'Data retention <span class="badge b-amber">'+retentionCount+'</span>':'Data retention'];
   // President can only see: session, balances, passwords
   const presidentTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['balances','Balances'],['passwords','Reset passwords'],['news','News'],['activity','Activity log']];
-  const secretaryTabs=[['announcements','Announcements'],['minutes','Minutes'],['notices','Official notices'],['shareholders','Shareholder registry'],['votes_all','Vote oversight'],['news','News'],messagesTabEntry];
-  const sectreTabs=u.role==='secretary'?secretaryTabs:[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log'],messagesTabEntry];
-  const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags'],messagesTabEntry,clientErrorsTabEntry];
-  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['bug_reports',openBugReports?'Bug reports <span class="badge b-red">'+openBugReports+'</span>':'Bug reports'],messagesTabEntry,['snapshots','Snapshots'],clientErrorsTabEntry];
-  const treasurerTabs=[['balances','Balances'],['cashflow','Cash flow'],['dividends_audit','Dividend audit'],['price_adj_log','Price adjustments'],['budget_warnings','Budget warnings'],['activity','Activity log'],messagesTabEntry,clientErrorsTabEntry];
+  const secretaryTabs=[['announcements','Announcements'],['minutes','Minutes'],['notices','Official notices'],['shareholders','Shareholder registry'],['votes_all','Vote oversight'],['news','News']];
+  const sectreTabs=u.role==='secretary'?secretaryTabs:[['announcements','Announcements'],['balances','Balances'],['news','News'],['activity','Activity log']];
+  const complianceTabs=[['dashboard','Dashboard'],['balances','Balances'],['trades','All trades'],['activity','Activity log'],['listed','Listed'],['news','News'],['announcements','Announcements'],['flags','Flags'],clientErrorsTabEntry];
+  // retentionTabEntry is only ever added to chairmanTabs below -- Chairman
+  // and President are the only roles that reach chairmanTabs (see the
+  // `tabs=` line), so this keeps the data-retention panel restricted to
+  // exactly those two roles without a separate permission check here.
+  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['bug_reports',openBugReports?'Bug reports <span class="badge b-red">'+openBugReports+'</span>':'Bug reports'],retentionTabEntry,['snapshots','Snapshots'],clientErrorsTabEntry];
+  const treasurerTabs=[['balances','Balances'],['cashflow','Cash flow'],['dividends_audit','Dividend audit'],['price_adj_log','Price adjustments'],['budget_warnings','Budget warnings'],['activity','Activity log'],clientErrorsTabEntry];
   const tabs=(chair||isPresident(u))?chairmanTabs:u.role==='compliance_officer'?complianceTabs:u.role==='treasurer'?treasurerTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
   if(!allowedTabs.includes(UI.adminTab))UI.adminTab=tabs[0][0];
@@ -6297,7 +6304,7 @@ function renderAdmin(){
   :UI.adminTab==='flags'?renderAdminFlags()
   :UI.adminTab==='bug_reports'?renderAdminBugReports()
   :UI.adminTab==='client_errors'?renderAdminClientErrors()
-  :UI.adminTab==='messages'?renderAdminMessages()
+  :UI.adminTab==='retention'?renderAdminRetention()
   :UI.adminTab==='snapshots'?renderSnapshotTab()
   :UI.adminTab==='minutes'?renderAdminMinutes()
   :UI.adminTab==='notices'?renderAdminOfficialNotices()
@@ -6606,7 +6613,7 @@ function renderAdminUsers(students,companies,officers,leadership){
     <div class="ibox ibox-blue" style="margin-bottom:14px">Select an operation, enter an amount, and click Apply to update a student's cash balance. Subtract will not go below $0.</div>
     ${students.length?students.map(u=>`<div class="app-row">
       <div class="app-info">
-        <div class="app-name">${esc(u.name)}</div>
+        <div class="app-name">${esc(u.name)}${u.departed_at?' <span class="badge b-amber">left the program '+esc(daysAgo(u.departed_at))+'</span>':''}</div>
         <div class="app-meta">${esc(u.email)} &nbsp;|&nbsp; Cash: <strong style="font-family:var(--mono);color:var(--green)">${fmt(u.cash)}</strong> &nbsp;|&nbsp; Net worth: <strong style="font-family:var(--mono)">${fmt(nw(u))}</strong></div>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
@@ -6618,6 +6625,7 @@ function renderAdminUsers(students,companies,officers,leadership){
         <input type="number" id="cash-amt-${u.id}" placeholder="Amount" min="0" step="0.01" style="width:100px;font-size:12px;padding:5px 8px">
         <button class="btn btn-sm btn-primary" onclick="adjustCash('${u.id}')">Apply</button>
         <button class="btn btn-sm ${u.is_test_account?'btn-warning':''}" title="Test accounts stay usable during Dev Mode" onclick="setTestAccount('${u.id}',${!u.is_test_account})">${u.is_test_account?'🛠️ Test account':'Mark as test account'}</button>
+        <button class="btn btn-sm" title="Starts the Privacy Policy's 60-day deletion window" onclick="${u.departed_at?`unmarkDeparted('${u.id}')`:`markDeparted('${u.id}')`}">${u.departed_at?'Undo — still enrolled':'Mark left the program'}</button>
         <button class="btn btn-sm btn-danger" onclick="removeUser('${u.id}')">Remove</button>
       </div>
     </div>`).join(''):`<div class="empty">No students yet</div>`}
@@ -6626,7 +6634,7 @@ function renderAdminUsers(students,companies,officers,leadership){
     <div class="ibox ibox-blue">Adjust a company account&#39;s cash balance directly.</div>
     ${companies.map(u=>`<div class="app-row">
       <div class="app-info">
-        <div class="app-name">${esc(u.name)}</div>
+        <div class="app-name">${esc(u.name)}${u.departed_at?' <span class="badge b-amber">left the program '+esc(daysAgo(u.departed_at))+'</span>':''}</div>
         <div class="app-meta">${esc(u.email)} &nbsp;|&nbsp; Cash: <strong style="font-family:var(--mono);color:var(--green)">${fmt(u.cash)}</strong></div>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
@@ -6638,6 +6646,7 @@ function renderAdminUsers(students,companies,officers,leadership){
         <input type="number" id="co-cash-amt-${u.id}" placeholder="Amount" min="0" step="0.01" style="width:100px;font-size:12px;padding:5px 8px">
         <button class="btn btn-sm btn-primary" onclick="adjustCompanyCash('${u.id}')">Apply</button>
         <button class="btn btn-sm ${u.is_test_account?'btn-warning':''}" title="Test accounts stay usable during Dev Mode" onclick="setTestAccount('${u.id}',${!u.is_test_account})">${u.is_test_account?'🛠️ Test account':'Mark as test account'}</button>
+        <button class="btn btn-sm" title="Starts the Privacy Policy's 60-day deletion window" onclick="${u.departed_at?`unmarkDeparted('${u.id}')`:`markDeparted('${u.id}')`}">${u.departed_at?'Undo — still enrolled':'Mark left the program'}</button>
         <button class="btn btn-sm btn-danger" onclick="removeCompany('${u.id}')">Remove</button>
       </div>
     </div>`).join('')}
@@ -6839,40 +6848,51 @@ async function clearClientErrors(){
   DB.clientErrors=[];
   toast('Error log cleared');render();
 }
-function renderAdminMessages(){
-  const openMsgs=(DB.contactMessages||[]).filter(m=>m.status==='open');
-  const closedMsgs=(DB.contactMessages||[]).filter(m=>m.status!=='open');
-  let html=`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
-    Open messages ${openMsgs.length?`<span class="badge b-red">${openMsgs.length}</span>`:''}
-  </div>`;
-  if(!openMsgs.length){
-    html+='<div class="empty">No open messages</div>';
-  } else {
-    openMsgs.forEach(m=>{
-      html+=`<div style="padding:12px;border:1px solid var(--red);border-radius:var(--radius);margin-bottom:10px;background:rgba(255,77,106,0.04)">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-          <span style="font-size:16px">✉️</span>
-          <strong>${esc(m.from_name)}</strong>
-          <a href="mailto:${esc(m.from_email)}" class="legal-link" style="font-size:12px">${esc(m.from_email)}</a>
-          <span style="font-size:11px;color:var(--text2);margin-left:auto">${esc(m.ts)}</span>
-        </div>
-        <div style="font-size:13px;color:var(--text2);margin-bottom:10px;white-space:pre-wrap">${esc(m.message)}</div>
-        <button class="btn btn-sm btn-success" onclick="resolveContactMessage('${m.id}')">✓ Mark resolved</button>
-      </div>`;
-    });
+
+// ═══════════════════════════════════════════════
+// DATA RETENTION (Privacy Policy §"How long we keep it")
+// Chairman/President only -- see the data-retention migration.
+// ═══════════════════════════════════════════════
+async function refreshRetentionCandidates(){
+  DB.retentionCandidates=await safeRpc('rpc_admin_list_retention_candidates')||[];
+}
+async function markDeparted(uid2){
+  const u=getUser(uid2);if(!u)return;
+  if(!confirm(u.name+' has left the program? This starts the 60-day window before their account becomes eligible for deletion under the Privacy Policy — it does not delete anything now.'))return;
+  let r;
+  try{r=await sb.rpc('rpc_admin_mark_departed',{p_target_id:uid2});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  if(r&&r.departed_at)u.departed_at=r.departed_at;
+  await refreshRetentionCandidates();
+  toast(u.name+' marked as having left the program');render();
+}
+async function unmarkDeparted(uid2){
+  const u=getUser(uid2);if(!u)return;
+  try{await sb.rpc('rpc_admin_unmark_departed',{p_target_id:uid2});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  u.departed_at=null;
+  await refreshRetentionCandidates();
+  toast(u.name+' is still enrolled');render();
+}
+function renderAdminRetention(){
+  const rows=DB.retentionCandidates||[];
+  let html=`<div class="ibox ibox-blue" style="margin-bottom:14px">Accounts show up here once they're actually eligible for deletion under the Privacy Policy — 60+ days after being marked as having left the program (see the Users tab), or 12+ months since their last login with no departure marked. Nothing is ever deleted automatically; review each one and click Delete when you're ready.</div>`;
+  if(!rows.length){
+    html+='<div class="card"><div class="empty">No accounts currently eligible for deletion</div></div>';
+    return html;
   }
-  html+='</div>';
-  if(closedMsgs.length){
-    html+=`<div class="card"><div class="section-title">Resolved messages</div>
-      <table><thead><tr><th>From</th><th>Message</th><th>Resolved by</th><th>Time</th></tr></thead>
-      <tbody>${closedMsgs.map(m=>`<tr>
-        <td style="font-weight:500">${esc(m.from_name)}</td>
-        <td style="font-size:12px;color:var(--text2);max-width:300px">${esc(m.message)}</td>
-        <td style="font-size:12px;color:var(--text2)">${esc(m.resolved_by)||'—'}</td>
-        <td style="font-size:12px;color:var(--text2)">${esc(m.ts)||''}</td>
-      </tr>`).join('')}</tbody></table>
-    </div>`;
-  }
+  html+=`<div class="card"><table><thead><tr><th>Name</th><th>Role</th><th>Reason</th><th>Since</th><th></th></tr></thead><tbody>
+    ${rows.map(r=>`<tr>
+      <td style="font-weight:500">${esc(r.name)}</td>
+      <td>${esc(r.role)}</td>
+      <td>${r.reason==='departed'?'Left the program':'Inactive 12+ months'}</td>
+      <td style="font-size:12px;color:var(--text2)">${esc(daysAgo(r.reason==='departed'?r.departed_at:r.last_login_at))}</td>
+      <td style="display:flex;gap:6px;justify-content:flex-end">
+        ${r.reason==='departed'?`<button class="btn btn-sm" onclick="unmarkDeparted('${r.id}')">Not leaving after all</button>`:''}
+        <button class="btn btn-sm btn-danger" onclick="${r.role==='company'?`removeCompany('${r.id}')`:`removeUser('${r.id}')`}">Delete now</button>
+      </td>
+    </tr>`).join('')}
+  </tbody></table></div>`;
   return html;
 }
 function submitFlagForm(){
