@@ -2834,6 +2834,7 @@ async function checkStopLossOrders(){
     if(u){u.cash=r.cash;u.holdings=r.holdings;}
     co.price=r.price;co.shares_avail=r.shares_avail;co.price_history=r.price_history;
     if(r.trade)DB.trades.push(r.trade);
+    pushTradeToSheets(r.trade);
     await pushNotification(r.user_id,'stop_loss','🛑 Stop-loss triggered: sold '+r.sell_qty+'×'+sl.ticker+' @ '+fmt(r.price)+' (trigger: '+fmt(sl.trigger_price)+')',sl.ticker);
     await logActivity('stop_loss',(u?u.name:'Someone')+' stop-loss triggered on '+sl.ticker+' @ '+fmt(r.price),{ticker:sl.ticker,userId:r.user_id,userName:u?u.name:'',amount:r.sell_qty*r.price});
     toast('Stop-loss triggered'+(u?' for '+u.name:'')+': sold '+r.sell_qty+'×'+sl.ticker+' @ '+fmt(r.price));
@@ -3217,6 +3218,7 @@ function applyLimitMatchResult(r){
   const askLocal=DB.limitOrders.find(o=>o.id===r.ask_order_id);
   if(askLocal){askLocal.status=r.ask_status;askLocal.qty=r.ask_qty;if(r.ask_status==='filled')askLocal.filled_price=r.fill_price;}
   checkPriceAlerts();checkCircuitBreakers();pushBalances();snapshotJXI();
+  pushTradeToSheets(r.trade);
 }
 function applyLimitPoolFillResult(orderId,r){
   const co=getCo(r.ticker);if(co){co.price=r.price;co.price_history=r.price_history;if('shares_avail'in r)co.shares_avail=r.shares_avail;}
@@ -3226,6 +3228,7 @@ function applyLimitPoolFillResult(orderId,r){
   const o=DB.limitOrders.find(x=>x.id===orderId);
   if(o){o.status='filled';o.filled_price=r.fill_price;}
   checkPriceAlerts();checkCircuitBreakers();pushBalances();snapshotJXI();
+  pushTradeToSheets(r.trade);
 }
 // Repeatedly asks the server to match the book (which may resolve OTHER
 // pairs too, exactly like the old periodic scan did) until either nothing
@@ -3358,6 +3361,25 @@ function rpcErrorMessage(e){
   try{const parsed=JSON.parse(e.message);if(parsed&&parsed.message)return parsed.message;}catch(err){}
   return (e&&e.message)||String(e);
 }
+// Shared by every path that can produce a jex_trades row -- plain student
+// trades, fund trades, limit-order book matches, pool fills, and stop-loss
+// triggers all call this so a classroom's Sheets export actually sees
+// every trade, not just plain market buy/sell (the only path that used to
+// call pushToSheets at all). buyer_id/seller_id show up in one of four
+// shapes depending on which RPC produced the row: 'exchange'/'short'/
+// 'cover' (the JEX pool absorbing the other side), 'fund:<id>' (a fund
+// traded on its own behalf), or a real user id.
+function pushTradeToSheets(trade){
+  if(!trade)return;
+  const resolve=(id,poolLabels)=>{
+    if(poolLabels.includes(id))return 'JEX';
+    if(typeof id==='string'&&id.startsWith('fund:'))return getFund(id.slice(5))?.name||id;
+    return getUser(id)?.name||id;
+  };
+  pushToSheets('trades',{trades:[{ticker:trade.ticker,qty:trade.qty,price:trade.price,type:trade.type,ts:trade.ts,
+    buyer:resolve(trade.buyer_id,['exchange','short']),
+    seller:resolve(trade.seller_id,['exchange','cover'])}]});
+}
 function applyTradeResult(ticker,r){
   const u=cu(),co=getCo(ticker);
   if(u){u.cash=r.cash;if('holdings'in r)u.holdings=r.holdings;if('shorts'in r)u.shorts=r.shorts;}
@@ -3374,9 +3396,7 @@ function applyTradeResult(ticker,r){
   checkCircuitBreakers();
   pushBalances();
   snapshotJXI();
-  if(r.trade)pushToSheets('trades',{trades:[{ticker,qty:r.trade.qty,price:r.trade.price,type:r.trade.type,ts:r.trade.ts,
-    buyer:['exchange','short'].includes(r.trade.buyer_id)?'JEX':getUser(r.trade.buyer_id)?.name||r.trade.buyer_id,
-    seller:['exchange','cover'].includes(r.trade.seller_id)?'JEX':getUser(r.trade.seller_id)?.name||r.trade.seller_id}]});
+  pushTradeToSheets(r.trade);
 }
 async function placeBuy(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
@@ -3543,6 +3563,7 @@ function applyFundTradeResult(fundId,ticker,r){
   checkCircuitBreakers();
   pushBalances();
   snapshotJXI();
+  pushTradeToSheets(r.trade);
 }
 async function fundBuy(fundId,ticker,qty){
   const f=getFund(fundId);const co=getCo(ticker);if(!f||!co)return;
@@ -3586,6 +3607,7 @@ function applyFundShortResult(fundId,ticker,r){
   checkCircuitBreakers();
   pushBalances();
   snapshotJXI();
+  pushTradeToSheets(r.trade);
 }
 async function fundShort(fundId,ticker,qty){
   const f=getFund(fundId);const co=getCo(ticker);if(!f||!co)return;
