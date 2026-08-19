@@ -2721,28 +2721,83 @@ function calcVaR(userId){
 }
 
 // P&L Attribution: break down gains by source
+//
+// Two bugs lived here, both reproduced with concrete numbers before this
+// rewrite:
+//
+// 1) DB.trades is loaded 'order=created_at.desc' (newest first), but the
+//    old code walked it in array order while building a running cost
+//    basis. A sell was therefore processed BEFORE the buys that preceded
+//    it, so boughtVal was still empty and avgCost fell back to the sell's
+//    own price -- making realised P&L exactly zero. That's the ordinary
+//    buy-then-sell case, so realised trade P&L read $0 for essentially
+//    every student, short-seller or not.
+//
+// 2) Short opens and covers were treated as ordinary long sells and buys.
+//    A short open (seller_id === the user) booked a fake realised gain
+//    against the long cost basis, and a cover (buyer_id === the user)
+//    was folded into the long lot, dragging its average cost and
+//    corrupting the unrealised figure for shares the cover never touched.
+//    Realised short P&L also landed in the 'trade' bucket, and vanished
+//    entirely once the position closed and dropped out of the shorts map.
+//
+// Now: trades are walked oldest-first, short/cover legs are separated from
+// the long book, and short round-trips are realised into the short bucket.
 function calcPnLAttribution(userId){
   const u=getUser(userId);if(!u)return null;
-  const myTrades=DB.trades.filter(t=>t.buyer_id===userId||t.seller_id===userId);
+  // jex_trades ids are sequential, so ascending id is chronological. If a
+  // row ever carries a non-numeric id the comparator returns 0 and JS's
+  // stable sort leaves relative order alone -- no worse than before.
+  const myTrades=DB.trades.filter(t=>t.buyer_id===userId||t.seller_id===userId)
+    .slice().sort((a,b)=>{const x=Number(a.id),y=Number(b.id);return Number.isFinite(x)&&Number.isFinite(y)?x-y:0;});
   let tradePnL=0,divPnL=0,shortPnL=0,unrealised=0;
   // Dividends
   DB.dividends.forEach(d=>{
     const p=(d.payouts||[]).find(x=>x.userId===userId);
     if(p)divPnL+=p.payout;
   });
-  // Trade P&L (realised sells minus cost basis)
-  const bought={},boughtVal={};
+  // A short leg is identified by type, falling back to the pool-id shape
+  // (see pushTradeToSheets) for rows written before type was populated.
+  const isShortOpen=t=>t.type==='short'||t.buyer_id==='short';
+  const isCover=t=>t.type==='cover'||t.seller_id==='cover';
+  // Average-cost lots, tracked separately for the long book and the short
+  // book so neither can contaminate the other's basis.
+  const longLots={},shortLots={};
+  const lotAvg=(lots,ticker)=>lots[ticker]&&lots[ticker].qty>0?lots[ticker].val/lots[ticker].qty:null;
+  const addLot=(lots,ticker,qty,price)=>{
+    const l=lots[ticker]||(lots[ticker]={qty:0,val:0});
+    l.qty+=qty;l.val+=qty*price;
+  };
+  const closeLot=(lots,ticker,qty,avg)=>{
+    const l=lots[ticker];if(!l)return;
+    const used=Math.min(qty,l.qty);
+    l.qty-=used;l.val-=used*avg;
+    if(l.qty<=0){l.qty=0;l.val=0;}
+  };
   myTrades.forEach(t=>{
-    if(t.buyer_id===userId){bought[t.ticker]=(bought[t.ticker]||0)+t.qty;boughtVal[t.ticker]=(boughtVal[t.ticker]||0)+t.qty*t.price;}
-    else{const avgCost=boughtVal[t.ticker]&&bought[t.ticker]?boughtVal[t.ticker]/bought[t.ticker]:t.price;tradePnL+=t.qty*(t.price-avgCost);}
+    if(isShortOpen(t)&&t.seller_id===userId){
+      addLot(shortLots,t.ticker,t.qty,t.price);
+    } else if(isCover(t)&&t.buyer_id===userId){
+      const avg=lotAvg(shortLots,t.ticker);
+      // No visible opening leg (it fell outside the 200-trade window) --
+      // booking against the cover's own price yields 0 rather than a
+      // fabricated gain.
+      if(avg!=null){shortPnL+=t.qty*(avg-t.price);closeLot(shortLots,t.ticker,t.qty,avg);}
+    } else if(t.buyer_id===userId){
+      addLot(longLots,t.ticker,t.qty,t.price);
+    } else if(t.seller_id===userId){
+      const avg=lotAvg(longLots,t.ticker);
+      if(avg!=null){tradePnL+=t.qty*(t.price-avg);closeLot(longLots,t.ticker,t.qty,avg);}
+    }
   });
-  // Unrealised
+  // Unrealised on the long book still held
   Object.entries(holdings(u)).forEach(([ticker,qty])=>{
     const co=getCo(ticker);if(!co||!qty)return;
-    const avgCost=boughtVal[ticker]&&bought[ticker]?boughtVal[ticker]/bought[ticker]:co.price;
+    const avgCost=lotAvg(longLots,ticker);
+    if(avgCost==null)return; // no cost basis in the visible trade window
     unrealised+=qty*(co.price-avgCost);
   });
-  // Short P&L
+  // Open (unrealised) short positions, on top of any realised above
   const sh=shorts(u)||{};
   Object.entries(sh).forEach(([ticker,pos])=>{
     const co=getCo(ticker);if(!co||!pos)return;
