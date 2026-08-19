@@ -776,8 +776,20 @@ async function snapshotJXI(){
 const holdings=u=>u.holdings||{};const shorts=u=>u.shorts||{};const watchlist=u=>u.watchlist||[];
 const pv=u=>Object.entries(holdings(u)).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0);
 const sPnl=u=>Object.entries(shorts(u)).reduce((s,[t,pos])=>{const c=getCo(t);if(!c)return s;return s+Math.round((pos.avgPrice-c.price)*pos.qty*100)/100;},0);
+// Every short position's collateral (150% of its entry value, per
+// rpc_trade_short) is deducted from cash the moment it opens -- it's not
+// spent or lost, just temporarily illiquid, and comes back (adjusted for
+// P&L) on cover. sPnl() alone only captures the paper gain/loss, not the
+// collateral itself, so nw() without this term understated a shorting
+// student's true net worth by the full locked amount for as long as the
+// position stayed open -- unfairly tanking their leaderboard rank versus
+// a student who never shorted anything. Kept separate from sPnl() itself
+// (not folded into it) since sPnl() is also shown standalone as "Short
+// P&L" (app.js's own portfolio/leaderboard pages) -- folding collateral in
+// there would make that display wrong instead.
+const shortCollateral=u=>Object.entries(shorts(u)).reduce((s,[,pos])=>s+(pos.collateral||0),0);
 const divRec=u=>DB.dividends.reduce((s,d)=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);return s+(p?p.payout:0);},0);
-const nw=u=>Math.round((u.cash+pv(u)+sPnl(u))*100)/100;
+const nw=u=>Math.round((u.cash+pv(u)+sPnl(u)+shortCollateral(u))*100)/100;
 const isAdmin=u=>(['chairman','president','secretary','treasurer','compliance_officer'].includes(u?.role));
 const isChairman=u=>u?.role==='chairman'||u?.role==='president';
 const isPresident=u=>u?.role==='president';
@@ -3485,9 +3497,16 @@ const MAX_FUND_FEE_PCT=25;
 const getFund=id=>DB.funds.find(f=>f.id===id);
 const canManageFund=f=>{const u=cu();return !!u&&(u.id===f.manager_id||isChairman(u));};
 const fundShortPnl=f=>Object.entries(fundShorts(f)).reduce((s,[t,pos])=>{const c=getCo(t);if(!c)return s;return s+Math.round((pos.avgPrice-c.price)*pos.qty*100)/100;},0);
+// Same gap as the student-side sPnl()/nw() split (see shortCollateral()
+// above) -- a fund's locked short collateral is deducted from f.cash the
+// moment a position opens, but fundShortPnl() alone only captures P&L,
+// not the collateral itself. Kept separate from fundShortPnl() for the
+// same reason: it's shown standalone as the fund's own "Short P&L" stat
+// elsewhere (app.js's fund detail page).
+const fundShortCollateral=f=>Object.entries(fundShorts(f)).reduce((s,[,pos])=>s+(pos.collateral||0),0);
 function currentFundNav(f){
   const holdingsValue=Object.entries(f.holdings||{}).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0);
-  const totalValue=Math.round((f.cash+holdingsValue+fundShortPnl(f))*100)/100;
+  const totalValue=Math.round((f.cash+holdingsValue+fundShortPnl(f)+fundShortCollateral(f))*100)/100;
   return f.units_outstanding>0?Math.round((totalValue/f.units_outstanding)*10000)/10000:10;
 }
 
