@@ -1175,8 +1175,13 @@ async function createClassroom(){
   if(!isAdmin(cu()))return toast('Admin access required');
   const name=(document.getElementById('cls-name')?.value||'').trim();
   if(!name)return toast('Enter a classroom name');
-  const rec={id:uid(),name,ts:ts()};
-  await sb.post('jex_classrooms',rec);
+  // Runs server-side (rpc_admin_create_classroom) -- a raw client POST here
+  // used to let any authenticated (or even anonymous) caller insert
+  // arbitrary classroom rows, with only the isAdmin() check enforced
+  // client-side (trivially bypassed via a direct API call).
+  let rec;
+  try{rec=await sb.rpc('rpc_admin_create_classroom',{p_name:name});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.classrooms.push(rec);
   toast('Classroom "'+name+'" created');render();
 }
@@ -2421,16 +2426,24 @@ async function requestFounderAllocation(ticker,studentId,shares,reason){
   const parentTicker=meta?meta.parent_ticker:ticker;
   const parentCo=getCo(parentTicker);
   const companyName=parentCo?parentCo.name:stock.name;
-  const rec={id:uid(),ticker,company_name:companyName,student_id:studentId,student_name:student.name,shares,status:'pending',reason:(reason||'').trim(),ts:ts()};
+  // Runs server-side (rpc_request_founder_allocation) -- a raw client POST
+  // here used to let ANY authenticated (or even anonymous) caller insert a
+  // fabricated "pending" allocation for any ticker/share count, with only
+  // canManageCompany/shares_avail/duplicate-pending checks enforced
+  // client-side. rpc_review_founder_allocation (the approval step) already
+  // re-validates share availability and reviewer authorization, but that
+  // doesn't stop a forged request from deceiving a legitimate reviewer in
+  // the first place.
+  let rec;
   try{
-    const result=await sb.post('jex_founder_allocations',rec);
+    rec=await sb.rpc('rpc_request_founder_allocation',{p_ticker:ticker,p_student_id:studentId,p_shares:shares,p_reason:reason||''});
     DB.founderAllocations.push(rec);
     await logActivity('founder_alloc',companyName+' requested '+shares+' '+classLabel+' founder shares for '+student.name,{ticker});
     toast('✓ Allocation request submitted: '+shares+'×'+ticker+' for '+student.name);
     render();
   }catch(err){
     console.error('Founder alloc error:',err);
-    toast('Error submitting request: '+err.message);
+    toast('Error submitting request: '+rpcErrorMessage(err));
   }
 }
 async function reviewFounderAllocation(id,approve){
