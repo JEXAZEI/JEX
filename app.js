@@ -910,6 +910,30 @@ const divTotal=(ticker,ps)=>{
   return Math.round((direct+indirect)*100)/100;
 };
 const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);return Math.max(0.01,Math.round((dir==='buy'?co.price*(1+impact):co.price*(1-impact))*100)/100);};
+// Largest quantity actually affordable at the IMPACTED fill price, not at
+// the quoted price. A market buy never fills at co.price -- impactPrice()
+// pushes it up by (qty/liq)*0.015 -- so floor(cash/co.price) always
+// overshoots, and the server (which charges the impacted price) rejected
+// the order for insufficient funds. That made the "Max" button fail for
+// essentially every real float/price combination, not just edge cases.
+// Total cost is monotonically non-decreasing in qty, so a binary search
+// over [0, floor(cash/co.price)] finds the true maximum in ~log2 steps.
+// Index funds mint at the live index price with no impact (see
+// impactPreview and the is_index_fund branch of rpc_trade_buy), so the
+// naive division is already exact for them.
+const maxAffordableQty=(co,cash)=>{
+  if(!co||!(co.price>0)||!(cash>0))return 0;
+  const naive=Math.floor(cash/co.price);
+  if(co.is_index_fund||naive<=0)return Math.max(0,naive);
+  const costOf=q=>Math.round(impactPrice(co,q,'buy')*q*100)/100;
+  if(costOf(naive)<=cash)return naive;
+  let lo=0,hi=naive;
+  while(lo<hi){
+    const mid=Math.ceil((lo+hi)/2);
+    if(costOf(mid)<=cash)lo=mid;else hi=mid-1;
+  }
+  return lo;
+};
 const isWatched=ticker=>{const u=cu();return u&&watchlist(u).includes(ticker);};
 const sharesBar=co=>{
   // JXI mints/redeems on demand -- shares_avail always equals shares (see
@@ -4266,7 +4290,7 @@ function quickSetQty(ticker,mode,qtyInputId,previewId,value){
   const u=cu();if(!u)return;
   let qty;
   if(value==='max'){
-    const affordable=co.price>0?Math.floor(u.cash/co.price):0;
+    const affordable=maxAffordableQty(co,u.cash);
     if(mode==='buy'){
       qty=co.is_index_fund?affordable:Math.min(affordable,co.shares_avail);
     } else if(mode==='short'){
