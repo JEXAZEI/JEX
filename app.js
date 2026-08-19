@@ -3003,14 +3003,26 @@ async function checkStopLossOrders(){
 // ═══════════════════════════════════════════════
 // NET WORTH HISTORY
 // ═══════════════════════════════════════════════
+// Runs server-side (rpc_snapshot_nw), which recomputes net worth from the
+// caller's own real cash, holdings and shorts against live company prices.
+// A raw POST here built the entire row client-side -- user_id and the nw
+// figure included -- against a table whose INSERT grant is open to anon,
+// so anyone could write fabricated net-worth history under ANY student's
+// id, poisoning their portfolio chart and every statistic derived from it
+// (Sharpe, beta, VaR, the Starting/Peak figures).
 async function snapshotNW(userId){
   const u=getUser(userId);if(!u||u.role!=='student')return;
-  const _nw=nw(u),_pv=pv(u);
-  const rec={id:uid(),user_id:userId,nw:_nw,cash:Math.round(u.cash*100)/100,portfolio:Math.round(_pv*100)/100,ts:ts()};
-  // The server stamps created_at itself; the local copy needs one too or
-  // nwSnapshots() can't order this row against the rows loaded from the
-  // API (which all carry created_at).
-  try{await sb.post('jex_nw_history',rec);DB.nwHistory.push({...rec,created_at:new Date().toISOString()});}catch(e){}
+  // The RPC takes no id -- it can only ever snapshot the caller. Recording
+  // someone else's id here would silently file the CALLER's net worth under
+  // that argument, so bail rather than write a misleading row. (The only
+  // call site passes the current user, so this never fires today.)
+  if(userId!==cu()?.id)return;
+  try{
+    const rec=await sb.rpc('rpc_snapshot_nw',{});
+    // Row comes back with the server's own created_at, which nwSnapshots()
+    // needs to order it against the rows loaded from the API.
+    if(rec)DB.nwHistory.push(rec);
+  }catch(e){}
 }
 // ═══════════════════════════════════════════════
 // PRICE ALERTS
