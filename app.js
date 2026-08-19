@@ -3838,9 +3838,15 @@ async function submitDilution(ticker,newShares,reason){
   const co=getCo(ticker);if(!co)return;
   if(!canManageCompany(co))return toast('Only this company\'s owner or founders can request dilution for it');
   if(DB.dilApps.find(d=>d.ticker===ticker&&d.status==='pending'))return toast('Already pending');
-  newShares=parseInt(newShares);
-  const app={id:uid(),ticker,company_name:co.name,current_shares:co.shares,new_shares:newShares,pct_increase:Math.round((newShares/co.shares)*100),reason:reason.trim(),status:'pending',user_id:UI.userId,ts:ts()};
-  await sb.post('jex_dilution_applications',app);DB.dilApps.push(app);
+  // The whole record is built server-side (rpc_request_dilution) -- it
+  // re-derives the caller, the canManageCompany() authorization, the real
+  // current_shares, and pct_increase. Posting a client-built row let anyone
+  // insert fabricated applications and history into any company's dilution
+  // log, with arbitrary share counts and percentages.
+  let app;
+  try{app=await sb.rpc('rpc_request_dilution',{p_ticker:ticker,p_new_shares:parseInt(newShares),p_reason:reason});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.dilApps.push(app);
   toast('Dilution application submitted');UI.companyTab='dilution';render();
 }
 // Dilution approval runs server-side (rpc_review_dilution): does its own
