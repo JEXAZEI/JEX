@@ -2659,10 +2659,22 @@ function flagForm(targetId,targetType){
 // ANALYTICS
 // ═══════════════════════════════════════════════
 
+// jex_nw_history is loaded 'order=created_at.desc' (newest first) and
+// snapshotNW appends live rows to the END of that array, so DB.nwHistory
+// is in no consistent order at all. Every consumer below wants it
+// oldest-first. Sorting by `ts` (as this used to) does not work: ts is a
+// display string like "Aug 9, 3:00:00 PM", so a lexicographic compare puts
+// "Aug 19" before "Aug 9", "Jan" after "Feb", and 9:00 AM after 11:00 AM --
+// and ignores AM/PM entirely. created_at is a real ISO timestamp.
+// Non-parseable dates compare equal so JS's stable sort leaves them put.
+const nwSnapshots=userId=>DB.nwHistory.filter(n=>n.user_id===userId).slice()
+  .sort((a,b)=>{const x=Date.parse(a.created_at||''),y=Date.parse(b.created_at||'');
+    return Number.isFinite(x)&&Number.isFinite(y)?x-y:0;});
+
 // Sharpe ratio: (avg session return - risk free) / stddev of returns
 // Uses NW history snapshots for the student
 function calcSharpe(userId){
-  const snaps=DB.nwHistory.filter(n=>n.user_id===userId).sort((a,b)=>a.ts>b.ts?1:-1);
+  const snaps=nwSnapshots(userId);
   if(snaps.length<3)return null;
   const returns=[];
   for(let i=1;i<snaps.length;i++){
@@ -2673,7 +2685,12 @@ function calcSharpe(userId){
   const avg=returns.reduce((s,r)=>s+r,0)/returns.length;
   const variance=returns.reduce((s,r)=>s+Math.pow(r-avg,2),0)/returns.length;
   const stddev=Math.sqrt(variance);
-  if(stddev===0)return null;
+  // Epsilon, not === 0: a portfolio growing by a near-constant percentage
+  // leaves floating-point crumbs in the returns (0.1 vs 0.09999999999999999),
+  // so the variance lands around 1e-34 instead of exactly zero and the
+  // ratio blew up to ~3e14 -- a nonsense Sharpe shown to a student whose
+  // returns were simply steady. Anything below this is flat, not skill.
+  if(!(stddev>1e-9))return null;
   // Annualised-ish: risk-free=0 for classroom context
   return Math.round((avg/stddev)*100)/100;
 }
@@ -2689,7 +2706,7 @@ function calcBeta(userId){
   const mktPrices=listed.map(c=>c.price_history||[]);
   if(!mktPrices.length)return null;
   // Simplified: beta = correlation of portfolio value to total market cap change
-  const mySnaps=DB.nwHistory.filter(n=>n.user_id===userId).sort((a,b)=>a.ts>b.ts?1:-1).slice(-20);
+  const mySnaps=nwSnapshots(userId).slice(-20);
   if(mySnaps.length<4)return null;
   const myRet=[];for(let i=1;i<mySnaps.length;i++){const p=mySnaps[i-1].nw,c=mySnaps[i].nw;myRet.push(p>0?(c-p)/p:0);}
   // Market return proxy: avg of all company price changes
@@ -2707,17 +2724,25 @@ function calcBeta(userId){
 // Based on historical portfolio price moves
 function calcVaR(userId){
   const u=getUser(userId);if(!u)return null;
-  const mySnaps=DB.nwHistory.filter(n=>n.user_id===userId).sort((a,b)=>a.ts>b.ts?1:-1).slice(-30);
+  const mySnaps=nwSnapshots(userId).slice(-30);
   if(mySnaps.length<5)return null;
-  const losses=[];
-  for(let i=1;i<mySnaps.length;i++){
-    const change=mySnaps[i].nw-mySnaps[i-1].nw;
-    if(change<0)losses.push(Math.abs(change));
-  }
-  if(!losses.length)return 0;
-  losses.sort((a,b)=>b-a);
-  const idx=Math.floor(losses.length*0.05);
-  return Math.round(losses[idx]||losses[0]);
+  // Historical simulation over EVERY period change, not just the losing
+  // ones. Filtering to losses first made the percentile meaningless: a
+  // student with 19 gains and 1 loss had a one-element loss list, so
+  // floor(1 * 0.05) = 0 returned that single worst loss as their "95%
+  // VaR" when the honest answer is that they almost never lose. It also
+  // degenerated the same way at realistic sample sizes generally --
+  // floor(n * 0.05) is 0 for any n below 20, so the figure was really
+  // "worst loss ever seen", not a 5th percentile.
+  const changes=[];
+  for(let i=1;i<mySnaps.length;i++)changes.push(mySnaps[i].nw-mySnaps[i-1].nw);
+  if(changes.length<4)return null;
+  changes.sort((a,b)=>a-b); // worst (most negative) first
+  const q=changes[Math.floor(changes.length*0.05)];
+  // With few observations the 5th percentile genuinely is the worst
+  // observed change -- inherent to historical VaR, not a defect. A
+  // non-negative quantile means no loss at that confidence level.
+  return q<0?Math.round(Math.abs(q)):0;
 }
 
 // P&L Attribution: break down gains by source
@@ -2951,7 +2976,10 @@ async function snapshotNW(userId){
   const u=getUser(userId);if(!u||u.role!=='student')return;
   const _nw=nw(u),_pv=pv(u);
   const rec={id:uid(),user_id:userId,nw:_nw,cash:Math.round(u.cash*100)/100,portfolio:Math.round(_pv*100)/100,ts:ts()};
-  try{await sb.post('jex_nw_history',rec);DB.nwHistory.push(rec);}catch(e){}
+  // The server stamps created_at itself; the local copy needs one too or
+  // nwSnapshots() can't order this row against the rows loaded from the
+  // API (which all carry created_at).
+  try{await sb.post('jex_nw_history',rec);DB.nwHistory.push({...rec,created_at:new Date().toISOString()});}catch(e){}
 }
 // ═══════════════════════════════════════════════
 // PRICE ALERTS
@@ -7750,7 +7778,11 @@ function exportStudentPDF(){
   win.document.close();
 }
 function renderNWChart(u){
-  const history=DB.nwHistory.filter(h=>h.user_id===u.id).slice(-60);
+  // Must go through nwSnapshots(): DB.nwHistory is loaded newest-first, so
+  // an unsorted slice(-60) took the 60 OLDEST rows and plotted them
+  // backwards in time, labelling a mid-history value as "Starting" and
+  // hiding the most recent ~140 snapshots entirely.
+  const history=nwSnapshots(u.id).slice(-60);
   if(history.length<2)return`<div class="card"><div class="empty">Not enough data yet. Net worth is recorded after each trade.<br><br>Make a few trades to start building your chart.</div></div>`;
   const current=nw(u);
   const first=history[0].nw;
@@ -8256,7 +8288,7 @@ function render(){
     if(UI.navTab==='portfolio'&&UI.portfolioTab==='nwchart'){
       setTimeout(()=>{
         const u=cu();if(!u)return;
-        const history=DB.nwHistory.filter(h=>h.user_id===u.id).slice(-60);
+        const history=nwSnapshots(u.id).slice(-60); // same ordering fix as renderNWChart
         if(history.length<2)return;
         const canvas=document.getElementById('nw-chart');if(!canvas||!window.Chart)return;
         if(charts['nw-chart'])try{charts['nw-chart'].destroy();}catch(e){}
