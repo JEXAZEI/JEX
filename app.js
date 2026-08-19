@@ -1234,7 +1234,15 @@ async function createClassroomIndex(){
   catch(e){return toast(rpcErrorMessage(e));}
   DB.companies.push({id:uid(),name,ticker:rec.ticker,price:rec.price,shares:0,shares_avail:0,status:'listed',owner_id:null,
     description:'Tracks the equal-weighted average of every listed company in '+(rec.classroom_name||'this classroom')+'. Price updates automatically to match the live index value and can\'t be manually adjusted. Buying mints new units at the live price; selling redeems them, so there\'s no fixed share supply.',
-    price_history:[{p:rec.price,t:'Listing'}],financials:[],is_index_fund:true,index_classroom_id:classroomId,fund_holdings:{}});
+    // 't' must be a real timestamp, not a label. The chart code parses it
+    // as a date, and new Date('Listing') is Invalid Date -- both
+    // `NaN < cutoff` and `NaN >= cutoff` are false, so anchorToSessionOpen()
+    // and filterByInterval() silently drop the point. A brand-new index's
+    // only price point would be invisible on its own 1D/5D/1M charts. Same
+    // bug as the 'IPO'/'Dilution' labels fixed server-side; prefers the
+    // server's own history when the RPC returns one.
+    price_history:rec.price_history||[{p:rec.price,t:new Date().toISOString()}],
+    financials:[],is_index_fund:true,index_classroom_id:classroomId,fund_holdings:{}});
   toast('Index '+rec.ticker+' created for '+(rec.classroom_name||'classroom'));
   render();
 }
