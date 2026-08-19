@@ -2695,29 +2695,60 @@ function calcSharpe(userId){
   return Math.round((avg/stddev)*100)/100;
 }
 
-// Portfolio beta vs exchange index (market-cap weighted)
+// Portfolio beta vs the JXI exchange index: how much the student's net
+// worth moves for a given move in the market.
+//
+// This used to divide the student's average return over their last 20
+// snapshots by the market's average ALL-TIME return (first vs last point
+// of every company's price history) -- two different quantities measured
+// over two different time windows, which is not beta by any definition,
+// and it returned a flat 1.0 whenever the market's average move rounded
+// near zero, hiding the problem behind a plausible-looking number.
+//
+// Beta is cov(portfolio returns, market returns) / var(market returns),
+// which requires both series sampled over the SAME periods. jex_index_
+// history gives a real market level with a real created_at, so each net
+// worth snapshot is paired with the index reading in effect at that
+// moment and the two return series are built from those pairs.
 function calcBeta(userId){
   const u=getUser(userId);if(!u)return null;
-  // Excludes JXI itself -- it wouldn't make sense as a constituent of the
-  // "market returns" benchmark it's meant to track.
-  const listed=DB.companies.filter(c=>c.status==='listed'&&!c.is_index_fund);
-  if(!listed.length)return null;
-  // Build market returns from company price histories
-  const mktPrices=listed.map(c=>c.price_history||[]);
-  if(!mktPrices.length)return null;
-  // Simplified: beta = correlation of portfolio value to total market cap change
-  const mySnaps=nwSnapshots(userId).slice(-20);
-  if(mySnaps.length<4)return null;
-  const myRet=[];for(let i=1;i<mySnaps.length;i++){const p=mySnaps[i-1].nw,c=mySnaps[i].nw;myRet.push(p>0?(c-p)/p:0);}
-  // Market return proxy: avg of all company price changes
-  const mktRet=listed.map(co=>{
-    const h=co.price_history||[];if(h.length<2)return 0;
-    return(h[h.length-1].p-h[0].p)/h[0].p;
-  });
-  const avgMktRet=mktRet.reduce((s,r)=>s+r,0)/Math.max(mktRet.length,1);
-  const avgMyRet=myRet.reduce((s,r)=>s+r,0)/Math.max(myRet.length,1);
-  if(Math.abs(avgMktRet)<0.0001)return 1;
-  return Math.round((avgMyRet/avgMktRet)*100)/100;
+  const snaps=nwSnapshots(userId).slice(-30);
+  if(snaps.length<4)return null;
+  // jex_index_history loads created_at.asc and live rows append to the
+  // end, so it is already chronological; sorted defensively anyway.
+  const idx=DB.indexHistory.filter(h=>h&&h.value>0&&Number.isFinite(Date.parse(h.created_at||'')))
+    .slice().sort((a,b)=>Date.parse(a.created_at)-Date.parse(b.created_at));
+  if(idx.length<2)return null;
+  // Pair each snapshot with the most recent index reading at or before it.
+  // Both series come off the same 3s poll but never land on the exact same
+  // instant, so requiring equal timestamps would pair almost nothing.
+  // snaps is oldest-first, so j only ever moves forward.
+  const paired=[];let j=0;
+  for(const s of snaps){
+    const t=Date.parse(s.created_at||'');
+    if(!Number.isFinite(t)||!(s.nw>0))continue;
+    while(j+1<idx.length&&Date.parse(idx[j+1].created_at)<=t)j++;
+    if(Date.parse(idx[j].created_at)>t)continue; // no index reading existed yet
+    paired.push({nw:s.nw,mkt:idx[j].value});
+  }
+  if(paired.length<4)return null;
+  const pr=[],mr=[];
+  for(let i=1;i<paired.length;i++){
+    const a=paired[i-1],b=paired[i];
+    if(!(a.nw>0)||!(a.mkt>0))continue;
+    pr.push((b.nw-a.nw)/a.nw);
+    mr.push((b.mkt-a.mkt)/a.mkt);
+  }
+  if(pr.length<3)return null;
+  const mean=arr=>arr.reduce((s,x)=>s+x,0)/arr.length;
+  const mp=mean(pr),mm=mean(mr);
+  let cov=0,varM=0;
+  for(let i=0;i<pr.length;i++){cov+=(pr[i]-mp)*(mr[i]-mm);varM+=(mr[i]-mm)*(mr[i]-mm);}
+  cov/=pr.length;varM/=pr.length;
+  // A market that didn't move leaves beta undefined -- report that as "no
+  // reading" rather than the old silent 1.0.
+  if(!(varM>1e-12))return null;
+  return Math.round((cov/varM)*100)/100;
 }
 
 // Value at Risk (95% confidence, 1-session horizon)
@@ -6063,7 +6094,7 @@ function renderPortfolio(){
         ${_var!=null?`<div class="mcard"><div class="mlabel">Value at Risk 95%${infoBubble('Based on your worst trading sessions so far, this is roughly how much you could lose in a single session on a bad day (the 5th-percentile loss). It is an estimate from history, not a hard cap.')}</div><div class="mval red" style="font-size:18px;font-family:var(--mono)">${fmt(_var)}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">max 1-session loss</div></div>`:''}
         ${_pnl?`<div class="mcard"><div class="mlabel">Total P&L</div><div class="mval ${_pnl.total>=0?'green':'red'}" style="font-size:18px;font-family:var(--mono)">${_pnl.total>=0?'+':''}${fmt(_pnl.total)}</div></div>`:''}
       </div>
-      ${_pnl&&(_pnl.trade||_pnl.dividend||_pnl.unrealised)?`<div class="card" style="margin-bottom:14px"><div class="section-title">P&L Attribution</div><div class="grid4">
+      ${_pnl&&(_pnl.trade||_pnl.dividend||_pnl.unrealised||_pnl.short)?`<div class="card" style="margin-bottom:14px"><div class="section-title">P&L Attribution</div><div class="grid4">
         <div class="mcard"><div class="mlabel">Realised trades</div><div class="mval ${_pnl.trade>=0?'green':'red'}" style="font-size:16px;font-family:var(--mono)">${_pnl.trade>=0?'+':''}${fmt(_pnl.trade)}</div></div>
         <div class="mcard"><div class="mlabel">Unrealised gain</div><div class="mval ${_pnl.unrealised>=0?'green':'red'}" style="font-size:16px;font-family:var(--mono)">${_pnl.unrealised>=0?'+':''}${fmt(_pnl.unrealised)}</div></div>
         <div class="mcard"><div class="mlabel">Dividends</div><div class="mval green" style="font-size:16px;font-family:var(--mono)">+${fmt(_pnl.dividend)}</div></div>
