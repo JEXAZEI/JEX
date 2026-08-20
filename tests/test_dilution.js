@@ -18,6 +18,7 @@ global.DB={dilApps:[],companies:[{ticker:'ACME',name:'Acme Corp',shares:1000,own
 global.getCo=t=>DB.companies.find(c=>c.ticker===t);
 global.canManageCompany=()=>true;
 global.rpcErrorMessage=e=>e.message;
+global.clearDraft=()=>{};   // submit paths drop the saved draft
 let rpcImpl;
 global.sb={rpc:async(fn,params)=>{rpcCalls.push({fn,params});return rpcImpl(params);}};
 

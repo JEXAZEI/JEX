@@ -34,6 +34,7 @@ global.UI={};
 global.uid=()=>'client-generated-id';
 global.ts=()=>'client ts';
 global.rpcErrorMessage=e=>e.message;
+global.clearDraft=()=>{};   // submit paths drop the saved draft
 global.pushNotification=async()=>{};
 global.pushToSheets=()=>{};
 global.sb={
