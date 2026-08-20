@@ -197,6 +197,14 @@ function pushPrice(co, price){
   co.price = price;
   co.price_history = (co.price_history||[]).concat([{p:price, t:nowIso()}]);
 }
+// Mirrors currentFundNav(): an empty fund is worth 10 a unit.
+function fundNav(f){
+  const held=Object.entries(f.holdings||{}).reduce((sum,[t,q])=>{
+    const c=findCo(t); return sum+(c?c.price*q:0);
+  },0);
+  const total=r2(f.cash+held);
+  return f.units_outstanding>0 ? Math.round((total/f.units_outstanding)*10000)/10000 : 10;
+}
 let _tradeSeq = 1000;
 function recordTrade(t){
   const trade = Object.assign({id:_tradeSeq++, ts:TS}, t);
@@ -550,6 +558,100 @@ const RPC = {
     cd[p.p_ticker]=Date.now()+20*60*1000;
     DATA.jex_session[0].circuit_cooldowns=cd;
     return {resumed:true, session:DATA.jex_session[0]};
+  },
+  // ── Funds ────────────────────────────────────────────
+  // NAV = (cash + holdings at market + short P&L + short collateral) / units,
+  // and 10 when the fund is empty, matching currentFundNav().
+  rpc_fund_deposit: (p)=>{
+    const f=DATA.jex_funds.find(x=>x.id===p.p_fund_id), u=caller();
+    if(!f) reject('Fund not found');
+    if(f.status!=='active') reject('This fund is closed to new deposits');
+    if(u.cash<p.p_amount) reject('Insufficient funds');
+    const nav=fundNav(f);
+    const units=Math.round((p.p_amount/nav)*10000)/10000;
+    u.cash=r2(u.cash-p.p_amount);
+    f.cash=r2(f.cash+p.p_amount);
+    f.units_outstanding=Math.round((f.units_outstanding+units)*10000)/10000;
+    const fu=Object.assign({}, u.fund_units);
+    const prev=fu[f.id];
+    // Cost basis is the weighted average NAV paid, so the performance fee at
+    // withdrawal is charged on real profit rather than on the whole balance.
+    fu[f.id]=prev
+      ? {units:Math.round((prev.units+units)*10000)/10000,
+         costBasis:r2((prev.units*prev.costBasis + units*nav)/(prev.units+units))}
+      : {units, costBasis:nav};
+    u.fund_units=fu;
+    return {cash:u.cash, fund_units:fu, fund_cash:f.cash, units_outstanding:f.units_outstanding, nav};
+  },
+  rpc_fund_withdraw: (p)=>{
+    const f=DATA.jex_funds.find(x=>x.id===p.p_fund_id), u=caller();
+    if(!f) reject('Fund not found');
+    const fu=Object.assign({}, u.fund_units);
+    const pos=fu[f.id];
+    if(!pos||pos.units+0.0001<p.p_units) reject('You only hold '+((pos&&pos.units)||0)+' units');
+    const nav=fundNav(f);
+    const gross=r2(nav*p.p_units);
+    // The fee is charged only on the depositor's own profit, never on capital.
+    const profit=r2((nav-pos.costBasis)*p.p_units);
+    const fee=profit>0 ? r2(profit*(f.fee_pct||0)/100) : 0;
+    const net=r2(gross-fee);
+    if(f.cash<gross) reject('The fund does not have enough cash to redeem those units');
+    f.cash=r2(f.cash-gross);
+    f.units_outstanding=Math.round((f.units_outstanding-p.p_units)*10000)/10000;
+    u.cash=r2(u.cash+net);
+    const left=Math.round((pos.units-p.p_units)*10000)/10000;
+    if(left<=0.0001) delete fu[f.id]; else fu[f.id]={units:left, costBasis:pos.costBasis};
+    u.fund_units=fu;
+    let managerCash=null;
+    const mgr=DATA.jex_users.find(x=>x.id===f.manager_id);
+    if(fee>0&&mgr){ mgr.cash=r2(mgr.cash+fee); managerCash=mgr.cash; }
+    return {cash:u.cash, fund_units:fu, fund_cash:f.cash, units_outstanding:f.units_outstanding,
+            gross, fee, net, nav, manager_id:f.manager_id, manager_cash:managerCash};
+  },
+
+  // ── Dividends and buybacks ───────────────────────────
+  rpc_pay_dividend: (p)=>{
+    const co=findCo(p.p_ticker);
+    if(!co) reject('Company not found');
+    const owner=DATA.jex_users.find(u=>u.id===co.owner_id);
+    const holders=DATA.jex_users.filter(u=>((u.holdings||{})[p.p_ticker]||0)>0);
+    const payouts=holders.map(h=>({userId:h.id, name:h.name,
+      shares:h.holdings[p.p_ticker], payout:r2(h.holdings[p.p_ticker]*p.p_per_share)}));
+    const total=r2(payouts.reduce((s,x)=>s+x.payout,0));
+    if(owner.cash<total) reject('The company does not have enough cash (need '+total+')');
+    owner.cash=r2(owner.cash-total);
+    payouts.forEach(x=>{
+      const h=DATA.jex_users.find(u=>u.id===x.userId);
+      h.cash=r2(h.cash+x.payout);
+    });
+    const rec={id:'dv-'+(_tradeSeq++), ticker:p.p_ticker, company_name:co.name,
+      per_share:p.p_per_share, total, note:p.p_note, payouts, jxi_pass_through:[],
+      ts:TS, created_at:nowIso()};
+    DATA.jex_dividends.unshift(rec);
+    return {dividend_id:rec.id, total, payouts, jxi_pass_through:[],
+            owner_id:owner.id, owner_cash:owner.cash};
+  },
+  rpc_buyback: (p)=>{
+    const co=findCo(p.p_ticker);
+    if(!co) reject('Company not found');
+    requireOpenSession(p.p_ticker);
+    const owner=DATA.jex_users.find(u=>u.id===co.owner_id);
+    const sold=co.shares-co.shares_avail;
+    if(p.p_qty>sold) reject('Only '+sold+' shares in circulation');
+    const price=Math.max(0.01, r2(co.price*(1+priceImpact(co,p.p_qty))));
+    const cost=r2(price*p.p_qty);
+    // The COMPANY pays, not whoever clicked the button.
+    if(owner.cash<cost) reject('The company does not have enough cash (need '+cost+')');
+    owner.cash=r2(owner.cash-cost);
+    // Bought-back shares are retired: shares drops, shares_avail does not.
+    co.shares-=p.p_qty;
+    pushPrice(co, price);
+    const bb={id:'bb-'+(_tradeSeq++), ticker:p.p_ticker, company_name:co.name,
+      qty:p.p_qty, price, total:cost, ts:TS, created_at:nowIso()};
+    DATA.jex_buybacks.unshift(bb);
+    return {cash:owner.cash, price, shares:co.shares, shares_avail:co.shares_avail,
+            price_history:co.price_history, total:cost, buyback:bb,
+            owner_id:owner.id, owner_cash:owner.cash};
   },
   rpc_cast_vote: (p)=>{
     const u=caller();

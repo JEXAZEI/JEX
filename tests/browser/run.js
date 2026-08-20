@@ -813,6 +813,178 @@ ${PRELUDE}
     UI.userId='u-stu'; UI.navTab='market'; UI.adminTab='dashboard'; render();
   });
 
+  // ── Funds ───────────────────────────────────────────────────────────
+  // A student's money leaves their account and comes back through someone
+  // else's hands, so the conservation checks matter more here than anywhere.
+  const FUND = () => DB.funds.find(f=>f.id==='f-1');
+  await step('depositing buys units at the current NAV', async ()=>{
+    UI.userId='u-stu2'; UI.navTab='funds'; UI.fundPage='f-1'; UI.companyPage=null; render();
+    const me=DB.users.find(u=>u.id==='u-stu2'), f=FUND();
+    const nav0=currentFundNav(f);
+    const cash0=me.cash, fundCash0=f.cash, units0=f.units_outstanding;
+    await depositToFund('f-1', 500);
+    const m=DB.users.find(u=>u.id==='u-stu2'), g=FUND();
+    const pos=(m.fund_units||{})['f-1'];
+    if(!pos) throw new Error('no position recorded');
+    if(Math.abs(m.cash-(cash0-500))>0.01) throw new Error('cash '+m.cash);
+    if(Math.abs(g.cash-(fundCash0+500))>0.01) throw new Error('fund cash '+g.cash);
+    const expUnits=Math.round((500/nav0)*10000)/10000;
+    if(Math.abs(pos.units-expUnits)>0.001) throw new Error('units '+pos.units+' expected '+expUnits);
+    if(Math.abs(g.units_outstanding-(units0+expUnits))>0.001)
+      throw new Error('units outstanding '+g.units_outstanding);
+    if(Math.abs(pos.costBasis-nav0)>0.01) throw new Error('cost basis '+pos.costBasis+' expected '+nav0);
+    return expUnits+' units @ NAV '+nav0;
+  });
+
+  await step('depositing into a fund does not destroy net worth', async ()=>{
+    const me=DB.users.find(u=>u.id==='u-stu2');
+    const nwBefore=nw(me);
+    await depositToFund('f-1', 400);
+    const nwAfter=nw(DB.users.find(u=>u.id==='u-stu2'));
+    const drop=Math.round((nwBefore-nwAfter)*100)/100;
+    if(Math.abs(drop)>0.02)
+      throw new Error('net worth fell by '+drop+' after depositing 400 -- fund units are not counted');
+    return 'net worth held at '+nwAfter;
+  });
+
+  await step('the deposit shows on the fund page', ()=>{
+    UI.navTab='funds'; UI.fundPage='f-1'; render();
+    if(!appText().trim()) throw new Error('the fund page went blank');
+    if(!/Test Growth Fund/.test(appText())) throw new Error('fund name missing');
+  });
+
+  await step('withdrawing at an unchanged NAV returns the money and charges no fee', async ()=>{
+    const me=DB.users.find(u=>u.id==='u-stu2'), f=FUND();
+    const mgr=DB.users.find(u=>u.id===f.manager_id);
+    const pos=(me.fund_units||{})['f-1'];
+    const cash0=me.cash, mgrCash0=mgr?mgr.cash:0;
+    const units=pos.units;
+    const nav=currentFundNav(f);
+    await withdrawFromFund('f-1', units);
+    const m=DB.users.find(u=>u.id==='u-stu2');
+    if((m.fund_units||{})['f-1']) throw new Error('the position was not closed');
+    const back=Math.round((m.cash-cash0)*100)/100;
+    const expected=Math.round(units*nav*100)/100;
+    if(Math.abs(back-expected)>0.02) throw new Error('got back '+back+', expected '+expected);
+    const mgrNow=DB.users.find(u=>u.id===f.manager_id);
+    if(mgrNow && Math.abs(mgrNow.cash-mgrCash0)>0.01)
+      throw new Error('a fee was charged with no profit: '+(mgrNow.cash-mgrCash0));
+    return 'returned '+back+', no fee';
+  });
+
+  await step('the performance fee is charged on profit only, and only once', async ()=>{
+    const f=FUND(), me=DB.users.find(u=>u.id==='u-stu2');
+    await depositToFund('f-1', 1000);
+    const pos=Object.assign({}, (DB.users.find(u=>u.id==='u-stu2').fund_units||{})['f-1']);
+    // The fund gains value: hand it cash so NAV per unit rises.
+    const g=FUND();
+    g.cash=Math.round((g.cash*1.5)*100)/100;
+    stub.data.jex_funds[0].cash=g.cash;
+    const nav1=currentFundNav(FUND());
+    if(nav1<=pos.costBasis) throw new Error('NAV did not rise: '+nav1+' vs '+pos.costBasis);
+    const mgr=DB.users.find(u=>u.id===FUND().manager_id);
+    const mgrCash0=mgr.cash, cash0=DB.users.find(u=>u.id==='u-stu2').cash;
+    await withdrawFromFund('f-1', pos.units);
+    const m=DB.users.find(u=>u.id==='u-stu2');
+    const mgrNow=DB.users.find(u=>u.id===FUND().manager_id);
+    const gross=Math.round(pos.units*nav1*100)/100;
+    const profit=Math.round((nav1-pos.costBasis)*pos.units*100)/100;
+    const expFee=Math.round(profit*(FUND().fee_pct||0)/100*100)/100;
+    const feeTaken=Math.round((mgrNow.cash-mgrCash0)*100)/100;
+    const netGot=Math.round((m.cash-cash0)*100)/100;
+    if(Math.abs(feeTaken-expFee)>0.02) throw new Error('fee '+feeTaken+', expected '+expFee);
+    if(Math.abs(netGot-(gross-expFee))>0.03)
+      throw new Error('net '+netGot+', expected '+(gross-expFee));
+    // Nothing may be created: what left the fund equals what the two people got.
+    if(Math.abs((netGot+feeTaken)-gross)>0.03)
+      throw new Error('net+fee '+(netGot+feeTaken)+' != gross '+gross);
+    return 'fee '+feeTaken+' on profit '+profit;
+  });
+
+  await step('withdrawing more units than you hold is refused', async ()=>{
+    const before=stub.rpcCalls.filter(c=>c.fn==='rpc_fund_withdraw').length;
+    await withdrawFromFund('f-1', 99999);
+    if(stub.rpcCalls.filter(c=>c.fn==='rpc_fund_withdraw').length!==before)
+      throw new Error('the client sent an oversized withdrawal to the server');
+    UI.userId='u-stu'; UI.navTab='market'; UI.fundPage=null;
+    return 'refused locally';
+  });
+
+  // ── Dividends and buybacks ──────────────────────────────────────────
+  await step('a dividend moves exactly what it debits', async ()=>{
+    UI.userId='u-co'; UI.navTab='mystock'; UI.companyTab='dividends'; UI.companyPage=null; render();
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const owner=DB.users.find(u=>u.id===co.owner_id);
+    const holders=DB.users.filter(u=>((u.holdings||{}).ACME||0)>0);
+    if(!holders.length) throw new Error('nobody holds ACME to pay a dividend to');
+    const before=new Map(DB.users.map(u=>[u.id,u.cash]));
+    const ownerCash0=owner.cash;
+    const perShare=0.10;
+    const expTotal=Math.round(holders.reduce((s,h)=>s+h.holdings.ACME*perShare,0)*100)/100;
+    // issueDividend() asks for confirmation, and headless Chromium
+    // auto-dismisses dialogs -- which would silently make this step assert
+    // that nothing happened.
+    const realConfirm=window.confirm; window.confirm=()=>true;
+    try{ await issueDividend('ACME', perShare, 'Test payout'); }
+    finally{ window.confirm=realConfirm; }
+    const ownerNow=DB.users.find(u=>u.id===co.owner_id);
+    const debited=Math.round((ownerCash0-ownerNow.cash)*100)/100;
+    let credited=0;
+    for(const h of holders){
+      const now=DB.users.find(u=>u.id===h.id);
+      credited+=now.cash-before.get(h.id);
+    }
+    credited=Math.round(credited*100)/100;
+    if(Math.abs(debited-expTotal)>0.02) throw new Error('debited '+debited+', expected '+expTotal);
+    if(Math.abs(credited-debited)>0.02)
+      throw new Error('credited '+credited+' but debited '+debited+' -- money was created or lost');
+    return debited+' out, '+credited+' in';
+  });
+
+  await step('a dividend the company cannot afford is refused', async ()=>{
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const owner=DB.users.find(u=>u.id===co.owner_id);
+    const cash0=owner.cash;
+    const realConfirm=window.confirm; window.confirm=()=>true;
+    try{ await issueDividend('ACME', 999999, 'Cannot afford this'); }
+    finally{ window.confirm=realConfirm; }
+    if(DB.users.find(u=>u.id===co.owner_id).cash!==cash0)
+      throw new Error('an unaffordable dividend still moved money');
+    return 'refused';
+  });
+
+  await step('a buyback retires shares and is paid by the company', async ()=>{
+    UI.userId='u-co'; UI.navTab='mystock'; UI.companyTab='buyback'; render();
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const owner=DB.users.find(u=>u.id===co.owner_id);
+    const clicker=DB.users.find(u=>u.id==='u-co');
+    const shares0=co.shares, avail0=co.shares_avail, ownerCash0=owner.cash;
+    const circulating=shares0-avail0;
+    if(circulating<2) throw new Error('nothing in circulation to buy back');
+    await doBuyback('ACME', 2);
+    const c=DB.companies.find(x=>x.ticker==='ACME');
+    const o=DB.users.find(u=>u.id===co.owner_id);
+    if(c.shares!==shares0-2) throw new Error('shares '+c.shares+', expected '+(shares0-2));
+    if(c.shares_avail!==avail0)
+      throw new Error('shares_avail moved: bought-back shares must be retired, not returned to the float');
+    if(o.cash>=ownerCash0) throw new Error('the company was not debited');
+    if(c.shares_avail>c.shares) throw new Error('shares_avail exceeds shares');
+    return 'retired 2, company paid '+Math.round((ownerCash0-o.cash)*100)/100;
+  });
+
+  await step('a buyback bigger than the float is refused', async ()=>{
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const owner=DB.users.find(u=>u.id===co.owner_id);
+    const shares0=co.shares, cash0=owner.cash;
+    await doBuyback('ACME', 999999);
+    if(DB.companies.find(x=>x.ticker==='ACME').shares!==shares0)
+      throw new Error('shares changed on a refused buyback');
+    if(DB.users.find(u=>u.id===co.owner_id).cash!==cash0)
+      throw new Error('cash changed on a refused buyback');
+    UI.userId='u-stu'; UI.navTab='market'; UI.companyTab='stock'; render();
+    return 'refused';
+  });
+
   // ── The 3s poll loop ────────────────────────────────────────────────
   // checkLimitOrders / checkStopLossOrders / checkPriceAlerts run on a timer
   // in every open browser and move real money with nobody clicking anything.
