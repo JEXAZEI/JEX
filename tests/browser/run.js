@@ -1304,6 +1304,178 @@ ${PRELUDE}
     return stamp;
   });
 
+  // ── Day one: registration and login ─────────────────────────────────
+  // Thirty students all signing up and signing in at once is the very first
+  // thing that has to work, and none of this path had ever been executed.
+  const loginAs = async (tab, username, password) => {
+    UI.userId=null; UI.loginView='select'; UI.loginTab=tab; UI.companyPage=null; render();
+    const un=document.getElementById('login-username');
+    const pw=document.getElementById('login-password');
+    if(!un||!pw) throw new Error('no login form -- inputs: '+
+      Array.prototype.map.call(document.querySelectorAll('#app input'),i=>i.id||i.type).join(','));
+    un.value=username; pw.value=password;
+    await loginByForm();
+  };
+
+  await step('a migrated account signs in with its real password', async ()=>{
+    await loginAs('student','ariel','correcthorse');
+    if(UI.userId!=='u-stu') throw new Error('not signed in: UI.userId='+UI.userId+
+      ', error='+UI.loginError);
+    if(!/Ariel/.test(appText())) throw new Error('signed in but the page does not show them');
+    return 'in as '+UI.userId;
+  });
+
+  await step('the wrong password is refused, and says nothing useful', async ()=>{
+    await loginAs('student','ariel','notmypassword');
+    if(UI.userId) throw new Error('a wrong password signed in');
+    if(!UI.loginError) throw new Error('no error shown');
+    if(/exist|unknown|no such|not found/i.test(UI.loginError))
+      throw new Error('the message leaks whether the account exists: '+UI.loginError);
+    return UI.loginError;
+  });
+
+  await step('an unknown username gets the SAME message as a wrong password', async ()=>{
+    await loginAs('student','ariel','notmypassword');
+    const wrongPw=UI.loginError;
+    await loginAs('student','nosuchperson','anything');
+    if(UI.userId) throw new Error('an unknown username signed in');
+    if(UI.loginError!==wrongPw)
+      throw new Error('different messages let you enumerate accounts: '+
+        JSON.stringify(wrongPw)+' vs '+JSON.stringify(UI.loginError));
+    return 'identical: '+UI.loginError;
+  });
+
+  await step('a student cannot sign in on the admin tab', async ()=>{
+    await loginAs('admin','ariel','correcthorse');
+    if(UI.userId) throw new Error('a student signed in through the admin pool');
+    return 'refused';
+  });
+
+  await step('an empty form is refused without a round trip', async ()=>{
+    const before=stub.rpcCalls.filter(c=>c.fn==='rpc_resolve_login_identity').length;
+    await loginAs('student','','');
+    if(stub.rpcCalls.filter(c=>c.fn==='rpc_resolve_login_identity').length!==before)
+      throw new Error('an empty form still queried the server');
+    if(!UI.loginError) throw new Error('no error shown');
+    return UI.loginError;
+  });
+
+  await step('a legacy account signs in and is migrated to real auth', async ()=>{
+    const had=stub.auth.accounts.has('quinn@example.com');
+    if(had) out.notes.push('quinn already had an auth account before this step');
+    await loginAs('student','quinn','oldpassword1');
+    if(UI.userId!=='u-quote') throw new Error('legacy login failed: '+UI.loginError);
+    // The point of the legacy path: it quietly creates a real Auth identity,
+    // which is what lets the account keep trading.
+    if(!stub.auth.accounts.has('quinn@example.com'))
+      throw new Error('signed in but no Auth identity was created -- this account cannot trade');
+    return 'migrated';
+  });
+
+  await step("a legacy account's wrong password is still refused", async ()=>{
+    await loginAs('student','quinn','wrongwrong');
+    if(UI.userId) throw new Error('a wrong legacy password signed in');
+    return UI.loginError;
+  });
+
+  await step('a fresh load drops every cached email', async ()=>{
+    // loginByForm caches the caller's own row, email included. A reload
+    // rebuilds DB.users from the bulk endpoint, which carries no emails at
+    // all -- so nothing persists between sessions.
+    const fresh=await sb.get('jex_users','order=created_at.asc&select='+JEX_USERS_SAFE_SELECT);
+    const withEmail=fresh.filter(u=>u.email||u.notification_email);
+    if(withEmail.length) throw new Error(withEmail.length+' rows came back from the bulk read with an email');
+    // Exact column names: email_notifications is a boolean preference, not an
+    // address, and is legitimately in the list.
+    const cols=JEX_USERS_SAFE_SELECT.split(',').map(c=>c.trim());
+    const addr=cols.filter(c=>c==='email'||c==='notification_email');
+    if(addr.length)
+      throw new Error('the bulk select asks for '+addr.join(' and ')+': '+JEX_USERS_SAFE_SELECT);
+    DB.users=fresh;   // leave the cache in the state a reload would produce
+    return fresh.length+' rows, none with an email';
+  });
+
+
+  await step('registering files a pending request, not an account', async ()=>{
+    UI.userId=null; UI.loginView='register'; UI.loginTab='student'; render();
+    const pending0=DB.pending.length, users0=DB.users.length;
+    await registerStudent('Newcomer Student','newcomer','newcomer@example.com',
+      'goodpassword','pet','Rex',true);
+    if(DB.users.length!==users0) throw new Error('registration created a live account directly');
+    if(stub.data.jex_pending.length!==pending0+1)
+      throw new Error('no pending request was filed');
+    const rec=stub.data.jex_pending[stub.data.jex_pending.length-1];
+    if(rec.role!=='student') throw new Error('role came out as '+rec.role);
+    return rec.name+' pending';
+  });
+
+  await step('a registration cannot choose its own role', ()=>{
+    // The RPC pins the role; the raw POST it replaced let a signup claim
+    // chairman and get approved through a screen that showed nothing odd.
+    const calls=stub.rpcCalls.filter(c=>c.fn==='rpc_register_pending');
+    if(!calls.length) throw new Error('no registration was sent');
+    const elevated=stub.data.jex_pending.filter(r=>
+      !['student','company'].includes(r.role));
+    if(elevated.length) throw new Error('a pending row carries role '+elevated[0].role);
+    return 'pinned to student/company';
+  });
+
+  await step('a duplicate username is refused', async ()=>{
+    const before=stub.data.jex_pending.length;
+    await registerStudent('Someone Else','ariel','different@example.com',
+      'goodpassword','pet','Rex',true);
+    if(stub.data.jex_pending.length!==before)
+      throw new Error('a duplicate username was accepted');
+    return 'refused';
+  });
+
+  await step('a duplicate email is refused', async ()=>{
+    const before=stub.data.jex_pending.length;
+    await registerStudent('Another Person','anotherperson','ariel@example.com',
+      'goodpassword','pet','Rex',true);
+    if(stub.data.jex_pending.length!==before)
+      throw new Error('a duplicate email was accepted');
+    return 'refused';
+  });
+
+  await step('a short password is refused before any account is made', async ()=>{
+    const before=stub.data.jex_pending.length;
+    const authBefore=stub.auth.accounts.size;
+    await registerStudent('Short Password','shortpw','shortpw@example.com',
+      'abc','pet','Rex',true);
+    if(stub.data.jex_pending.length!==before) throw new Error('a short password was accepted');
+    if(stub.auth.accounts.size!==authBefore)
+      throw new Error('an orphan Auth account was created for a rejected registration');
+    return 'refused';
+  });
+
+  await step('signing back in leaves the app usable', async ()=>{
+    await loginAs('student','ariel','correcthorse');
+    if(UI.userId!=='u-stu') throw new Error('could not sign back in: '+UI.loginError);
+    for(const t of ['market','portfolio','orders','leaderboard','settings']){
+      UI.navTab=t; render();
+      if(!appText().trim()) throw new Error('blank '+t+' after signing back in');
+    }
+    UI.navTab='market'; render();
+    return 'usable';
+  });
+
+  await step("no other student's email is cached in this browser", async ()=>{
+    // The column grants exclude email from bulk jex_users reads, and the
+    // harness strips it the same way. One row legitimately carries an email:
+    // rpc_resolve_login_identity returns the caller's OWN row on sign-in,
+    // because loginByForm needs the address to call Supabase Auth with. The
+    // invariant that matters is that nobody ELSE's turns up.
+    const withEmail=DB.users.filter(u=>u.email);
+    const others=withEmail.filter(u=>u.id!==UI.userId);
+    if(others.length) throw new Error(others.length+" other user(s) have an email cached here: "+
+      others.map(u=>u.username).join(','));
+    const secrets=DB.users.filter(u=>u.password||u.sec_a||u.legacy_password);
+    if(secrets.length) throw new Error('password material reached the client for '+
+      secrets.map(u=>u.username).join(','));
+    return withEmail.length+' of '+DB.users.length+' rows carry an email (own only)';
+  });
+
   await step('logout renders the login screen', ()=>{
     UI.companyPage=null; UI.navTab='market';
     logout();
