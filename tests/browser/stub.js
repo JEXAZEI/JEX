@@ -18,7 +18,10 @@ const DATA = {
   jex_users: [
     {id:'u-chair', name:'Admin', username:'admin', role:'chairman', status:'approved', cash:0,
      holdings:{}, shorts:{}, watchlist:[], fund_units:{}, created_at:now},
+    // Already migrated to a real Supabase Auth identity: signs in through
+    // signInWithPassword.
     {id:'u-stu', name:'Ariel Ramirez-Angulo', username:'ariel', role:'student', status:'approved',
+     email:'ariel@example.com', auth_uid:'auth-seed-stu',
      cash:8500, holdings:{ACME:20, JXI:5}, shorts:{BETA:{qty:10, avgPrice:12, collateral:180}},
      watchlist:['ACME'], fund_units:{'f-1':{units:10, costBasis:10}}, classroom_id:'c-1', created_at:now},
     {id:'u-stu2', name:'Bea <script>alert(1)</script>', username:'bea', role:'student', status:'approved',
@@ -28,7 +31,11 @@ const DATA = {
     // A name carrying a double quote and an apostrophe. Both are legal in the
     // registration form, and both land inside JS string literals in generated
     // onclick attributes -- which is where quoting goes wrong silently.
+    // NOT yet migrated: no auth_uid, only a legacy password hash. Signing in
+    // takes the verify_legacy_password path and then quietly creates a real
+    // Auth identity, which is what keeps trading working for old accounts.
     {id:'u-quote', name:'Quinn "Q" O\'Brien', username:'quinn', role:'student', status:'approved',
+     email:'quinn@example.com', legacy_password:'oldpassword1',
      cash:7000, holdings:{ACME:4}, shorts:{}, watchlist:[], fund_units:{}, classroom_id:'c-1', created_at:now},
     {id:'u-treas', name:'Treasurer', username:'treasurer', role:'treasurer', status:'approved',
      cash:0, holdings:{}, shorts:{}, watchlist:[], fund_units:{}, created_at:now},
@@ -239,7 +246,51 @@ const RPC = {
   rpc_activate_after_hours_orders: ()=>({activated:[]}),
   rpc_match_limit_order_book: ()=>({matched:false}),
   rpc_fill_limit_vs_pool: ()=>({filled:false}),
-  rpc_check_email_taken: ()=>false,
+  rpc_check_email_taken: (p)=>{
+    const e=String(p.p_email||'').trim().toLowerCase();
+    return DATA.jex_users.some(u=>String(u.email||'').toLowerCase()===e)
+        || DATA.jex_pending.some(r=>String(r.email||'').toLowerCase()===e);
+  },
+  // Server-side identity match, scoped to the pool the login screen is on.
+  // Deliberately returns null rather than an error for "no such account", so
+  // the client cannot tell a wrong username from a wrong password.
+  rpc_resolve_login_identity: (p)=>{
+    const id=String(p.p_identifier||'').trim().toLowerCase().replace(/^@/,'');
+    const pool=p.p_pool||'student';
+    const inPool=u=>pool==='admin'
+      ? ['chairman','president','secretary','treasurer','compliance_officer'].includes(u.role)
+      : u.role===pool;
+    const u=DATA.jex_users.find(x=>inPool(x)&&(
+      String(x.username||'').toLowerCase()===id ||
+      String(x.email||'').toLowerCase()===id));
+    return u||null;
+  },
+  verify_legacy_password: (p)=>{
+    const u=DATA.jex_users.find(x=>x.id===p.p_user_id);
+    return !!(u&&u.legacy_password&&u.legacy_password===p.p_password);
+  },
+  rpc_register_pending: (p)=>{
+    const name=String(p.p_name||'').trim();
+    const un=String(p.p_username||'').trim().toLowerCase();
+    const email=String(p.p_email||'').trim().toLowerCase();
+    const norm=v=>String(v||'').trim().toLowerCase();
+    if(DATA.jex_users.some(u=>norm(u.name)===norm(name))
+      ||DATA.jex_pending.some(r=>norm(r.name)===norm(name))) reject('Name already taken');
+    if(DATA.jex_users.some(u=>norm(u.username)===un)
+      ||DATA.jex_pending.some(r=>norm(r.username)===un)) reject('Username already taken');
+    if(DATA.jex_users.some(u=>norm(u.email)===email)
+      ||DATA.jex_pending.some(r=>norm(r.email)===email)) reject('An account with that email already exists');
+    // The RPC pins the role rather than taking the client's word for it --
+    // the raw POST this replaced let a registration claim role:'chairman'.
+    const role = p.p_role==='company' ? 'company' : 'student';
+    const rec={id:'p-'+(_tradeSeq++), name, username:un, email, role,
+      sec_q:p.p_sec_q||null, description:p.p_description||null,
+      classroom_id:p.p_classroom_id||null, auth_provider:p.p_auth_provider||null,
+      auth_uid:p.p_auth_uid||null, email_verified:!!p.p_email_verified,
+      ts:TS, created_at:nowIso()};
+    DATA.jex_pending.push(rec);
+    return rec;
+  },
   rpc_admin_list_flags: ()=>[],
   rpc_admin_list_bug_reports: ()=>[],
   rpc_admin_list_client_errors: ()=>[],
@@ -708,7 +759,19 @@ window.fetch = async function(url, opts){
 
   const [table, qs] = after.split('?');
   const rows = DATA[table] || [];
-  if(method==='GET') return new Response(JSON.stringify(applyQuery(rows, qs)), {status:200, headers:{'Content-Type':'application/json'}});
+  if(method==='GET'){
+    let out = applyQuery(rows, qs);
+    // jex_users/jex_pending grant column-level SELECT on everything EXCEPT
+    // password, sec_a, email and notification_email (see the
+    // email-pii-exposure-fix migration). Stripping them here keeps the
+    // harness honest about that boundary -- otherwise a render path could
+    // quietly depend on an email the real app never receives in bulk.
+    if(table==='jex_users'||table==='jex_pending')
+      out = out.map(r=>{const c=Object.assign({},r);
+        delete c.email; delete c.notification_email; delete c.legacy_password;
+        delete c.password; delete c.sec_a; return c;});
+    return new Response(JSON.stringify(out), {status:200, headers:{'Content-Type':'application/json'}});
+  }
   if(method==='POST'){
     let d={}; try{d=JSON.parse((opts&&opts.body)||'{}');}catch(e){}
     rows.push(d);
@@ -742,23 +805,70 @@ window.WebSocket = function(){
 };
 window.WebSocket.prototype = {};
 
-// ── supabase-js stub (auth only) ───────────────────────
+// ── supabase-js stub (auth) ────────────────────────────
+// A real enough Auth model to run registration and login end to end: an
+// account store keyed by email, a session, and the listener supabase-js
+// fires. Day one is thirty students all registering and signing in at once,
+// and none of that path had ever been executed.
+const AUTH = {
+  accounts: new Map(),          // email -> {id, password}
+  session: null,
+  listeners: [],
+  emit(event){ this.listeners.forEach(fn=>{ try{ fn(event, this.session); }catch(e){} }); },
+};
+window.__JEX_STUB__.auth = AUTH;
+const authErr = message => ({data:{user:null, session:null}, error:{message}});
+function makeSession(acct){
+  return {access_token:'stub-token-'+acct.id, user:{id:acct.id, email:acct.email,
+    user_metadata:acct.metadata||{}}};
+}
 window.supabase = {
   createClient: function(){
     return {
       auth: {
-        getSession: async()=>({data:{session:null}, error:null}),
-        signInWithPassword: async()=>({data:{session:null}, error:{message:'stub'}}),
+        getSession: async()=>({data:{session:AUTH.session}, error:null}),
+        signInWithPassword: async({email, password})=>{
+          const acct=AUTH.accounts.get(String(email||'').trim().toLowerCase());
+          if(!acct||acct.password!==password) return authErr('Invalid login credentials');
+          AUTH.session=makeSession(acct);
+          AUTH.emit('SIGNED_IN');
+          return {data:{user:AUTH.session.user, session:AUTH.session}, error:null};
+        },
+        signUp: async({email, password})=>{
+          const key=String(email||'').trim().toLowerCase();
+          // Supabase enforces a 6-character minimum; an account whose legacy
+          // password is shorter cannot be migrated, and app.js has a branch
+          // for exactly that.
+          if(!password||password.length<6) return authErr('Password should be at least 6 characters');
+          if(AUTH.accounts.has(key)) return authErr('User already registered');
+          const acct={id:'auth-'+(_authSeq++), email:key, password};
+          AUTH.accounts.set(key, acct);
+          AUTH.session=makeSession(acct);
+          AUTH.emit('SIGNED_IN');
+          return {data:{user:AUTH.session.user, session:AUTH.session}, error:null};
+        },
         signInWithOAuth: async()=>({data:{}, error:null}),
-        signUp: async()=>({data:{user:null, session:null}, error:{message:'stub'}}),
-        signOut: async()=>({error:null}),
-        onAuthStateChange: ()=>({data:{subscription:{unsubscribe(){}}}}),
-        updateUser: async()=>({data:{}, error:null}),
+        signOut: async()=>{ AUTH.session=null; AUTH.emit('SIGNED_OUT'); return {error:null}; },
+        onAuthStateChange: (fn)=>{
+          AUTH.listeners.push(fn);
+          // supabase-js fires once immediately with the current session.
+          try{ fn('INITIAL_SESSION', AUTH.session); }catch(e){}
+          return {data:{subscription:{unsubscribe(){
+            AUTH.listeners=AUTH.listeners.filter(x=>x!==fn);
+          }}}};
+        },
+        updateUser: async({password})=>{
+          if(!AUTH.session) return authErr('Not authenticated');
+          const acct=AUTH.accounts.get(AUTH.session.user.email);
+          if(acct&&password) acct.password=password;
+          return {data:{user:AUTH.session.user}, error:null};
+        },
         resetPasswordForEmail: async()=>({data:{}, error:null}),
       },
     };
   },
 };
+let _authSeq = 1;
 
 // ── Chart.js stub ──────────────────────────────────────
 // The real library is a CDN script the harness cannot load. app.js only ever
@@ -796,6 +906,10 @@ window.addEventListener('unhandledrejection', e=>{
   window.__JEX_STUB__.errors.push({type:'unhandledrejection',
     message:r&&r.message?r.message:String(r), stack:r&&r.stack});
 });
+
+// The already-migrated seed account needs a matching Auth identity, or its
+// login would fail for the wrong reason.
+AUTH.accounts.set('ariel@example.com', {id:'auth-seed-stu', email:'ariel@example.com', password:'correcthorse'});
 
 // ── Scenarios ──────────────────────────────────────────
 // The seeded exchange above is a mid-semester classroom. These transforms
