@@ -121,6 +121,46 @@ user data and one calling a function that no longer exists. Resolution uses
 classic script, so its top-level `const`/`let` names (`get`, `esc`, …) are
 reachable from handlers but never appear as window properties.
 
+## The lock order (server-side invariant)
+
+Not enforced by any test here — the SQL lives in Postgres and never runs in
+this repo — but recorded because breaking it is silent until a class hits it.
+
+**Every money-moving RPC locks `jex_companies` before `jex_users`.**
+
+The trade RPCs used to do the opposite: lock the caller's `jex_users` row via
+`auth_uid = auth.uid() for update`, then the company. `rpc_pay_dividend` and
+`rpc_buyback` go companies-first and cannot do otherwise — a dividend does not
+know which holders to lock until it has read the company. Opposite orders on
+the same two rows is a deadlock, and the collision was the ordinary one:
+
+    student:   lock jex_users[S]         -> waits for jex_companies[ACME]
+    dividend:  lock jex_companies[ACME]  -> waits for jex_users[S]
+
+Postgres detects it and aborts one side — nothing is corrupted — but the
+student sees a raw "deadlock detected" and their trade did not happen.
+
+Two rules follow, for anyone editing these functions:
+
+1. Resolve `auth.uid()` **without** a lock. Lock the company, then the user
+   row, then RE-READ cash/holdings/shorts under that lock. Reading balances
+   before the lock and writing after it computes against a stale balance.
+2. When a function writes more than one `jex_users` row (`rpc_trade_buy`
+   credits the company's owner as well as debiting the buyer), lock them in a
+   deterministic id order, or two company accounts trading each other's stock
+   can deadlock on the user tier alone.
+
+Verify with `regexp_matches(pg_get_functiondef(oid), 'from\s+(jex_\w+)[^;]*?for update', 'g')`
+— the first element must be `jex_companies`. Do **not** verify by searching for
+where a table name first appears in the text; that finds comments and unlocked
+selects and reports the same answer for every function.
+
+Known residual: `rpc_pay_dividend` walks its holder list in JSONB order, so two
+simultaneous dividends with overlapping shareholders can still deadlock on the
+holder tier. `sb.rpc()` retries that one error (see `test_deadlock_retry`),
+which is safe only because Postgres guarantees a deadlock victim rolled back
+completely.
+
 ## What these do NOT cover
 
 Worth being blunt about, because the gaps are where bugs will come from:
