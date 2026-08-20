@@ -901,6 +901,42 @@ ${PRELUDE}
     return 'fee '+feeTaken+' on profit '+profit;
   });
 
+  await step('a fund with a short prices deposits and withdrawals the same', async ()=>{
+    // THE EXPLOIT. rpc_fund_deposit computed NAV without the fund's short
+    // collateral; rpc_fund_withdraw computed it with. Deposit at the low
+    // price, withdraw at the high one, keep the difference -- and every other
+    // unit-holder's NAV falls to pay for it. Only bites once a manager shorts
+    // something, which is why nobody had hit it yet.
+    UI.userId='u-stu2'; UI.navTab='funds'; UI.fundPage='f-1'; render();
+    const f=FUND(), sf=stub.data.jex_funds.find(x=>x.id==='f-1');
+    const shortBook={BETA:{qty:10, avgPrice:20, collateral:300}};
+    f.shorts=shortBook; sf.shorts=shortBook;
+    f.cash=1000; sf.cash=1000;
+    f.units_outstanding=100; sf.units_outstanding=100;
+    const beta=DB.companies.find(c=>c.ticker==='BETA');
+    beta.price=20; stub.data.jex_companies.find(c=>c.ticker==='BETA').price=20;
+
+    const navBefore=currentFundNav(FUND());
+    if(Math.abs(navBefore-13)>0.01)
+      throw new Error('NAV should be 13.00 with the collateral counted, got '+navBefore);
+
+    const me=DB.users.find(u=>u.id==='u-stu2');
+    const cash0=me.cash;
+    await depositToFund('f-1', 130);
+    const pos=(DB.users.find(u=>u.id==='u-stu2').fund_units||{})['f-1'];
+    if(!pos) throw new Error('no position after depositing');
+    // 130 at a NAV of 13 is 10 units. At the buggy NAV of 10 it was 13.
+    if(Math.abs(pos.units-10)>0.01)
+      throw new Error('minted '+pos.units+' units for 130 -- expected 10 at NAV 13; '+
+        'a higher number means deposits are still priced without short collateral');
+
+    await withdrawFromFund('f-1', pos.units);
+    const back=Math.round((DB.users.find(u=>u.id==='u-stu2').cash-cash0)*100)/100;
+    if(back>0.02)
+      throw new Error('deposit-then-withdraw produced '+back+' of risk-free profit');
+    return 'round trip net '+back+' at NAV '+navBefore;
+  });
+
   await step('withdrawing more units than you hold is refused', async ()=>{
     const before=stub.rpcCalls.filter(c=>c.fn==='rpc_fund_withdraw').length;
     await withdrawFromFund('f-1', 99999);
