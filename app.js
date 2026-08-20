@@ -4625,15 +4625,21 @@ function filterByInterval(pts,interval){
 function buildChartIntervalBar(canvasId,co){
   return '<div id="ibar-'+canvasId+'" style="display:flex;gap:2px;margin-bottom:6px">'+buildIntervalButtons(canvasId,co)+'</div>';
 }
+// Chart axis labels. Arizona, like every other time in JEX -- these used to
+// use the DEVICE's timezone, so the same point on the same chart was labelled
+// 9:15 AM in the classroom and 12:15 PM for a student at home, and the "Open"
+// anchor below decided what counted as today by the device's calendar rather
+// than Arizona's.
 function fmtChartLabel(t,interval){
   if(!t)return '';
   // ISO timestamp
   if(t.includes('T')&&t.includes('Z')){
     const d=new Date(t);
-    if(interval==='1d')return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-    if(interval==='5d')return d.toLocaleDateString([],{weekday:'short',hour:'2-digit',minute:'2-digit'});
-    if(interval==='1m')return d.toLocaleDateString([],{month:'short',day:'numeric'});
-    return d.toLocaleDateString([],{month:'short',day:'numeric'});
+    if(isNaN(d))return t;
+    const o={timeZone:AZ_TZ};
+    if(interval==='1d')return d.toLocaleTimeString('en-US',{...o,hour:'2-digit',minute:'2-digit'});
+    if(interval==='5d')return d.toLocaleString('en-US',{...o,weekday:'short',hour:'2-digit',minute:'2-digit'});
+    return d.toLocaleDateString('en-US',{...o,month:'short',day:'numeric'});
   }
   return t; // fallback for old string labels
 }
@@ -4646,8 +4652,13 @@ function fmtChartLabel(t,interval){
 function anchorPointLabel(p){
   const d=p&&p.t?new Date(p.t):null;
   if(!d||isNaN(d))return'Open';
-  if(d.toDateString()===new Date().toDateString())return'Open';
-  return d.toLocaleDateString([],{month:'short',day:'numeric'})+' '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  // "Today" means today in Arizona, the same day boundary the rest of the app
+  // uses -- not the device's, which for a student a few timezones away could
+  // call yesterday's anchor today's open, or the reverse.
+  const a=azParts(d), n=azParts(new Date());
+  if(a.year===n.year&&a.month===n.month&&a.day===n.day)return'Open';
+  return d.toLocaleDateString('en-US',{timeZone:AZ_TZ,month:'short',day:'numeric'})+' '
+        +d.toLocaleTimeString('en-US',{timeZone:AZ_TZ,hour:'2-digit',minute:'2-digit'});
 }
 function destroyChart(canvasId){
   if(charts[canvasId]){
@@ -5047,7 +5058,7 @@ function renderVoteCard(v,isOwner,isAdminUser){
   return '<div class="news-item" style="margin-bottom:12px">'
     +'<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">'
     +'<div><div style="font-weight:500;font-size:14px;margin-bottom:2px">'+esc(v.question)+'</div>'
-    +'<div style="font-size:11px;color:var(--text2)">'+esc(v.company_name)+' · '+v.ts+(v.closes_at?' · '+(openNow?'closes ':'closed ')+new Date(v.closes_at).toLocaleString():'')+'</div></div>'
+    +'<div style="font-size:11px;color:var(--text2)">'+esc(v.company_name)+' · '+v.ts+(v.closes_at?' · '+(openNow?'closes ':'closed ')+fmtAZTime(new Date(v.closes_at)):'')+'</div></div>'
     +'<span class="badge '+(openNow?'b-green':'b-gray')+'">'+(openNow?'open':'closed')+'</span></div>'
     // Results bars
     +'<div style="margin-bottom:10px">'
