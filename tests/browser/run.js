@@ -813,6 +813,213 @@ ${PRELUDE}
     UI.userId='u-stu'; UI.navTab='market'; UI.adminTab='dashboard'; render();
   });
 
+  // ── The 3s poll loop ────────────────────────────────────────────────
+  // checkLimitOrders / checkStopLossOrders / checkPriceAlerts run on a timer
+  // in every open browser and move real money with nobody clicking anything.
+  // They are called here directly rather than waited for, so the assertions
+  // are deterministic.
+  await step('two crossing limit orders match against each other', async ()=>{
+    UI.userId='u-stu'; UI.navTab='orders'; UI.companyPage=null; render();
+    // Clear the book first. The seeded lo-1 also crosses, and a matching
+    // engine is allowed to resolve every crossing pair it finds -- so without
+    // this the deltas below measure two fills, not one, and the step would be
+    // asserting the wrong arithmetic while looking like it passed.
+    for(const o of DB.limitOrders) if(o.status==='open') o.status='cancelled';
+    for(const o of stub.data.jex_limit_orders) if(o.status==='open') o.status='cancelled';
+    const buyer=DB.users.find(u=>u.id==='u-stu'), seller=DB.users.find(u=>u.id==='u-quote');
+    // Give the seller shares to sell and put both sides on the book.
+    seller.holdings=Object.assign({}, seller.holdings, {ACME:10});
+    stub.data.jex_users.find(u=>u.id==='u-quote').holdings={ACME:10};
+    const mk=(id,uid,side,qty,px,ageMs)=>({id, user_id:uid, ticker:'ACME', side, qty,
+      limit_price:px, status:'open', order_type:'gtc',
+      created_at:new Date(Date.now()-ageMs).toISOString()});
+    const ask=mk('lo-ask','u-quote','sell',4,11.00,20000);   // resting, sets the price
+    const bid=mk('lo-bid','u-stu','buy',4,11.50,10000);
+    DB.limitOrders.push(ask,bid);
+    stub.data.jex_limit_orders.push(ask,bid);
+    const bCash=buyer.cash, sCash=seller.cash;
+    const bHeld=(buyer.holdings.ACME||0), sHeld=(seller.holdings.ACME||0);
+    await checkLimitOrders();
+    if(DB.limitOrders.find(o=>o.id==='lo-ask').status!=='filled') throw new Error('the ask did not fill');
+    if(DB.limitOrders.find(o=>o.id==='lo-bid').status!=='filled') throw new Error('the bid did not fill');
+    const b=DB.users.find(u=>u.id==='u-stu'), sl=DB.users.find(u=>u.id==='u-quote');
+    if((b.holdings.ACME||0)!==bHeld+4) throw new Error('buyer holdings '+b.holdings.ACME);
+    if((sl.holdings.ACME||0)!==sHeld-4) throw new Error('seller holdings '+(sl.holdings.ACME||0));
+    const paid=Math.round((bCash-b.cash)*100)/100;
+    const got =Math.round((sl.cash-sCash)*100)/100;
+    // The resting ask set the price: 4 x 11.00.
+    if(paid!==44) throw new Error('buyer paid '+paid+', expected 44');
+    if(got!==44) throw new Error('seller received '+got+', expected 44');
+    if(paid!==got) throw new Error('cash was created or destroyed: '+paid+' vs '+got);
+    if(Math.abs(DB.companies.find(c=>c.ticker==='ACME').price-11)>0.001)
+      throw new Error('the fill did not set the price to 11');
+    return 'matched 4 @ 11, cash conserved';
+  });
+
+  await step('a limit order that does not cross is left alone', async ()=>{
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const far={id:'lo-far', user_id:'u-stu', ticker:'ACME', side:'buy', qty:2,
+      limit_price:Math.round((co.price-5)*100)/100, status:'open', order_type:'gtc',
+      created_at:new Date().toISOString()};
+    DB.limitOrders.push(far); stub.data.jex_limit_orders.push(far);
+    const cash0=DB.users.find(u=>u.id==='u-stu').cash;
+    await checkLimitOrders();
+    if(DB.limitOrders.find(o=>o.id==='lo-far').status!=='open') throw new Error('a non-crossing order filled');
+    if(DB.users.find(u=>u.id==='u-stu').cash!==cash0) throw new Error('cash moved on a non-crossing order');
+    return 'still resting';
+  });
+
+  await step('a resting order fills against the pool when the price reaches it', async ()=>{
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const me=DB.users.find(u=>u.id==='u-stu');
+    const o={id:'lo-pool', user_id:'u-stu', ticker:'ACME', side:'buy', qty:3,
+      limit_price:Math.round((co.price+1)*100)/100, status:'open', order_type:'gtc',
+      created_at:new Date().toISOString()};
+    DB.limitOrders.push(o); stub.data.jex_limit_orders.push(o);
+    const cash0=me.cash, held0=(me.holdings.ACME||0), avail0=co.shares_avail;
+    await checkLimitOrders();
+    const filled=DB.limitOrders.find(x=>x.id==='lo-pool');
+    if(filled.status!=='filled') throw new Error('the crossing order did not fill: '+filled.status);
+    const m=DB.users.find(u=>u.id==='u-stu');
+    if((m.holdings.ACME||0)!==held0+3) throw new Error('holdings '+m.holdings.ACME);
+    if(m.cash>=cash0) throw new Error('cash did not decrease');
+    if(DB.companies.find(c=>c.ticker==='ACME').shares_avail!==avail0-3)
+      throw new Error('the float was not reduced');
+    return 'filled vs the pool @ '+filled.filled_price;
+  });
+
+  await step('the poll loop does nothing while the session is closed', async ()=>{
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const o={id:'lo-closed', user_id:'u-stu', ticker:'ACME', side:'buy', qty:1,
+      limit_price:Math.round((co.price+5)*100)/100, status:'open', order_type:'gtc',
+      created_at:new Date().toISOString()};
+    DB.limitOrders.push(o); stub.data.jex_limit_orders.push(o);
+    DB.session.status='closed'; stub.data.jex_session[0].status='closed';
+    await checkLimitOrders(); await checkStopLossOrders();
+    DB.session.status='open'; stub.data.jex_session[0].status='open';
+    if(DB.limitOrders.find(x=>x.id==='lo-closed').status!=='open')
+      throw new Error('an order filled while trading was closed');
+    // and it fills once trading reopens
+    await checkLimitOrders();
+    if(DB.limitOrders.find(x=>x.id==='lo-closed').status!=='filled')
+      throw new Error('the order did not fill after reopening');
+    return 'held, then filled on reopen';
+  });
+
+  await step('a stop-loss sells when the price falls through its trigger', async ()=>{
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const me=DB.users.find(u=>u.id==='u-stu');
+    const held0=(me.holdings.ACME||0);
+    if(held0<3) throw new Error('not holding enough to test a stop-loss: '+held0);
+    const sl={id:'sl-1', user_id:'u-stu', ticker:'ACME', qty:3,
+      trigger_price:Math.round((co.price+1)*100)/100,   // already below trigger
+      status:'active', ts:'now', created_at:new Date().toISOString()};
+    DB.stopLossOrders.push(sl); stub.data.jex_stop_loss.push(sl);
+    const cash0=me.cash;
+    await checkStopLossOrders();
+    const after=DB.users.find(u=>u.id==='u-stu');
+    if(DB.stopLossOrders.find(x=>x.id==='sl-1').status!=='triggered')
+      throw new Error('the stop-loss did not trigger');
+    if((after.holdings.ACME||0)!==held0-3) throw new Error('holdings '+after.holdings.ACME);
+    if(after.cash<=cash0) throw new Error('no proceeds credited');
+    return 'sold 3, credited '+Math.round((after.cash-cash0)*100)/100;
+  });
+
+  await step('a stop-loss on shares you no longer hold cancels itself', async ()=>{
+    const sl={id:'sl-none', user_id:'u-stu2', ticker:'ACME', qty:5,
+      trigger_price:99999, status:'active', ts:'now', created_at:new Date().toISOString()};
+    DB.stopLossOrders.push(sl); stub.data.jex_stop_loss.push(sl);
+    await checkStopLossOrders();
+    const s=DB.stopLossOrders.find(x=>x.id==='sl-none');
+    if(s.status==='triggered') throw new Error('it sold shares that were not there');
+    if(s.status!=='cancelled') throw new Error('expected cancelled, got '+s.status);
+    return 'cancelled';
+  });
+
+  await step('a price alert fires once and only once', async ()=>{
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const a={id:'pa-1', user_id:'u-stu', ticker:'ACME', direction:'above',
+      target_price:Math.round((co.price-1)*100)/100, triggered:null,
+      created_at:new Date().toISOString()};
+    DB.priceAlerts.push(a); stub.data.jex_price_alerts.push(a);
+    await checkPriceAlerts();
+    if(!DB.priceAlerts.find(x=>x.id==='pa-1').triggered) throw new Error('the alert did not fire');
+    const calls=()=>stub.rpcCalls.filter(c=>c.fn==='rpc_trigger_price_alert').length;
+    const before=calls();
+    await checkPriceAlerts();
+    if(calls()!==before) throw new Error('a triggered alert was re-sent to the server');
+    return 'fired once';
+  });
+
+  await step('an alert whose target is not met stays quiet', async ()=>{
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const a={id:'pa-2', user_id:'u-stu', ticker:'ACME', direction:'above',
+      target_price:Math.round((co.price*10)*100)/100, triggered:null,
+      created_at:new Date().toISOString()};
+    DB.priceAlerts.push(a); stub.data.jex_price_alerts.push(a);
+    await checkPriceAlerts();
+    if(DB.priceAlerts.find(x=>x.id==='pa-2').triggered) throw new Error('it fired below target');
+    return 'quiet';
+  });
+
+  await step('the poll loop runs clean twice in a row', async ()=>{
+    const before = stub.errors.length;
+    for(let i=0;i<2;i++){
+      await checkLimitOrders(); await checkStopLossOrders(); await checkPriceAlerts();
+      checkShortSqueezes(); await checkCircuitBreakerAutoResume();
+    }
+    if(stub.errors.length!==before) throw new Error('the poll loop produced an uncaught error');
+    return 'clean';
+  });
+
+  // ── Circuit breakers ────────────────────────────────────────────────
+  await step('a big move halts the ticker, and the halt blocks trading', async ()=>{
+    const co=DB.companies.find(c=>c.ticker==='BETA');
+    // Session open was 10; push it well past the 20% breaker.
+    co.price=20; stub.data.jex_companies.find(c=>c.ticker==='BETA').price=20;
+    DB.session.circuit_cooldowns={}; stub.data.jex_session[0].circuit_cooldowns={};
+    await checkCircuitBreakers();
+    if(!DB.halts.some(h=>h.ticker==='BETA')) throw new Error('the breaker did not trip');
+    const me=DB.users.find(u=>u.id==='u-stu');
+    const cash0=me.cash;
+    await paceOrders();
+    await placeBuy('BETA', 1);
+    if(DB.users.find(u=>u.id==='u-stu').cash!==cash0)
+      throw new Error('a halted ticker still traded');
+    return 'halted and blocked';
+  });
+
+  await step('a halted ticker is not halted twice', async ()=>{
+    const before=DB.halts.filter(h=>h.ticker==='BETA').length;
+    await checkCircuitBreakers();
+    const after=DB.halts.filter(h=>h.ticker==='BETA').length;
+    if(after!==before) throw new Error('duplicate halts: '+before+' -> '+after);
+    return 'one halt';
+  });
+
+  await step('resuming sets a cooldown so it cannot immediately re-halt', async ()=>{
+    await resumeStock('BETA', true);
+    if(DB.halts.some(h=>h.ticker==='BETA')) throw new Error('still halted after resume');
+    const cd=(DB.session.circuit_cooldowns||{}).BETA;
+    if(!cd||cd<=Date.now()) throw new Error('no live cooldown was set: '+cd);
+    // The price is still way past the threshold; the cooldown is the only
+    // thing stopping an immediate re-halt.
+    await checkCircuitBreakers();
+    if(DB.halts.some(h=>h.ticker==='BETA')) throw new Error('re-halted during the cooldown');
+    return 'cooldown holds';
+  });
+
+  await step('a ticker inside the band is never halted', async ()=>{
+    const co=DB.companies.find(c=>c.ticker==='BETA');
+    co.price=10.5; stub.data.jex_companies.find(c=>c.ticker==='BETA').price=10.5;
+    DB.session.circuit_cooldowns={}; stub.data.jex_session[0].circuit_cooldowns={};
+    DB.halts=DB.halts.filter(h=>h.ticker!=='BETA');
+    stub.data.jex_halts=stub.data.jex_halts.filter(h=>h.ticker!=='BETA');
+    await checkCircuitBreakers();
+    if(DB.halts.some(h=>h.ticker==='BETA')) throw new Error('a 5% move tripped a 20% breaker');
+    return 'left alone';
+  });
+
   // ── Arizona time ────────────────────────────────────────────────────
   // Everything in JEX is Arizona time, and this page runs with TZ set by the
   // scenario -- so these read wrong if any of it falls back to the device's

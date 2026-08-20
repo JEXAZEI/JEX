@@ -433,6 +433,124 @@ const RPC = {
     return {approved:true, application:a, company:co, price, shares:newShares,
             shares_avail:co.shares_avail, price_history:co.price_history, index_base_adjust:adj};
   },
+  // ── The 3s poll loop ─────────────────────────────────
+  // checkLimitOrders / checkStopLossOrders / checkPriceAlerts run on a timer
+  // in every open browser and move real money without anyone clicking. These
+  // model the matching engine closely enough to assert the outcome.
+  rpc_match_limit_order_book: (p)=>{
+    const open=DATA.jex_limit_orders.filter(o=>o.ticker===p.p_ticker&&o.status==='open');
+    const bids=open.filter(o=>o.side==='buy').sort((a,b)=>b.limit_price-a.limit_price);
+    const asks=open.filter(o=>o.side==='sell').sort((a,b)=>a.limit_price-b.limit_price);
+    const bid=bids[0], ask=asks[0];
+    if(!bid||!ask||bid.limit_price<ask.limit_price) return {matched:false};
+    const co=findCo(p.p_ticker);
+    const qty=Math.min(bid.qty, ask.qty);
+    // The resting order sets the price, as a real book does.
+    const price=r2(new Date(ask.created_at)<=new Date(bid.created_at)?ask.limit_price:bid.limit_price);
+    const buyer=DATA.jex_users.find(u=>u.id===bid.user_id);
+    const seller=DATA.jex_users.find(u=>u.id===ask.user_id);
+    const cost=r2(price*qty);
+    buyer.cash=r2(buyer.cash-cost);
+    buyer.holdings=Object.assign({},buyer.holdings);
+    buyer.holdings[p.p_ticker]=(buyer.holdings[p.p_ticker]||0)+qty;
+    seller.cash=r2(seller.cash+cost);
+    seller.holdings=Object.assign({},seller.holdings);
+    seller.holdings[p.p_ticker]=(seller.holdings[p.p_ticker]||0)-qty;
+    if(!seller.holdings[p.p_ticker]) delete seller.holdings[p.p_ticker];
+    pushPrice(co, price);
+    bid.qty-=qty; ask.qty-=qty;
+    if(!bid.qty) bid.status='filled';
+    if(!ask.qty) ask.status='filled';
+    const trade=recordTrade({ticker:p.p_ticker, qty, price, buyer_id:bid.user_id,
+      seller_id:ask.user_id, type:'limit'});
+    return {matched:true, ticker:p.p_ticker, price, price_history:co.price_history,
+      fill_qty:qty, fill_price:price, trade,
+      buyer_id:bid.user_id, buyer_type:'user', buyer_cash:buyer.cash, buyer_holdings:buyer.holdings,
+      seller_id:ask.user_id, seller_type:'user', seller_cash:seller.cash, seller_holdings:seller.holdings,
+      bid_order_id:bid.id, bid_status:bid.status, bid_qty:bid.qty,
+      ask_order_id:ask.id, ask_status:ask.status, ask_qty:ask.qty};
+  },
+  rpc_fill_limit_vs_pool: (p)=>{
+    const o=DATA.jex_limit_orders.find(x=>x.id===p.p_order_id);
+    if(!o||o.status!=='open') return {filled:false};
+    const co=findCo(o.ticker);
+    const crosses=(o.side==='buy'&&co.price<=o.limit_price)||(o.side==='sell'&&co.price>=o.limit_price);
+    if(!crosses) return {filled:false};
+    const u=DATA.jex_users.find(x=>x.id===o.user_id);
+    const price=r2(co.price);
+    const total=r2(price*o.qty);
+    if(o.side==='buy'){
+      if(u.cash<total||co.shares_avail<o.qty) return {filled:false};
+      u.cash=r2(u.cash-total);
+      u.holdings=Object.assign({},u.holdings);
+      u.holdings[o.ticker]=(u.holdings[o.ticker]||0)+o.qty;
+      co.shares_avail-=o.qty;
+    } else {
+      const held=(u.holdings||{})[o.ticker]||0;
+      if(held<o.qty) return {filled:false};
+      u.cash=r2(u.cash+total);
+      u.holdings=Object.assign({},u.holdings);
+      u.holdings[o.ticker]=held-o.qty;
+      if(!u.holdings[o.ticker]) delete u.holdings[o.ticker];
+      co.shares_avail+=o.qty;
+    }
+    o.status='filled';
+    const trade=recordTrade({ticker:o.ticker, qty:o.qty, price,
+      buyer_id:o.side==='buy'?u.id:'exchange', seller_id:o.side==='buy'?'exchange':u.id, type:'limit'});
+    return {filled:true, ticker:o.ticker, price, price_history:co.price_history,
+      shares_avail:co.shares_avail, fill_price:price, trade,
+      owner_id:u.id, owner_type:'user', cash:u.cash, holdings:u.holdings};
+  },
+  rpc_trigger_stop_loss: (p)=>{
+    const sl=DATA.jex_stop_loss.find(x=>x.id===p.p_stop_loss_id);
+    if(!sl) return {triggered:false, reason:'not_active'};
+    if(sl.status!=='active') return {triggered:false, reason:'not_active'};
+    const co=findCo(sl.ticker), u=DATA.jex_users.find(x=>x.id===sl.user_id);
+    const held=(u.holdings||{})[sl.ticker]||0;
+    if(!held) return {triggered:false, reason:'no_shares_held'};
+    // The server re-checks the trigger itself rather than trusting the client.
+    if(co.price>sl.trigger_price) return {triggered:false, reason:'not_triggered'};
+    const qty=Math.min(held, sl.qty||held);
+    const price=Math.max(0.01, r2(co.price*(1-priceImpact(co,qty))));
+    u.cash=r2(u.cash+r2(price*qty));
+    u.holdings=Object.assign({},u.holdings);
+    u.holdings[sl.ticker]=held-qty;
+    if(!u.holdings[sl.ticker]) delete u.holdings[sl.ticker];
+    pushPrice(co, price);
+    co.shares_avail+=qty;
+    sl.status='triggered';
+    const trade=recordTrade({ticker:sl.ticker, qty, price, buyer_id:'exchange',
+      seller_id:u.id, type:'stop_loss'});
+    return {triggered:true, user_id:u.id, cash:u.cash, holdings:u.holdings, price,
+      shares_avail:co.shares_avail, price_history:co.price_history, sell_qty:qty, trade};
+  },
+  rpc_trigger_price_alert: (p)=>{
+    const a=DATA.jex_price_alerts.find(x=>x.id===p.p_id);
+    if(!a||a.triggered) return {triggered:false, reason:'already_triggered_or_missing'};
+    const co=findCo(a.ticker);
+    const hit=(a.direction==='above'&&co.price>=a.target_price)||
+              (a.direction==='below'&&co.price<=a.target_price);
+    if(!hit) return {triggered:false, reason:'not_met'};
+    a.triggered=true;
+    return {triggered:true, user_id:a.user_id, ticker:a.ticker, direction:a.direction,
+            target_price:a.target_price, price:co.price};
+  },
+  rpc_admin_halt_stock: (p)=>{
+    if(DATA.jex_halts.some(h=>h.ticker===p.p_ticker)) reject(p.p_ticker+' is already halted');
+    const h={id:'h-'+(_tradeSeq++), ticker:p.p_ticker,
+      reason:p.p_reason||'Circuit breaker',
+      halted_by:p.p_system_triggered?'System (Circuit Breaker)':(caller()||{}).name||'Admin',
+      ts:TS, created_at:nowIso()};
+    DATA.jex_halts.push(h);
+    return {halt:h};   // haltStock() reads r.halt, not the bare row
+  },
+  rpc_admin_resume_stock: (p)=>{
+    DATA.jex_halts = DATA.jex_halts.filter(h=>h.ticker!==p.p_ticker);
+    const cd=Object.assign({}, DATA.jex_session[0].circuit_cooldowns||{});
+    cd[p.p_ticker]=Date.now()+20*60*1000;
+    DATA.jex_session[0].circuit_cooldowns=cd;
+    return {resumed:true, session:DATA.jex_session[0]};
+  },
   rpc_cast_vote: (p)=>{
     const u=caller();
     const v=DATA.jex_votes.find(x=>x.id===p.p_vote_id);
