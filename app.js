@@ -241,6 +241,27 @@ let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[]
 let SHEETS_URL=null;
 let _realtimeChannels=[];
 
+// Leading-edge coalescer for realtime repaints.
+//
+// The old version was a pure 150ms trailing debounce: EVERY update waited
+// 150ms even when nothing had preceded it, and a burst whose events landed
+// more than 150ms apart -- which is normal, since one trade emits a
+// jex_companies UPDATE and a jex_trades INSERT as separate messages -- got a
+// full re-render each. That is why one trade produced two or three renders,
+// and render() destroys and rebuilds every Chart.js instance on the page.
+//
+// Now the first event repaints immediately (0ms, not 150ms) and anything
+// arriving inside the window collapses into a single trailing repaint. Both
+// faster and cheaper than before.
+const RT_MIN_GAP=200;
+let _rtLastRender=0,_rtPendingRender=false;
+function scheduleBackgroundRender(){
+  const since=Date.now()-_rtLastRender;
+  if(since>=RT_MIN_GAP){_rtLastRender=Date.now();renderBackground();return;}
+  if(_rtPendingRender)return;
+  _rtPendingRender=true;
+  setTimeout(()=>{_rtPendingRender=false;_rtLastRender=Date.now();renderBackground();},RT_MIN_GAP-since);
+}
 let _rtBackoff=0;
 function subscribeRealtime(){
   if(!SUPABASE_URL||SUPABASE_URL==='YOUR_SUPABASE_URL')return;
@@ -427,10 +448,7 @@ function handleRealtimeUpdate(table,event,newRow,oldRow){
   // Debounced re-render
   const blockReason=userIsFillingForm();
   if(blockReason)console.warn('JEX Realtime: applied the update but skipped re-rendering because',blockReason);
-  if(!blockReason){
-    clearTimeout(window._rtRenderTimer);
-    window._rtRenderTimer=setTimeout(()=>renderBackground(),150);
-  }
+  if(!blockReason)scheduleBackgroundRender();
 }
 let _lastActivity=Date.now();
 const INACTIVITY_TIMEOUT=30*60*1000; // 30 minutes
@@ -8574,7 +8592,11 @@ function getPageContent(){
 function render(){
   // Carry typed input across a repaint the user did not ask for.
   if(_bgRender)_formSnapshot=snapshotFormState();
-  if(window._rtRenderTimer)console.log('JEX Realtime: render() executing (navTab='+UI.navTab+')');
+  // Only background repaints, and only when explicitly enabled -- this used
+  // to key off a setTimeout id that is never cleared after firing, so once
+  // realtime had ticked ONCE it logged on every render from any source and
+  // made routine repaints look like realtime storms.
+  if(_bgRender&&window.JEX_RT_DEBUG)console.log('JEX Realtime: background render (navTab='+UI.navTab+')');
   destroyCharts();
   const app=document.getElementById('app');
   if(!UI.userId){
