@@ -147,5 +147,30 @@ check('the render log no longer keys off a never-cleared timer id',
   check('a 1s event storm collapses to ~5 repaints, not 20', renders<=6, 'renders='+renders);
 })();
 
+console.log('\n=== adaptive polling ===');
+check('autoRefresh backs off while realtime is healthy',
+  /const minGap=realtimeHealthy\(\)\?60000:18000;/.test(src));
+check('health is channel-join based, not last-event based',
+  /function realtimeHealthy\(\)\{return _rtJoined&&_realtimeChannels\.length>0;\}/.test(src));
+check('a confirmed join marks the channel healthy', /_rtJoined=true;/.test(src));
+check('a close marks it unhealthy again', (src.match(/_rtJoined=false;/g)||[]).length>=2);
+check('the 3s matching poll is untouched (limit fills stay fast)',
+  /await checkLimitOrders\(\);await checkStopLossOrders\(\)[\s\S]{0,120}?\},3000\);/.test(src));
+
+// A quiet market must not look like a dead socket.
+(function(){
+  const healthy=(joined,chans)=>joined&&chans>0;
+  check('quiet market with an open channel still counts as healthy', healthy(true,1)===true);
+  check('dropped socket is unhealthy even if events arrived recently', healthy(false,1)===false);
+  const gap=h=>h?60000:18000;
+  check('healthy -> 60s sweep', gap(healthy(true,1))===60000);
+  check('unhealthy -> back to 18s sweep', gap(healthy(false,0))===18000);
+})();
+
+console.log('\n=== trade + registration buttons ===');
+for(const h of ['cpTrade','cpLimit','doRegister','placeLimitOrder'])
+  check(h+' is wrapped in busy()', new RegExp('busy\\(this,&quot;[^&]*&quot;,(\\(\\)=>)?'+h+'\\b').test(src), h);
+check('the fixed 1500ms trade lockout is gone', !/disableTradeBtn\(this\)/.test(src));
+
 console.log(fails?('\n'+fails+' FAILURES'):'\nAll passed');
 process.exit(fails?1:0);

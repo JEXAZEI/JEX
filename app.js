@@ -263,6 +263,12 @@ function scheduleBackgroundRender(){
   setTimeout(()=>{_rtPendingRender=false;_rtLastRender=Date.now();renderBackground();},RT_MIN_GAP-since);
 }
 let _rtBackoff=0;
+// True only between a confirmed channel join and the socket closing. This
+// is the health signal autoRefresh backs off against -- deliberately NOT
+// "an event arrived recently", because a quiet market produces no events
+// and that would look identical to a dead connection.
+let _rtJoined=false;
+function realtimeHealthy(){return _rtJoined&&_realtimeChannels.length>0;}
 function subscribeRealtime(){
   if(!SUPABASE_URL||SUPABASE_URL==='YOUR_SUPABASE_URL')return;
   // Unsubscribe from any existing channels
@@ -327,7 +333,7 @@ function subscribeRealtime(){
         // stays open either way) was indistinguishable from a working one
         // until events silently never arrived.
         if(msg.ref==='1'&&msg.event==='phx_reply'){
-          if(msg.payload?.status==='ok'){_rtBackoff=0;console.log('JEX Realtime: channel join confirmed, subscribed to',tables.join(', '));}
+          if(msg.payload?.status==='ok'){_rtBackoff=0;_rtJoined=true;console.log('JEX Realtime: channel join confirmed, subscribed to',tables.join(', '));}
           else console.warn('JEX Realtime: channel join REJECTED:',JSON.stringify(msg.payload));
           return;
         }
@@ -338,9 +344,10 @@ function subscribeRealtime(){
       }catch(err){console.warn('JEX Realtime: failed to parse message:',err.message,e.data);}
     };
 
-    ws.onerror=(e)=>{ clearInterval(heartbeatInterval); console.warn('JEX Realtime: WebSocket error',e); };
+    ws.onerror=(e)=>{ clearInterval(heartbeatInterval); _rtJoined=false; console.warn('JEX Realtime: WebSocket error',e); };
     ws.onclose=(e)=>{
       clearInterval(heartbeatInterval);
+      _rtJoined=false;
       // CloseEvent carries a real code/reason (e.g. 1006 abnormal closure,
       // 1002 protocol error, or an application-specific 4xxx code) --
       // logged since this fires on every disconnect, including ones a
@@ -903,6 +910,10 @@ function checkRateLimit(userId){
   _orderTimestamps[userId].push(now);
   return true;
 }
+// Superseded by busy(), which holds a button for the REAL duration of its
+// action instead of a fixed 1500ms guess -- that both unlocked too early on
+// a slow request and sat needlessly disabled after a fast one. Kept only so
+// any external/bookmarked caller does not break; no onclick uses it now.
 function disableTradeBtn(btn,ms=1500){
   if(!btn)return;
   btn.disabled=true;btn.style.opacity='0.5';
@@ -1741,7 +1752,16 @@ async function autoRefresh(){
   // safe. This used to bail out entirely, so a single filled-in field also
   // stopped the fallback from even asking the server for fresh data.
   const now=Date.now();
-  if(now-_lastRefresh<18000)return; // debounce
+  // Adaptive. autoRefresh is a 15-query sweep (every company, every user,
+  // every limit order, 100 trades) and it exists as the safety net for when
+  // realtime is not delivering. While the channel IS established, realtime
+  // already covers companies, trades, session, halts, limit orders, news,
+  // votes, dividends, buybacks and share classes within ~200ms, so sweeping
+  // every 20s is almost entirely redundant work -- back off to 60s. If the
+  // socket drops, this drops straight back to 20s and becomes the only
+  // thing keeping the page current.
+  const minGap=realtimeHealthy()?60000:18000;
+  if(now-_lastRefresh<minGap)return;
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
@@ -5362,7 +5382,7 @@ function renderLogin(){
 <div class="frow"><label class="flabel">Security question</label>${secQSelect('reg')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-secq-answer" placeholder="Your answer" autocomplete="off"></div>`;
     const coSecretFields=ga?'':`<div class="frow"><label class="flabel">Password (min 6 characters)</label><div class="pw-wrap"><input type="password" id="reg-co-pw" placeholder="Choose a password"><button type="button" class="pw-eye" onclick="togglePw('reg-co-pw')" tabindex="-1">👁</button></div></div>`;
     const coSecQFields=ga?'':`<div class="frow"><label class="flabel">Security question</label>${secQSelect('reg-co')}</div><div class="frow"><label class="flabel">Security answer</label><input type="text" id="reg-co-secq-answer" placeholder="Your answer" autocomplete="off"></div>`;
-    return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div>${gaBanner}<div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name" value="${gaName}"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-username" placeholder="e.g. arielk" autocomplete="username" value="${gaUsername}"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu" value="${gaEmail}" ${ga?'readonly':''} oninput="onRegEmailChanged('reg')"></div><div id="reg-email-verify">${ga?'':renderRegEmailVerifyHTML('reg')}</div>${studentSecretFields}</div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp" value="${gaName}"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-co-username" placeholder="e.g. acmecorp" autocomplete="username" value="${gaUsername}"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu" value="${gaEmail}" ${ga?'readonly':''} oninput="onRegEmailChanged('reg-co')"></div><div id="reg-co-email-verify">${ga?'':renderRegEmailVerifyHTML('reg-co')}</div>${coSecretFields}<div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div>${coSecQFields}</div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in. Your classroom will be assigned by your teacher after approval.</div><div class="frow" style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" id="reg-agree-tos" aria-label="I agree to the Terms of Service, Bylaws, and Privacy Policy" style="width:auto;margin-top:2px"><span style="font-size:12px;color:var(--text2)">I agree to the <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a>, <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a>, and <a class="legal-link" onclick="openLegalModal('privacy')">Privacy Policy</a>.</span></div><div class="login-actions"><button class="btn btn-primary" onclick="doRegister()">Submit for approval</button><button class="btn" onclick="UI.googleAuth=null;UI.loginView='select';render()">Back</button></div></div></div>`;}
+    return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Create an account</div>${gaBanner}<div class="reg-tabs"><button class="reg-tab active" id="reg-tab-student" onclick="switchRegTab('student')">Student</button><button class="reg-tab" id="reg-tab-company" onclick="switchRegTab('company')">Company</button></div><div id="reg-student-fields"><div class="frow"><label class="flabel">Full name</label><input type="text" id="reg-name" placeholder="Your name" value="${gaName}"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-username" placeholder="e.g. arielk" autocomplete="username" value="${gaUsername}"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-email" placeholder="you@school.edu" value="${gaEmail}" ${ga?'readonly':''} oninput="onRegEmailChanged('reg')"></div><div id="reg-email-verify">${ga?'':renderRegEmailVerifyHTML('reg')}</div>${studentSecretFields}</div><div id="reg-company-fields" style="display:none"><div class="frow"><label class="flabel">Company name</label><input type="text" id="reg-co-name" placeholder="e.g. Acme Corp" value="${gaName}"></div><div class="frow"><label class="flabel">Username</label><input type="text" id="reg-co-username" placeholder="e.g. acmecorp" autocomplete="username" value="${gaUsername}"></div><div class="frow"><label class="flabel">Email</label><input type="email" id="reg-co-email" placeholder="you@school.edu" value="${gaEmail}" ${ga?'readonly':''} oninput="onRegEmailChanged('reg-co')"></div><div id="reg-co-email-verify">${ga?'':renderRegEmailVerifyHTML('reg-co')}</div>${coSecretFields}<div class="frow"><label class="flabel">Brief description</label><input type="text" id="reg-co-desc" placeholder="e.g. Renewable energy startup"></div><div class="ibox ibox-blue" style="margin-bottom:10px;font-size:12px">After your IPO is approved, you can invite up to 3 founders from My Stock → Founders.</div>${coSecQFields}</div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your account will be reviewed before you can sign in. Your classroom will be assigned by your teacher after approval.</div><div class="frow" style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" id="reg-agree-tos" aria-label="I agree to the Terms of Service, Bylaws, and Privacy Policy" style="width:auto;margin-top:2px"><span style="font-size:12px;color:var(--text2)">I agree to the <a class="legal-link" onclick="openLegalModal('tos')">Terms of Service</a>, <a class="legal-link" onclick="openLegalModal('bylaws')">Bylaws</a>, and <a class="legal-link" onclick="openLegalModal('privacy')">Privacy Policy</a>.</span></div><div class="login-actions"><button class="btn btn-primary" onclick="busy(this,&quot;Submitting…&quot;,doRegister)">Submit for approval</button><button class="btn" onclick="UI.googleAuth=null;UI.loginView='select';render()">Back</button></div></div></div>`;}
   if(!['admin','company','student'].includes(UI.loginTab))UI.loginTab='student';
   const tabCounts={admin:admins.length,company:companies.length,student:students.length};
   return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-tagline">JTED Stock Exchange</div>
@@ -5389,15 +5409,15 @@ function doRegister(){
   const ga=UI.googleAuth;
   if(ga){
     if(norm(ga.email)!==email)return toast('Email must match your Google account');
-    if(type==='student')registerStudent(get('reg-name')?.value,get('reg-username')?.value,get('reg-email')?.value,null,null,null,true,'google',ga.authUid);
-    else registerCompany(get('reg-co-name')?.value,get('reg-co-username')?.value,get('reg-co-email')?.value,null,get('reg-co-desc')?.value,null,null,true,'google',ga.authUid);
+    if(type==='student')return registerStudent(get('reg-name')?.value,get('reg-username')?.value,get('reg-email')?.value,null,null,null,true,'google',ga.authUid);
+    else return registerCompany(get('reg-co-name')?.value,get('reg-co-username')?.value,get('reg-co-email')?.value,null,get('reg-co-desc')?.value,null,null,true,'google',ga.authUid);
     return;
   }
   const vState=UI.regVerify[prefix];
   const isVerified=!!(vState&&vState.status==='verified'&&vState.email===email);
   if(emailjsReady()&&!isVerified)return toast('Please verify your email address before submitting');
-  if(type==='student')registerStudent(get('reg-name')?.value,get('reg-username')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value,isVerified);
-  else registerCompany(get('reg-co-name')?.value,get('reg-co-username')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value,isVerified);
+  if(type==='student')return registerStudent(get('reg-name')?.value,get('reg-username')?.value,get('reg-email')?.value,get('reg-pw')?.value,get('reg-secq')?.value,get('reg-secq-answer')?.value,isVerified);
+  else return registerCompany(get('reg-co-name')?.value,get('reg-co-username')?.value,get('reg-co-email')?.value,get('reg-co-pw')?.value,get('reg-co-desc')?.value,get('reg-co-secq')?.value,get('reg-co-secq-answer')?.value,isVerified);
 }
 
 // ═══════════════════════════════════════════════
@@ -5744,40 +5764,40 @@ function renderCompanyPage(parentTicker){
         html+=(idxFund?'<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Buys mint new units at the live index price — there\'s no fixed supply to run out of.</p>':
           '<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Available: <strong>'+co.shares_avail+'</strong> of '+co.shares.toLocaleString()+'</p>')
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="cp-qty" value="1" min="1"'+(idxFund?'':' max="'+co.shares_avail+'"')+'></div>'
-          +'<div style="padding-bottom:12px"><button class="btn btn-success" onclick="disableTradeBtn(this);cpTrade(&quot;buy&quot;)">Buy now</button></div></div>'
+          +'<div style="padding-bottom:12px"><button class="btn btn-success" onclick="busy(this,&quot;Buying…&quot;,()=>cpTrade(&quot;buy&quot;))">Buy now</button></div></div>'
           +quickQtyButtonsHTML(parentTicker,'buy','cp-qty','cp-preview')
           +'<div id="cp-preview">'+impactPreview(co,1,'buy')+'</div>'
           +(idxFund?'':'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit buy'+infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')+'</div>'
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-qty" value="1" min="1"></div>'
           +'<div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="cp-lmt-price" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
           +'<div class="frow" style="flex:1"><label class="flabel">Order type</label><select id="limit-order-type"><option value="gtc">GTC (Good till cancelled)</option><option value="day">Day order (expires at close)</option></select></div>'
-          +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="cpLimit(&quot;buy&quot;)">Place limit</button></div></div>');
+          +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Placing…&quot;,()=>cpLimit(&quot;buy&quot;))">Place limit</button></div></div>');
       } else if(effMode==='sell'){
         html+='<p style="font-size:12px;color:var(--text2);margin-bottom:8px">You hold: <strong>'+held+'</strong></p>';
         if(held>0){
           html+='<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="cp-qty" value="1" min="1" max="'+held+'"></div>'
-            +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="disableTradeBtn(this);cpTrade(&quot;sell&quot;)">Sell now</button></div></div>'
+            +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="busy(this,&quot;Selling…&quot;,()=>cpTrade(&quot;sell&quot;))">Sell now</button></div></div>'
             +quickQtyButtonsHTML(parentTicker,'sell','cp-qty','cp-preview')
             +'<div id="cp-preview">'+impactPreview(co,1,'sell')+'</div>'
             +(idxFund?'':'<hr class="divider" style="margin:10px 0"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit sell'+infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')+'</div>'
             +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-sty" value="1" min="1" max="'+held+'"></div>'
             +'<div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="cp-lmt-sprice" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
             +'<div class="frow" style="flex:1"><label class="flabel">Type</label><select id="limit-order-type-sell"><option value="gtc">GTC</option><option value="day">Day</option><option value="fok">FOK</option></select></div>'
-            +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="cpLimit(&quot;sell&quot;)">Place limit</button></div></div>');
+            +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="busy(this,&quot;Placing…&quot;,()=>cpLimit(&quot;sell&quot;))">Place limit</button></div></div>');
         } else {
           html+='<div class="empty" style="padding:16px">You don&#39;t hold any '+parentTicker+'.</div>';
         }
       } else if(effMode==='short'){
         html+='<div class="ibox ibox-purple">Short selling'+infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. You borrow shares and sell them now; later you buy them back to cover, hopefully at a lower price. The difference is your profit or loss, but losses are uncapped since a price can rise indefinitely.')+' — borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div>'
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="cp-qty" value="1" min="1"></div>'
-          +'<div style="padding-bottom:12px"><button class="btn btn-purple" onclick="cpTrade(&quot;short&quot;)">Short sell</button></div></div>'
+          +'<div style="padding-bottom:12px"><button class="btn btn-purple" onclick="busy(this,&quot;Shorting…&quot;,()=>cpTrade(&quot;short&quot;))">Short sell</button></div></div>'
           +quickQtyButtonsHTML(parentTicker,'short','cp-qty','cp-preview')
           +'<div id="cp-preview">'+shortPrev(co,1)+'</div>';
       } else if(short){
         html+='<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div>'
           +'<div style="font-size:13px;margin-bottom:10px">Open: <strong>'+short.qty+' shares</strong> @ avg '+fmt(short.avgPrice)+' | P&L: <span class="'+(( short.avgPrice-co.price)*short.qty>=0?'price-up':'price-down')+'">'+fmt((short.avgPrice-co.price)*short.qty)+'</span></div>'
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="cp-qty" value="'+short.qty+'" min="1" max="'+short.qty+'"></div>'
-          +'<div style="padding-bottom:12px"><button class="btn btn-warning" onclick="cpTrade(&quot;cover&quot;)">Cover short</button></div></div>'
+          +'<div style="padding-bottom:12px"><button class="btn btn-warning" onclick="busy(this,&quot;Covering…&quot;,()=>cpTrade(&quot;cover&quot;))">Cover short</button></div></div>'
           +quickQtyButtonsHTML(parentTicker,'cover','cp-qty','cp-preview')
           +'<div id="cp-preview">'+impactPreview(co,short.qty,'buy')+'</div>';
       }
@@ -6066,22 +6086,26 @@ function addAlertForm(ticker){
   return addPriceAlert(ticker,document.getElementById('alert-price')?.value,document.getElementById('alert-dir')?.value); // returned for busy()
 }
 function cpTrade(mode){
+  // Returned so busy() can hold the button for the REAL duration of the
+  // trade rather than a fixed guess (disableTradeBtn's flat 1500ms, which
+  // both unlocked too early on a slow request and sat disabled after a fast
+  // one).
   const t=UI.companyPage;const q=get('cp-qty')?.value;
-  if(mode==='buy')placeBuy(t,q);
-  else if(mode==='sell')placeSell(t,q);
-  else if(mode==='short')placeShort(t,q);
-  else if(mode==='cover')coverShort(t,q);
+  if(mode==='buy')return placeBuy(t,q);
+  if(mode==='sell')return placeSell(t,q);
+  if(mode==='short')return placeShort(t,q);
+  if(mode==='cover')return coverShort(t,q);
 }
 function cpLimit(side){
   const t=UI.companyPage;
   if(side==='buy'){
-    placeLimitOrder(t,'buy',get('cp-lmt-qty')?.value,get('cp-lmt-price')?.value);
+    return placeLimitOrder(t,'buy',get('cp-lmt-qty')?.value,get('cp-lmt-price')?.value);
   } else {
     // Sync sell order type selector to the shared limit-order-type element
     const sellTypeEl=get('limit-order-type-sell');
     const sharedTypeEl=get('limit-order-type');
     if(sellTypeEl&&sharedTypeEl)sharedTypeEl.value=sellTypeEl.value;
-    placeLimitOrder(t,'sell',get('cp-lmt-sty')?.value,get('cp-lmt-sprice')?.value);
+    return placeLimitOrder(t,'sell',get('cp-lmt-sty')?.value,get('cp-lmt-sprice')?.value);
   }
 }
 function toggleWatchAndRefresh(ticker){toggleWatch(ticker).then(()=>openCompanyPage(ticker));}
@@ -6154,7 +6178,7 @@ function openPanel(ticker){
       ${short?`<button class="ot-btn ${effMode==='cover'?'ot-cover':''}" onclick="UI.panelMode='cover';openPanel('${ticker}')">Cover</button>`:''}
     </div>
     ${effMode==='buy'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?`Buys mint new units at the live index price — there's no fixed supply to run out of.`:`Buy pushes price up. Available: <strong>${c.shares_avail}</strong> of ${c.shares.toLocaleString()}.`}</p>
-    <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1"${idxFund?'':` max="${c.shares_avail}"`}></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="disableTradeBtn(this);placeBuy('${ticker}',get('t-qty')?.value)">Buy now</button></div></div>
+    <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1"${idxFund?'':` max="${c.shares_avail}"`}></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="busy(this,&quot;Buying…&quot;,()=>placeBuy('${ticker}',get('t-qty')?.value))">Buy now</button></div></div>
     ${quickQtyButtonsHTML(ticker,'buy','t-qty','t-preview')}
     <div id="t-preview">${impactPreview(c,1,'buy')}</div>
     ${idxFund?'':`<hr class="divider" style="margin:10px 0">
@@ -6162,7 +6186,7 @@ function openPanel(ticker){
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="t-lmt-qty" value="1" min="1"></div>
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
-      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="placeLimitOrder('${ticker}','buy',get('t-lmt-qty')?.value,get('t-lmt-price')?.value)">Place limit</button></div>
+      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Placing…&quot;,()=>placeLimitOrder('${ticker}','buy',get('t-lmt-qty')?.value,get('t-lmt-price')?.value))">Place limit</button></div>
     </div>`}`
     :effMode==='sell'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?'Sells redeem your units at the live index price.':'Sell pushes price down.'} You hold: <strong>${held}</strong>.</p>${held>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${held}"></div><div style="padding-bottom:12px"><button class="btn btn-danger" onclick="placeSell('${ticker}',get('t-qty')?.value)">Sell now</button></div></div>
     ${quickQtyButtonsHTML(ticker,'sell','t-qty','t-preview')}
@@ -6172,7 +6196,7 @@ function openPanel(ticker){
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="t-lmt-qty" value="1" min="1" max="${held}"></div>
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
-      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="placeLimitOrder('${ticker}','sell',get('t-lmt-qty')?.value,get('t-lmt-price')?.value)">Place limit</button></div>
+      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Placing…&quot;,()=>placeLimitOrder('${ticker}','sell',get('t-lmt-qty')?.value,get('t-lmt-price')?.value))">Place limit</button></div>
     </div>`}`:`<div class="empty" style="padding:16px">You don't hold any ${ticker}.</div>`}`
     :effMode==='short'?`<div class="ibox ibox-purple">Short selling${infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. You borrow shares and sell them now; later you buy them back to cover, hopefully at a lower price. The difference is your profit or loss, but losses are uncapped since a price can rise indefinitely.')} — borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="placeShort('${ticker}',get('t-qty')?.value)">Short sell</button></div></div>${quickQtyButtonsHTML(ticker,'short','t-qty','t-preview')}<div id="t-preview">${shortPrev(c,1)}</div>`
     :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="coverShort('${ticker}',get('t-qty')?.value)">Cover short</button></div></div>${quickQtyButtonsHTML(ticker,'cover','t-qty','t-preview')}<div id="t-preview">${impactPreview(c,short.qty,'buy')}</div>`:''}
@@ -6357,7 +6381,7 @@ function renderFundDetail(fundId){
       <hr class="divider" style="margin:10px 0">
       <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit order${infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')}</div>
       <div class="frow"><label class="flabel">Limit price ($)</label><input type="number" id="fund-lmt-price" step="0.01" min="0.01" placeholder="e.g. 10.00"></div>
-      <div class="btn-row"><button class="btn btn-primary btn-sm" onclick="placeLimitOrder(get('fund-trade-ticker')?.value,'buy',get('fund-trade-qty')?.value,get('fund-lmt-price')?.value,'${f.id}')">Limit buy</button><button class="btn btn-primary btn-sm" onclick="placeLimitOrder(get('fund-trade-ticker')?.value,'sell',get('fund-trade-qty')?.value,get('fund-lmt-price')?.value,'${f.id}')">Limit sell</button></div>
+      <div class="btn-row"><button class="btn btn-primary btn-sm" onclick="busy(this,&quot;Placing…&quot;,()=>placeLimitOrder(get('fund-trade-ticker')?.value,'buy',get('fund-trade-qty')?.value,get('fund-lmt-price')?.value,'${f.id}'))">Limit buy</button><button class="btn btn-primary btn-sm" onclick="busy(this,&quot;Placing…&quot;,()=>placeLimitOrder(get('fund-trade-ticker')?.value,'sell',get('fund-trade-qty')?.value,get('fund-lmt-price')?.value,'${f.id}'))">Limit sell</button></div>
     </div>`;
     const fundOpenOrders=DB.limitOrders.filter(o=>o.fund_id===f.id&&o.status==='open');
     if(fundOpenOrders.length){
