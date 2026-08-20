@@ -813,6 +813,82 @@ ${PRELUDE}
     UI.userId='u-stu'; UI.navTab='market'; UI.adminTab='dashboard'; render();
   });
 
+  // ── Arizona time ────────────────────────────────────────────────────
+  // Everything in JEX is Arizona time, and this page runs with TZ set by the
+  // scenario -- so these read wrong if any of it falls back to the device's
+  // own timezone. The mobile/default runs use the container's TZ; the
+  // timezone scenarios re-run the same checks from UTC and Tokyo.
+  await step('the admin clock shows Arizona time, whatever the device says', ()=>{
+    UI.userId='u-chair'; UI.navTab='admin'; UI.adminTab='session'; UI.companyPage=null; render();
+    const t = appText();
+    // Matched loosely on purpose: the label around it contains a U+2212 minus
+    // sign, and the clock itself can carry a U+202F narrow no-break space
+    // before AM/PM depending on the ICU build.
+    const m = /([A-Z][a-z][a-z], [A-Z][a-z][a-z] [0-9]+, [0-9]+:[0-9]+:[0-9]+[ \u00a0\u202f]?(?:AM|PM)) MST/.exec(t);
+    if(!m){
+      const i = t.indexOf('Arizona time');
+      throw new Error('no Arizona clock on the session panel; around the label: '+
+        (i<0 ? '(label missing entirely) '+t.slice(0,160) : JSON.stringify(t.slice(i, i+90))));
+    }
+    // What Arizona actually is, computed independently of app.js.
+    const truth = new Date().toLocaleString('en-US',{timeZone:'America/Phoenix',weekday:'short',
+      month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
+    const hh = s => /([0-9][0-9]):([0-9][0-9])/.exec(s);
+    const a = hh(m[1]), b = hh(truth);
+    if(!a || !b || a[1] !== b[1]) throw new Error('panel says '+m[1]+', Arizona is '+truth);
+    return m[1];
+  });
+
+  await step("a client-written timestamp matches the server's format", ()=>{
+    const mine = ts();
+    // Postgres to_char emits a plain ASCII space before AM/PM. Intl may emit
+    // U+202F instead, and a ts that differs from the server's by an invisible
+    // character is a ts that will not compare equal to it.
+    const odd = [...mine].map((c,i)=>[i,c.charCodeAt(0)]).filter(([,c])=>c>126);
+    if(odd.length) throw new Error('ts() contains non-ASCII '+JSON.stringify(odd)+' in '+JSON.stringify(mine));
+    if(!/^[A-Z][a-z][a-z] [0-9]+, [0-9]+:[0-9][0-9]:[0-9][0-9] (AM|PM)$/.test(mine))
+      throw new Error('ts() is not in the server format: '+JSON.stringify(mine));
+    // The seeded rows carry exactly what the server writes.
+    const seeded = (DB.trades.find(t=>t.ts)||{}).ts;
+    if(seeded && !/^[A-Z][a-z][a-z] [0-9]+, /.test(seeded))
+      throw new Error('the seeded ts is not in the expected shape: '+seeded);
+    return mine;
+  });
+
+  await step("today's trades are counted, not silently zero", ()=>{
+    // Seed a trade stamped with today's Arizona date, in the server's format,
+    // and check the figures that read it.
+    const p = new Intl.DateTimeFormat('en-US',{timeZone:'America/Phoenix',month:'short',day:'numeric'})
+      .formatToParts(new Date());
+    const g = t => (p.find(x=>x.type===t)||{}).value;
+    const todayTs = g('month')+' '+g('day')+', 10:00:00 AM';
+    DB.trades.push({id:9001, ticker:'ACME', qty:4, price:10, buyer_id:'u-stu',
+                    seller_id:'exchange', type:'market', ts:todayTs});
+    UI.userId='u-chair'; UI.navTab='admin'; UI.adminTab='dashboard'; render();
+    const dash = appText();
+    if(/Trades today[^0-9]*0[^0-9]/.test(dash))
+      throw new Error("the admin dashboard still reads 0 trades today");
+    UI.navTab='exchange'; render();
+    const ex = appText();
+    if(!ex.trim()) throw new Error('exchange stats went blank');
+    // The volume figure must have moved off zero now that a trade is dated today.
+    if(ex.indexOf('$0.00')>=0 && ex.indexOf('$40.00')<0)
+      out.notes.push('exchange volume still reads $0.00 -- check the figure wiring');
+    DB.trades = DB.trades.filter(t=>t.id!==9001);
+    UI.userId='u-stu'; UI.navTab='market'; UI.adminTab='dashboard'; render();
+    return 'counted';
+  });
+
+  await step('the CSV export filename carries the Arizona date', ()=>{
+    const stamp = azDateStamp();
+    const p = new Intl.DateTimeFormat('en-US',{timeZone:'America/Phoenix',year:'numeric',
+      month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+    const g = t => (p.find(x=>x.type===t)||{}).value;
+    const want = g('year')+'-'+g('month')+'-'+g('day');
+    if(stamp !== want) throw new Error('stamp '+stamp+' expected '+want);
+    return stamp;
+  });
+
   await step('logout renders the login screen', ()=>{
     UI.companyPage=null; UI.navTab='market';
     logout();
@@ -868,6 +944,11 @@ ${PRELUDE}
     // nav branch (_isMobileStudent, window.innerWidth<=640) that the desktop
     // runs never touch.
     {name:'default',    driver:DRIVER,       args:['--window-size=380,780'], label:'mobile'},
+    // The same run with the DEVICE in another timezone. Every Arizona-time bug
+    // this suite has found was invisible from Arizona and only showed up
+    // elsewhere -- a student at home, or a laptop whose clock was never set.
+    {name:'default',    driver:DRIVER,       args:[], label:'tz-utc',   tz:'UTC'},
+    {name:'default',    driver:DRIVER,       args:[], label:'tz-tokyo', tz:'Asia/Tokyo'},
   ].filter(sc => !only || (sc.label||sc.name)===only);
 
   let totalFailed=0, totalSteps=0, failedScenarios=[];
@@ -906,6 +987,39 @@ ${PRELUDE}
       '           res.consoleErrors=(window.__JEX_STUB__||{}).consoleErrors||[]; }\n' +
       '  done=true;\n' +
       '  __post(res);\n})();\n</script></body>');
+    // Check the injected script PARSES before spending 150s finding out the
+    // hard way. A driver with a syntax error runs nothing at all -- no steps,
+    // no watchdog, no console error that anything is listening for -- and
+    // looks exactly like a hang. Two separate escaping slips cost a debugging
+    // round each before this existed.
+    // Escapes eaten by the template literal. The driver is written inside a JS
+    // template literal, where an unrecognized escape like \\d collapses to a
+    // bare d -- so /[0-9]{2}/ written as a \\d regex silently becomes /d{2}/,
+    // which still COMPILES and still runs and simply never matches. A test
+    // that cannot fail is worse than no test, so regexes in the driver are
+    // written without backslash escapes and this catches any that are not.
+    {
+      const EATEN=/[^A-Za-z0-9\\]([dwsSDWbB])[{+*?]/;
+      const lits=(sc.driver.match(/\/(?![\/*])(?:\\.|\[[^\]]*\]|[^\/\n\\])+\/[gimsuy]*/g)||[]);
+      const bad=lits.filter(l=>EATEN.test(l));
+      if(bad.length){
+        console.log('  DRIVER REGEX LOOKS LIKE AN ESCAPE WAS EATEN by the template literal:');
+        for(const b of bad.slice(0,6)) console.log('        '+b);
+        console.log('        (write driver regexes without backslash escapes, e.g. [0-9] not \\d)');
+        totalFailed++; failedScenarios.push(label);
+        continue;
+      }
+    }
+    try{ new Function(sc.driver); }
+    catch(e){
+      console.log('  DRIVER DOES NOT PARSE: '+((e&&e.message)||e));
+      const m=/:(\d+)\b/.exec((e&&e.stack)||'');
+      const lines=sc.driver.split('\n');
+      const near=lines.findIndex(l=>/step\(/.test(l)&&l.includes("'")&&l.includes('"'));
+      if(near>=0) console.log('  possibly near line '+(near+1)+': '+lines[near].trim().slice(0,120));
+      totalFailed++; failedScenarios.push(label);
+      continue;
+    }
     fs.writeFileSync(path.join(__dirname,file), driven);
 
     const userDir = fs.mkdtempSync('/tmp/jex-chrome-');
@@ -913,7 +1027,8 @@ ${PRELUDE}
     const chrome = spawn(CHROME, ['--headless','--disable-gpu','--no-sandbox','--disable-dev-shm-usage',
       '--user-data-dir='+userDir, '--no-first-run', '--disable-extensions'].concat(sc.args).concat([
       'http://127.0.0.1:'+PORT+'/tests/browser/'+file+'?scenario='+sc.name]),
-      {stdio:['ignore','ignore','pipe']});
+      {stdio:['ignore','ignore','pipe'],
+       env: sc.tz ? Object.assign({}, process.env, {TZ:sc.tz}) : process.env});
     let stderr=''; chrome.stderr.on('data',d=>{stderr+=d;});
 
     let timer;
