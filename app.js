@@ -1392,14 +1392,18 @@ async function setSession(status){
       };
       await pushNotification(officer.id,'session',msgs[officer.role]||'🔴 Session closed');
     }
-    // Expire day orders
-    const dayOrders=DB.limitOrders.filter(o=>o.status==='open'&&o.order_type==='day');
-    for(const o of dayOrders){
-      await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'expired'});
-      o.status='expired';
+    // Expire day orders. Runs server-side (rpc_expire_day_orders), which
+    // re-checks that the session really is closed and does the whole batch
+    // in one statement -- the raw status patch here ran against an open
+    // UPDATE grant, so any authenticated caller could expire (or reopen)
+    // any student's order at any time.
+    let expired=[];
+    try{expired=(await sb.rpc('rpc_expire_day_orders',{}))?.expired||[];}catch(e){console.warn('Expire day orders failed:',e);}
+    for(const o of expired){
+      const local=DB.limitOrders.find(x=>x.id===o.id);if(local)local.status='expired';
       await pushNotification(o.user_id,'limit_fill','📋 Day order expired at session close: '+o.qty+'×'+o.ticker+' @ '+fmt(o.limit_price),o.ticker);
     }
-    if(dayOrders.length)toast(dayOrders.length+' day order'+(dayOrders.length!==1?'s':'')+' expired at session close');
+    if(expired.length)toast(expired.length+' day order'+(expired.length!==1?'s':'')+' expired at session close');
     // Freeze leaderboard snapshot
     const students2=DB.users.filter(s=>s.role==='student'&&s.status==='approved');
     const snapshot=students2.map(s=>({name:s.name,nw:nw(s),id:s.id,classroom_id:s.classroom_id,sharpe:calcSharpe(s.id)})).sort((a,b)=>b.nw-a.nw);
@@ -1941,10 +1945,23 @@ async function registerStudent(name,username,email,pw,secQ,secA,emailVerified,au
   const newAuthUid=isGoogle?(authUid||null):await tryCreateAuthAccount(email,pw);
   const isMigrated=isGoogle||!!newAuthUid;
   const pwHash=isMigrated?null:await hashPw(pw);
-  const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHash,role:'student',
-    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:await hashPw(norm(secA)),
-    email_verified:isGoogle?true:!!emailVerified,auth_provider:isGoogle?'google':null,auth_uid:newAuthUid,ts:ts()};
-  await sb.post('jex_pending',rec);DB.pending.push(rec);
+  // Runs server-side (rpc_register_pending). The raw POST this replaces let
+  // the CLIENT choose `role` -- posting role:'chairman' created a pending
+  // row that approve_registration then copied verbatim into jex_users,
+  // handing out a real Chairman account through an approval screen that
+  // showed nothing unusual. It also let a registration claim someone
+  // else's auth_uid. The RPC pins role to student/company, re-checks
+  // name/username/email uniqueness, and only accepts a sign-in the caller
+  // actually holds.
+  let rec;
+  try{
+    rec=await sb.rpc('rpc_register_pending',{p_name:n,p_username:un,p_email:norm(email),
+      p_password:pwHash,p_role:'student',p_description:null,
+      p_sec_q:isGoogle?null:secQ,p_sec_a:isGoogle?null:await hashPw(norm(secA)),
+      p_email_verified:isGoogle?true:!!emailVerified,
+      p_auth_provider:isGoogle?'google':null,p_auth_uid:newAuthUid||null});
+  }catch(e){return toast(rpcErrorMessage(e));}
+  DB.pending.push(rec);
   toast('Registration submitted! Wait for admin approval.');UI.loginView='select';UI.googleAuth=null;render();
 }
 async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerified,authProvider,authUid){
@@ -1977,10 +1994,17 @@ async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerifi
   const newAuthUidCo=isGoogle?(authUid||null):await tryCreateAuthAccount(email,pw);
   const isMigratedCo=isGoogle||!!newAuthUidCo;
   const pwHashCo=isMigratedCo?null:await hashPw(pw);
-  const rec={id:uid(),name:n,username:un,email:norm(email),password:pwHashCo,role:'company',description:desc.trim(),
-    sec_q:isGoogle?null:secQ,sec_a:isGoogle?null:await hashPw(norm(secA)),
-    email_verified:isGoogle?true:!!emailVerified,auth_provider:isGoogle?'google':null,auth_uid:newAuthUidCo,ts:ts()};
-  await sb.post('jex_pending',rec);DB.pending.push(rec);
+  // Same server-side path as registerStudent -- see the note there for what
+  // the raw POST allowed.
+  let rec;
+  try{
+    rec=await sb.rpc('rpc_register_pending',{p_name:n,p_username:un,p_email:norm(email),
+      p_password:pwHashCo,p_role:'company',p_description:desc.trim(),
+      p_sec_q:isGoogle?null:secQ,p_sec_a:isGoogle?null:await hashPw(norm(secA)),
+      p_email_verified:isGoogle?true:!!emailVerified,
+      p_auth_provider:isGoogle?'google':null,p_auth_uid:newAuthUidCo||null});
+  }catch(e){return toast(rpcErrorMessage(e));}
+  DB.pending.push(rec);
   toast('Company registration submitted!');UI.loginView='select';UI.googleAuth=null;render();
 }
 async function approveReg(id,startCash){
@@ -2358,13 +2382,18 @@ async function deleteNews(id){
 // ── Activity log ────────────────────────────────────────
 async function logActivity(type,description,extras={}){
   try{
-    // Hash-chain for audit trail
-    const prev=DB.activity.find(a=>a.type!=='snapshot');
-    const prevHash=prev?prev.entry_hash||prev.id:'genesis';
-    const rec={id:uid(),type,description,ticker:extras.ticker||null,user_id:extras.userId||null,user_name:extras.userName||null,amount:extras.amount||null,ts:ts(),prev_hash:prevHash};
-    const content=prevHash+type+description+(extras.amount||'')+(rec.ts||'');
-    rec.entry_hash=btoa(encodeURIComponent(content.slice(0,50))).slice(-8);
-    await sb.post('jex_activity',rec);
+    // The audit trail's hash chain is built server-side (rpc_log_activity).
+    // It used to be computed here, in the browser, against DB.activity's
+    // local copy -- tamper-evidence produced by the party you are guarding
+    // against is not evidence, and the open INSERT grant meant rows could
+    // be planted with any prev_hash/entry_hash the caller liked. user_id
+    // and user_name stay parameters because the log records who an entry
+    // is ABOUT, which is often not the caller (an admin approving a
+    // student's IPO logs it against the student).
+    const rec=await sb.rpc('rpc_log_activity',{p_type:type,p_description:description,
+      p_ticker:extras.ticker||null,p_user_id:extras.userId||null,
+      p_user_name:extras.userName||null,p_amount:extras.amount??null});
+    if(!rec)return;
     DB.activity.unshift(rec);
     if(DB.activity.length>200)DB.activity=DB.activity.slice(0,200);
     pushToSheets('activity',{items:DB.activity.slice(0,10)});
@@ -2644,10 +2673,13 @@ async function sendFounderInvite(ownerId,studentId){
 async function flagAccount(targetId,targetName,targetType,reason){
   if(!reason||reason.trim().length<5)return toast('Enter a reason (at least 5 characters)');
   const u=cu();
-  const rec={id:uid(),target_id:targetId,target_name:targetName,target_type:targetType,
-    reason:reason.trim(),flagged_by:u.id,flagged_by_name:u.name,
-    status:'open',resolution_note:null,resolved_by:null,ts:ts()};
-  await sb.post('jex_flags',rec);
+  // Runs server-side (rpc_flag_account), which derives flagged_by from the
+  // caller and looks the target's name up rather than accepting it -- the
+  // raw POST let a flag be filed under someone else's name, against a
+  // target label matching no real account.
+  let rec;
+  try{rec=await sb.rpc('rpc_flag_account',{p_target_id:targetId,p_target_type:targetType,p_reason:reason});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.flags.push(rec);
   // Notify Chairman and President
   const admins=DB.users.filter(u2=>u2.role==='chairman'||u2.role==='president');
@@ -3489,15 +3521,22 @@ async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
 }
 
 async function activateAfterHoursOrders(){
-  const ahOrders=DB.limitOrders.filter(o=>o.status==='after_hours');
-  if(!ahOrders.length)return;
-  for(const o of ahOrders){
-    await sb.patch('jex_limit_orders','id=eq.'+o.id,{status:'open'});
-    o.status='open';
+  if(!DB.limitOrders.some(o=>o.status==='after_hours'))return;
+  // Runs server-side (rpc_activate_after_hours_orders), which re-checks the
+  // session is actually open and flips the whole batch in one statement.
+  // Every connected client fires this on the open transition, so the RPC is
+  // idempotent -- whichever call lands first claims the rows and the rest
+  // get an empty list. The raw patch it replaces ran against an open UPDATE
+  // grant on jex_limit_orders.
+  let activated=[];
+  try{activated=(await sb.rpc('rpc_activate_after_hours_orders',{}))?.activated||[];}catch(e){console.warn('Activate after-hours failed:',e);return;}
+  if(!activated.length)return;
+  for(const o of activated){
+    const local=DB.limitOrders.find(x=>x.id===o.id);if(local)local.status='open';
     const u=getUser(o.user_id);
     if(u)await pushNotification(u.id,'after_hours','⏰ Your after-hours '+o.side+' order for '+o.qty+'×'+o.ticker+' @ '+fmt(o.limit_price)+' is now active',o.ticker);
   }
-  toast(ahOrders.length+' after-hours order'+(ahOrders.length!==1?'s':'')+' activated');
+  toast(activated.length+' after-hours order'+(activated.length!==1?'s':'')+' activated');
   render();
 }
 async function cancelLimitOrder(id){
@@ -3927,8 +3966,14 @@ async function issueDividend(ticker,perShare,note){
     const treasurer=DB.users.find(u=>u.role==='treasurer');
     if(treasurer){
       if(!confirm('This dividend total ('+fmt(total)+') requires Treasurer approval. Submit for approval?'))return;
-      const req={id:uid(),ticker,company_name:co.name,per_share:perShare,total,note:(document.getElementById('div-note')?.value||'').trim(),requested_by:owner.id,requested_by_name:owner.name,status:'pending',ts:ts()};
-      await sb.post('jex_dividend_approvals',req);
+      // Runs server-side (rpc_request_dividend_approval), which derives the
+      // requester and RECOMPUTES the total. That total is what the
+      // Treasurer reads when deciding, and it used to be whatever the
+      // requester posted -- a request could understate its own cost.
+      let req;
+      try{req=await sb.rpc('rpc_request_dividend_approval',{p_ticker:ticker,p_per_share:perShare,
+        p_note:(document.getElementById('div-note')?.value||'').trim()});}
+      catch(e){return toast(rpcErrorMessage(e));}
       DB.divApprovals.push(req);
       await pushNotification(treasurer.id,'div_approval','💰 Dividend approval needed: '+co.name+' wants to pay '+fmt(total)+' total ('+fmt(perShare)+'/share)',ticker);
       toast('Dividend submitted for Treasurer approval ('+fmt(total)+' exceeds '+fmt(divApprovalThreshold)+' threshold)');
@@ -3977,8 +4022,12 @@ async function submitIPO(name,ticker,price,shares,desc){
   const p=parseFloat(price),s=parseInt(shares);
   if(isNaN(p)||p<=0)return toast('Enter a valid IPO price');
   if(isNaN(s)||s<=0)return toast('Enter a valid share count');
-  const app={id:uid(),user_id:UI.userId,name:name.trim(),ticker,price:p,shares:s,description:(desc||'').trim(),status:'pending',ts:ts()};
-  await sb.post('jex_ipo_applications',app);
+  // Runs server-side (rpc_submit_ipo), which derives user_id from the
+  // caller -- the raw POST took it from the client, so anyone could file an
+  // IPO application in another student's name.
+  let app;
+  try{app=await sb.rpc('rpc_submit_ipo',{p_name:name,p_ticker:ticker,p_price:p,p_shares:s,p_description:desc||''});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.ipoApps.push(app);
   try{await sb.rpc('rpc_set_own_app_status',{p_status:'pending'});}catch(e){}
   const self=cu();if(self)self.app_status='pending';
@@ -4526,11 +4575,13 @@ async function submitClassApplication(parentTicker,classType,votesPerShare,share
   const proposedTicker=parentTicker+'.'+classType;
   if(DB.companies.find(c=>c.ticker===proposedTicker)||DB.classApps.find(a=>a.proposed_ticker===proposedTicker&&a.status==='pending'))
     return toast('A '+classType+' class already exists or is pending for this company');
-  const app={id:uid(),parent_ticker:parentTicker,proposed_ticker:proposedTicker,class:classType,
-    label:'Class '+classType,votes_per_share:votesPerShare,shares,price,
-    restricted:!!restricted,whitelist:whitelistIds||[],
-    company_name:co.name,owner_id:u.id,status:'pending',reason:reason||'',ts:ts()};
-  await sb.post('jex_class_applications',app);
+  // Runs server-side (rpc_submit_class_application), which derives owner_id
+  // from the caller and re-checks they actually manage the parent company.
+  let app;
+  try{app=await sb.rpc('rpc_submit_class_application',{p_parent_ticker:parentTicker,p_class:classType,
+    p_votes_per_share:votesPerShare,p_shares:shares,p_price:price,p_restricted:!!restricted,
+    p_whitelist:whitelistIds||[],p_reason:reason||'',p_convert:false});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.classApps.push(app);
   await logActivity('class_app',u.name+' applied for '+co.name+' Class '+classType+' ('+proposedTicker+')',{ticker:parentTicker,userId:u.id,userName:u.name});
   toast('Class '+classType+' application submitted — awaiting Chairman approval');
@@ -5022,8 +5073,10 @@ async function submitBugReport(){
   try{
     let screenshotUrl=null;
     if(file)screenshotUrl=await uploadBugScreenshot(file);
-    const rec={id:uid(),user_id:u.id,user_name:u.name,description:desc,screenshot_url:screenshotUrl,status:'open',page_url:window.location.href,ts:ts()};
-    await sb.post('jex_bug_reports',rec);
+    // Runs server-side (rpc_submit_bug_report), which derives user_id and
+    // user_name from the caller rather than accepting them.
+    const rec=await sb.rpc('rpc_submit_bug_report',{p_description:desc,
+      p_screenshot_url:screenshotUrl,p_page_url:window.location.href});
     DB.bugReports.unshift(rec);
     const admins=DB.users.filter(u2=>u2.role==='chairman'||u2.role==='president');
     for(const a of admins){
@@ -6359,13 +6412,15 @@ async function convertBaseClass(parentTicker,classType,votesPerShare,restricted,
   // Check not already converted
   if(DB.shareClasses.find(c=>c.ticker===parentTicker))return toast('This stock is already classified');
   if(DB.classApps.find(a=>a.proposed_ticker===parentTicker&&a.status==='pending'))return toast('A conversion is already pending');
-  const app={id:uid(),parent_ticker:parentTicker,proposed_ticker:parentTicker,
-    class:classType,label:'Class '+classType,votes_per_share:votesPerShare,
-    shares:co.shares,price:co.price,
-    restricted:!!restricted,whitelist:whitelistIds||[],
-    company_name:co.name,owner_id:u.id,status:'pending',
-    reason:'[CONVERT] '+(reason||'').trim(),ts:ts()};
-  await sb.post('jex_class_applications',app);
+  // Same server-side path as applyShareClass, with p_convert -- the RPC
+  // takes the share count and price from the live company row instead of
+  // the form, so a conversion can no longer be filed claiming any numbers
+  // at all.
+  let app;
+  try{app=await sb.rpc('rpc_submit_class_application',{p_parent_ticker:parentTicker,p_class:classType,
+    p_votes_per_share:votesPerShare,p_shares:null,p_price:null,p_restricted:!!restricted,
+    p_whitelist:whitelistIds||[],p_reason:reason||'',p_convert:true});}
+  catch(e){return toast(rpcErrorMessage(e));}
   DB.classApps.push(app);
   toast('Conversion request submitted — awaiting Chairman approval');
   UI.companyTab='classes';render();
