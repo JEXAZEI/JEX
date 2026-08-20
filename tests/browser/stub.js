@@ -156,6 +156,54 @@ function applyQuery(rows, qs){
   return out;
 }
 
+// ── A small server-side model ──────────────────────────
+// The trade RPCs below reimplement the real Postgres functions' arithmetic --
+// the same impact curve, the same 150% short collateral, the same rounding --
+// so the driver can assert concrete numbers instead of "it did not throw".
+// They exist to verify the CLIENT: that it applies the result it gets back,
+// that its own pre-checks fire, and that the UI reflects the new state. They
+// are not a substitute for testing the SQL, which runs in Postgres and is
+// never executed here.
+//
+// The caller is read off UI.userId. The real functions derive it from
+// auth.uid(); a harness has no session, and the driver switches users
+// constantly, so this is the honest equivalent.
+//
+// It has to be a BARE reference, not window.UI: app.js declares "let UI" at
+// the top level of a classic script, so UI lives in the global lexical
+// environment and never appears as a window property. window.UI is undefined,
+// and reading .userId off it makes every trade RPC fail in a way that looks
+// like a server rejection.
+const r2 = n => Math.round(n*100)/100;
+const nowIso = () => new Date().toISOString();
+const currentUserId = () => { try{ return UI.userId; }catch(e){ return null; } };
+const caller = () => {
+  const u = DATA.jex_users.find(x=>x.id===currentUserId());
+  if(!u) reject('Not authenticated');
+  return u;
+};
+const findCo = t => DATA.jex_companies.find(c=>c.ticker===t);
+const priceImpact = (co, qty) => Math.min((qty/(co.shares*0.05))*0.015, 0.12);
+// Rejections come back the way PostgREST reports a RAISE EXCEPTION: a non-2xx
+// with a JSON body carrying `message`, which is exactly what rpcErrorMessage()
+// unwraps. Returning a plain object here would silently look like success.
+function reject(message){ const e = new Error(message); e.__rpcReject = message; throw e; }
+function requireOpenSession(ticker){
+  const sess = DATA.jex_session[0];
+  if(sess.status !== 'open') reject('Trading is '+(sess.status||'closed')+'. Wait for the session to open.');
+  if(DATA.jex_halts.some(h=>h.ticker===ticker)) reject(ticker+' trading is currently halted.');
+}
+function pushPrice(co, price){
+  co.price = price;
+  co.price_history = (co.price_history||[]).concat([{p:price, t:nowIso()}]);
+}
+let _tradeSeq = 1000;
+function recordTrade(t){
+  const trade = Object.assign({id:_tradeSeq++, ts:TS}, t);
+  DATA.jex_trades.unshift(trade);
+  return trade;
+}
+
 // ── RPC handlers ───────────────────────────────────────
 const RPC = {
   rpc_get_my_notifications: ()=>[],
@@ -177,12 +225,122 @@ const RPC = {
   rpc_admin_list_retention_candidates: ()=>[],
   rpc_set_own_app_status: ()=>null,
   rpc_trade_buy: (p)=>{
-    const co=DATA.jex_companies.find(c=>c.ticker===p.p_ticker);
-    const price=Math.round(co.price*1.01*100)/100;
-    const trade={id:99, ticker:p.p_ticker, qty:p.p_qty, price, buyer_id:'u-stu', seller_id:'exchange', type:'market', ts:TS};
-    DATA.jex_trades.unshift(trade);
-    return {cash:8000, holdings:{ACME:20+p.p_qty, JXI:5}, price, shares_avail:co.shares_avail-p.p_qty,
-      price_history:co.price_history.concat([{p:price,t:new Date().toISOString()}]), old_price:co.price, trade};
+    const co=findCo(p.p_ticker), u=caller();
+    if(!co) reject('Company not found');
+    requireOpenSession(p.p_ticker);
+    const old=co.price;
+    const price=Math.max(0.01, r2(co.price*(1+priceImpact(co,p.p_qty))));
+    const cost=r2(price*p.p_qty);
+    if(u.cash < cost) reject('Not enough cash (need '+cost+')');
+    if(!co.is_index_fund && co.shares_avail < p.p_qty) reject('Only '+co.shares_avail+' shares available');
+    u.cash=r2(u.cash-cost);
+    u.holdings=Object.assign({}, u.holdings); u.holdings[p.p_ticker]=(u.holdings[p.p_ticker]||0)+p.p_qty;
+    pushPrice(co, price);
+    // JXI mints on demand: units outstanding go UP, they are not drawn from a
+    // fixed float. Same branch the real rpc_trade_buy takes.
+    co.shares_avail = co.is_index_fund ? co.shares_avail+p.p_qty : co.shares_avail-p.p_qty;
+    if(co.is_index_fund) co.shares = Math.max(co.shares, co.shares_avail);
+    const trade=recordTrade({ticker:p.p_ticker, qty:p.p_qty, price, buyer_id:u.id, seller_id:'exchange', type:'market'});
+    return {cash:u.cash, holdings:u.holdings, price, shares_avail:co.shares_avail,
+            price_history:co.price_history, old_price:old, trade};
+  },
+  rpc_trade_sell: (p)=>{
+    const co=findCo(p.p_ticker), u=caller();
+    if(!co) reject('Company not found');
+    requireOpenSession(p.p_ticker);
+    const held=(u.holdings||{})[p.p_ticker]||0;
+    if(held < p.p_qty) reject('You only hold '+held+' shares');
+    const old=co.price;
+    const price=Math.max(0.01, r2(co.price*(1-priceImpact(co,p.p_qty))));
+    u.cash=r2(u.cash + r2(price*p.p_qty));
+    u.holdings=Object.assign({}, u.holdings);
+    u.holdings[p.p_ticker]=held-p.p_qty;
+    if(!u.holdings[p.p_ticker]) delete u.holdings[p.p_ticker];
+    pushPrice(co, price);
+    co.shares_avail = co.is_index_fund ? co.shares_avail-p.p_qty : co.shares_avail+p.p_qty;
+    const trade=recordTrade({ticker:p.p_ticker, qty:p.p_qty, price, buyer_id:'exchange', seller_id:u.id, type:'market'});
+    return {cash:u.cash, holdings:u.holdings, price, shares_avail:co.shares_avail,
+            price_history:co.price_history, old_price:old, trade};
+  },
+  rpc_trade_short: (p)=>{
+    const co=findCo(p.p_ticker), u=caller();
+    if(!co) reject('Company not found');
+    requireOpenSession(p.p_ticker);
+    const old=co.price;
+    const price=Math.max(0.01, r2(co.price*(1-priceImpact(co,p.p_qty))));
+    // 150% of entry value, matching jxi_short_migration.sql.
+    const collateral=r2(price*p.p_qty*1.5);
+    if(u.cash < collateral) reject('Need '+collateral+' collateral');
+    u.cash=r2(u.cash-collateral);
+    u.shorts=Object.assign({}, u.shorts);
+    const prev=u.shorts[p.p_ticker];
+    if(prev){
+      const totalQty=prev.qty+p.p_qty;
+      u.shorts[p.p_ticker]={qty:totalQty,
+        avgPrice:r2((prev.avgPrice*prev.qty + price*p.p_qty)/totalQty),
+        collateral:r2(prev.collateral+collateral)};
+    } else {
+      u.shorts[p.p_ticker]={qty:p.p_qty, avgPrice:price, collateral};
+    }
+    pushPrice(co, price);
+    const trade=recordTrade({ticker:p.p_ticker, qty:p.p_qty, price, buyer_id:'short', seller_id:u.id, type:'short'});
+    return {cash:u.cash, shorts:u.shorts, price, shares_avail:co.shares_avail,
+            price_history:co.price_history, old_price:old, trade};
+  },
+  rpc_trade_cover_short: (p)=>{
+    const co=findCo(p.p_ticker), u=caller();
+    if(!co) reject('Company not found');
+    requireOpenSession(p.p_ticker);
+    const sh=(u.shorts||{})[p.p_ticker];
+    if(!sh || sh.qty < p.p_qty) reject('You only have '+((sh&&sh.qty)||0)+' shorted');
+    const old=co.price;
+    const price=Math.max(0.01, r2(co.price*(1+priceImpact(co,p.p_qty))));
+    const released=r2(sh.collateral * (p.p_qty/sh.qty));
+    const pnl=r2((sh.avgPrice - price) * p.p_qty);
+    u.cash=r2(u.cash + released + pnl);
+    u.shorts=Object.assign({}, u.shorts);
+    if(sh.qty === p.p_qty) delete u.shorts[p.p_ticker];
+    else u.shorts[p.p_ticker]={qty:sh.qty-p.p_qty, avgPrice:sh.avgPrice, collateral:r2(sh.collateral-released)};
+    pushPrice(co, price);
+    const trade=recordTrade({ticker:p.p_ticker, qty:p.p_qty, price, buyer_id:u.id, seller_id:'cover', type:'cover'});
+    return {cash:u.cash, shorts:u.shorts, price, shares_avail:co.shares_avail,
+            price_history:co.price_history, old_price:old, pnl, trade};
+  },
+  rpc_toggle_watchlist: (p)=>{
+    const u=caller();
+    const wl=(u.watchlist||[]).slice();
+    const i=wl.indexOf(p.p_ticker);
+    if(i>=0) wl.splice(i,1); else wl.push(p.p_ticker);
+    u.watchlist=wl;
+    return {watchlist:wl};
+  },
+  rpc_place_limit_order: (p)=>{
+    const u=caller();
+    requireOpenSession(p.p_ticker);
+    const order={id:'lo-'+(_tradeSeq++), user_id:u.id, ticker:p.p_ticker, side:p.p_side,
+      qty:p.p_qty, limit_price:p.p_limit_price, status:'open', order_type:p.p_order_type||'gtc',
+      fund_id:p.p_fund_id||null, created_at:nowIso()};
+    DATA.jex_limit_orders.push(order);
+    return {order};
+  },
+  rpc_cancel_limit_order: (p)=>{
+    const o=DATA.jex_limit_orders.find(x=>x.id===p.p_order_id);
+    if(!o) reject('Order not found');
+    if(o.user_id!==(caller()||{}).id) reject('That is not your order');
+    o.status='cancelled';
+    return {cancelled:true, order:o};
+  },
+  rpc_cast_vote: (p)=>{
+    const u=caller();
+    const v=DATA.jex_votes.find(x=>x.id===p.p_vote_id);
+    if(!v) reject('Vote not found');
+    if(DATA.jex_vote_ballots.some(b=>b.vote_id===p.p_vote_id&&b.voter_id===u.id)) reject('You have already voted');
+    const power=(u.holdings||{})[v.parent_ticker]||0;
+    if(power<=0) reject('You have no voting shares in this company');
+    const ballot={id:'b-'+(_tradeSeq++), vote_id:p.p_vote_id, voter_id:u.id, choice:p.p_choice,
+      voting_power:power, ts:TS, created_at:nowIso()};
+    DATA.jex_vote_ballots.push(ballot);
+    return ballot;
   },
 };
 
@@ -199,7 +357,16 @@ window.fetch = async function(url, opts){
     let params={}; try{params=JSON.parse((opts&&opts.body)||'{}');}catch(e){}
     window.__JEX_STUB__.rpcCalls.push({fn, params});
     const h = RPC[fn];
-    const body = h ? h(params) : null;
+    let body = null;
+    if(h){
+      try{ body = h(params); }
+      catch(e){
+        if(e && e.__rpcReject)
+          return new Response(JSON.stringify({message:e.__rpcReject, code:'P0001'}),
+            {status:400, headers:{'Content-Type':'application/json'}});
+        throw e;
+      }
+    }
     return new Response(body===null?'':JSON.stringify(body), {status:200, headers:{'Content-Type':'application/json'}});
   }
 

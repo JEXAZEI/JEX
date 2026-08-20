@@ -485,6 +485,216 @@ ${PRELUDE}
     return stub.charts.length+' charts';
   });
 
+  // ── The flows a student actually uses, fired for real ───────────────
+  // Everything above proves pages render and handlers resolve. These call the
+  // real handlers and check the arithmetic that comes back out, against a
+  // stub that reimplements the server's impact curve and 150% collateral.
+  const CO = () => DB.companies.find(c=>c.ticker==='ACME');
+  const ME = () => DB.users.find(u=>u.id==='u-stu');
+  // Tight, because the price impact of a small order is small: 5 shares of a
+  // 1000-share company moves the price 0.15%, about two cents. A loose
+  // tolerance here would let a REFUSED order pass as a successful one.
+  const near = (a,b,tol) => Math.abs(a-b) <= (tol===undefined?0.005:tol);
+  const impact = (co,qty) => Math.min((qty/(co.shares*0.05))*0.015, 0.12);
+  // placeBuy/placeSell go through checkRateLimit(), which enforces THREE
+  // limits: a 0.8s minimum gap, at most 3 orders in any 5s window, and at
+  // most order_rate_limit (10) per minute. Firing orders back to back is
+  // exactly what that is there to stop, so the driver paces itself rather
+  // than fighting it -- 1.8s keeps a steady stream under the burst rule.
+  // Shorts, covers, watchlist toggles and votes are not rate limited.
+  const paceOrders = () => sleep(1800);
+  const clearBurstWindow = () => sleep(5200);
+  // Whatever the app last told the user. Included in failures so a refused
+  // order says WHY instead of just showing an unchanged number.
+  const lastToast = () => ((document.getElementById('toast')||{}).textContent||'').trim();
+
+  await step('a market buy moves cash, holdings and the price together', async ()=>{
+    UI.userId='u-stu'; UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='trade'; render();
+    const co=CO(), me=ME();
+    const cash0=me.cash, held0=(me.holdings.ACME||0), avail0=co.shares_avail, p0=co.price;
+    const expPrice=Math.max(0.01, Math.round(p0*(1+impact(co,5))*100)/100);
+    await paceOrders();
+    await placeBuy('ACME', 5);
+    const c=CO(), m=ME();
+    if(!near(c.price, expPrice)) throw new Error('price '+c.price+' expected '+expPrice+' -- toast: '+lastToast());
+    if(m.holdings.ACME !== held0+5) throw new Error('holdings '+m.holdings.ACME+' expected '+(held0+5)+' -- toast: '+lastToast());
+    if(!near(m.cash, Math.round((cash0-expPrice*5)*100)/100)) throw new Error('cash '+m.cash);
+    if(c.shares_avail !== avail0-5) throw new Error('shares_avail '+c.shares_avail);
+    return 'paid '+Math.round((cash0-m.cash)*100)/100+' for 5 @ '+expPrice;
+  });
+
+  await step('the new holding and price show up on the page', ()=>{
+    UI.navTab='portfolio'; UI.portfolioTab='holdings'; render();
+    const t=appText();
+    if(!/ACME/.test(t)) throw new Error('ACME missing from holdings after buying it');
+    UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='overview'; render();
+    if(!appText().includes(String(CO().price))) throw new Error('the new price is not on the company page');
+    return 'shown';
+  });
+
+  await step('selling more than you hold is refused before any RPC', async ()=>{
+    const before = stub.rpcCalls.filter(c=>c.fn==='rpc_trade_sell').length;
+    const cash0 = ME().cash;
+    await paceOrders();
+    await placeSell('ACME', 99999);
+    if(stub.rpcCalls.filter(c=>c.fn==='rpc_trade_sell').length !== before)
+      throw new Error('the client sent an oversized sell to the server');
+    if(ME().cash !== cash0) throw new Error('cash changed on a refused sell');
+    return 'refused locally';
+  });
+
+  await step('a market sell returns cash and drops the price', async ()=>{
+    const co=CO(), me=ME();
+    const cash0=me.cash, held0=me.holdings.ACME, p0=co.price;
+    const expPrice=Math.max(0.01, Math.round(p0*(1-impact(co,3))*100)/100);
+    await paceOrders();
+    await placeSell('ACME', 3);
+    const c=CO(), m=ME();
+    if(!near(c.price, expPrice)) throw new Error('price '+c.price+' expected '+expPrice+' -- toast: '+lastToast());
+    if(m.holdings.ACME !== held0-3) throw new Error('holdings '+m.holdings.ACME+' -- toast: '+lastToast());
+    if(!near(m.cash, Math.round((cash0+expPrice*3)*100)/100)) throw new Error('cash '+m.cash);
+    if(c.price >= p0) throw new Error('selling did not push the price down');
+    return 'received '+Math.round((m.cash-cash0)*100)/100;
+  });
+
+  await step('shorting locks 150% collateral', async ()=>{
+    const co=CO(), me=ME();
+    const cash0=me.cash, p0=co.price;
+    const expPrice=Math.max(0.01, Math.round(p0*(1-impact(co,4))*100)/100);
+    const expColl=Math.round(expPrice*4*1.5*100)/100;
+    await placeShort('ACME', 4);
+    const m=ME();
+    const sh=(m.shorts||{}).ACME;
+    if(!sh) throw new Error('no short position recorded');
+    if(sh.qty!==4) throw new Error('qty '+sh.qty);
+    if(!near(sh.collateral, expColl)) throw new Error('collateral '+sh.collateral+' expected '+expColl);
+    if(!near(m.cash, Math.round((cash0-expColl)*100)/100)) throw new Error('cash '+m.cash);
+    return 'locked '+expColl;
+  });
+
+  await step('the short is visible on the portfolio page', ()=>{
+    UI.navTab='portfolio'; UI.portfolioTab='shorts'; render();
+    if(!/ACME/.test(appText())) throw new Error('the ACME short is not listed');
+    UI.portfolioTab='holdings';
+  });
+
+  await step('covering releases the collateral and books the P&L', async ()=>{
+    const me=ME(), co=CO();
+    const sh=Object.assign({}, me.shorts.ACME);
+    const cash0=me.cash, p0=co.price;
+    const expPrice=Math.max(0.01, Math.round(p0*(1+impact(co,4))*100)/100);
+    const expPnl=Math.round((sh.avgPrice-expPrice)*4*100)/100;
+    await coverShort('ACME', 4);
+    const m=ME();
+    if(m.shorts && m.shorts.ACME) throw new Error('the short was not closed');
+    const moved=Math.round((m.cash-cash0)*100)/100;
+    const expMoved=Math.round((sh.collateral+expPnl)*100)/100;
+    if(!near(moved, expMoved, 0.03)) throw new Error('cash moved '+moved+', expected '+expMoved);
+    return 'released '+sh.collateral+' with P&L '+expPnl;
+  });
+
+  await step('covering more than you are short is refused before any RPC', async ()=>{
+    const before = stub.rpcCalls.filter(c=>c.fn==='rpc_trade_cover_short').length;
+    await coverShort('ACME', 10);
+    if(stub.rpcCalls.filter(c=>c.fn==='rpc_trade_cover_short').length !== before)
+      throw new Error('the client sent a cover with no position to the server');
+    return 'refused locally';
+  });
+
+  // The rate limiter is the thing standing between one enthusiastic student
+  // and a hundred orders, so it gets its own check rather than only being
+  // worked around above.
+  await step('back-to-back orders are rate limited', async ()=>{
+    await clearBurstWindow();   // the 3-in-5s rule must not pre-empt this
+    const co=CO(), held0=(ME().holdings.ACME||0);
+    const sent = () => stub.rpcCalls.filter(c=>c.fn==='rpc_trade_buy').length;
+    const before = sent();
+    await placeBuy('ACME', 1);
+    if(sent() !== before+1) throw new Error('the first order did not go through -- toast: '+lastToast());
+    await placeBuy('ACME', 1);   // immediately after -- inside the 800ms gap
+    if(sent() !== before+1) throw new Error('a second order inside the gap reached the server');
+    if((ME().holdings.ACME||0) !== held0+1) throw new Error('the blocked order still changed holdings');
+    await paceOrders();
+    await placeBuy('ACME', 1);   // after the gap it is allowed again
+    if(sent() !== before+2) throw new Error('an order after the gap was still blocked -- toast: '+lastToast());
+    return 'one through, one blocked, one through';
+  });
+
+  await step('the watchlist toggles both ways and persists to the page', async ()=>{
+    const on0 = (ME().watchlist||[]).includes('BETA');
+    await toggleWatch('BETA');
+    if((ME().watchlist||[]).includes('BETA') === on0) throw new Error('toggle did nothing');
+    UI.navTab='portfolio'; UI.portfolioTab='watchlist'; render();
+    const shown = /BETA/.test(appText());
+    if(shown !== !on0) throw new Error('the watchlist page disagrees with the stored list');
+    await toggleWatch('BETA');
+    if((ME().watchlist||[]).includes('BETA') !== on0) throw new Error('toggling back did not restore it');
+    UI.portfolioTab='holdings';
+    return 'both directions';
+  });
+
+  await step('a limit order is queued and shows on the orders page', async ()=>{
+    const before = DB.limitOrders.length;
+    await placeLimitOrder('ACME','buy',2,1.5,'gtc');
+    if(DB.limitOrders.length <= before) throw new Error('no order recorded');
+    UI.navTab='orders'; UI.companyPage=null; render();
+    if(!/ACME/.test(appText())) throw new Error('the queued order is not on the orders page');
+    return DB.limitOrders.length+' orders';
+  });
+
+  await step('a vote is cast with the right voting power', async ()=>{
+    UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='votes'; render();
+    const shares=(ME().holdings||{}).ACME||0;
+    await castVote('v-1','option1');
+    const b=DB.ballots.find(x=>x.vote_id==='v-1'&&x.voter_id==='u-stu');
+    if(!b) throw new Error('no ballot recorded');
+    if(b.voting_power !== shares) throw new Error('power '+b.voting_power+' but holds '+shares);
+    return shares+' votes';
+  });
+
+  await step('voting twice is refused', async ()=>{
+    const before = DB.ballots.length;
+    await castVote('v-1','option2');
+    if(DB.ballots.length !== before) throw new Error('a second ballot was accepted');
+    return 'refused';
+  });
+
+  // Session state must actually gate trading, not just grey a button out.
+  await step('a closed session blocks a buy and says so', async ()=>{
+    const cash0 = ME().cash;
+    DB.session.status='closed'; stub.data.jex_session[0].status='closed';
+    const before = stub.rpcCalls.filter(c=>c.fn==='rpc_trade_buy').length;
+    await paceOrders();
+    await placeBuy('ACME', 1);
+    if(ME().cash !== cash0) throw new Error('cash changed while the session was closed');
+    const after = stub.rpcCalls.filter(c=>c.fn==='rpc_trade_buy').length;
+    DB.session.status='open'; stub.data.jex_session[0].status='open';
+    return after===before ? 'refused locally' : 'refused by the server';
+  });
+
+  await step('a halted ticker blocks a buy', async ()=>{
+    const cash0 = ME().cash;
+    DB.halts.push({id:'h-x', ticker:'ACME', reason:'test', ts:'now'});
+    stub.data.jex_halts.push({id:'h-x', ticker:'ACME', reason:'test', ts:'now'});
+    await paceOrders();
+    await placeBuy('ACME', 1);
+    if(ME().cash !== cash0) throw new Error('a halted ticker still traded');
+    DB.halts=DB.halts.filter(h=>h.id!=='h-x');
+    stub.data.jex_halts.length=0;
+    return 'blocked';
+  });
+
+  await step('a server rejection surfaces as a message, not a crash', async ()=>{
+    const me=ME(); const cash0=me.cash;
+    me.cash = 0.01;                      // client thinks it can afford nothing
+    const before = stub.errors.length;
+    await paceOrders();
+    await placeBuy('ACME', 1000000);     // and the server would refuse anyway
+    if(stub.errors.length !== before) throw new Error('the rejection produced an uncaught error');
+    me.cash = cash0;
+    return 'handled';
+  });
+
   await step('logout renders the login screen', ()=>{
     UI.companyPage=null; UI.navTab='market';
     logout();
