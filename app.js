@@ -3885,13 +3885,19 @@ async function updateFundingGoal(ticker,goal,useOfFunds){
 // and spend their own cash to shrink a company they have no relationship
 // to's share count.
 async function doBuyback(ticker,qty){
-  if(!requireOpen(ticker))return;const owner=cu(),co=getCo(ticker);if(!owner||!co)return;
+  if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter valid quantity');
   const sold=co.shares-co.shares_avail;if(qty>sold)return toast('Only '+sold+' shares in circulation');
   let r;
   try{r=await sb.rpc('rpc_buyback',{p_ticker:ticker,p_qty:qty});}
   catch(e){return toast(rpcErrorMessage(e));}
-  owner.cash=r.cash;
+  // The COMPANY funds a buyback, not whoever clicked -- this used to write
+  // the returned balance onto cu(), which is only the same account when the
+  // owner does it. A founder (the RPC admits accepted company members) saw
+  // their own balance overwritten with the company's. Applied by the id the
+  // RPC reports paying, same as rpc_pay_dividend/rpc_fund_buy.
+  const payer=getUser(r.owner_id||co.owner_id);
+  if(payer)payer.cash=r.owner_cash!=null?r.owner_cash:r.cash;
   co.price=r.price;co.shares=r.shares;co.price_history=r.price_history;
   if(r.buyback)DB.buybacks.push(r.buyback);
   toast('Bought back '+qty+' shares @ '+fmt(r.price));render();
