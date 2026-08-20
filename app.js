@@ -5306,7 +5306,7 @@ function renderTopbar(){
     🔔${unread?`<span style="position:absolute;top:-4px;right:-4px;background:var(--red);color:white;font-size:10px;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:600">${unread}</span>`:''}
   </button>`:'';
   const rtConnected=_realtimeChannels.length>0;
-  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span><span style="font-size:10px;margin-left:8px;color:${rtConnected?'var(--green)':'var(--text3)'}" title="${rtConnected?'Real-time connected':'Polling mode'}">${rtConnected?'●':'○'}</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase()}</div><span>${u.name}</span>${roleBadge(u.role)}${bellBtn}<button class="logout-btn" onclick="openBugReportModal()" title="Report a bug">🐛</button><button class="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">${isLight?'🌙':'☀️'}</button><button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
+  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span><span style="font-size:10px;margin-left:8px;color:${rtConnected?'var(--green)':'var(--text3)'}" title="${rtConnected?'Real-time connected':'Polling mode'}">${rtConnected?'●':'○'}</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${esc(u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase())}</div><span>${esc(u.name)}</span>${roleBadge(u.role)}${bellBtn}<button class="logout-btn" onclick="openBugReportModal()" title="Report a bug">🐛</button><button class="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">${isLight?'🌙':'☀️'}</button><button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
 }
 function toggleTheme(){
   document.body.classList.toggle('light-mode');
@@ -5417,7 +5417,7 @@ function renderCompanyPage(parentTicker){
     <div style="flex:1;min-width:0">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-size:18px;font-weight:500">${esc(co.name)}</span>
-        ${isHalted(parentTicker)?`<span class="badge b-red">⚠️ Trading halted${(()=>{const h=DB.halts.find(x=>x.ticker===parentTicker);return h?' — '+h.reason:'';})()}</span>`:''}
+        ${isHalted(parentTicker)?`<span class="badge b-red">⚠️ Trading halted${esc((()=>{const h=DB.halts.find(x=>x.ticker===parentTicker);return h?' — '+h.reason:'';})())}</span>`:''}
         ${baseMeta?'<span class="badge b-amber">Class '+baseMeta.class+' · '+baseMeta.votes_per_share+'v</span>':''}
         <span class="badge b-gray" style="font-family:var(--mono)">${parentTicker}</span>
         ${canTrade?'<button class="wstar '+(isWatched(parentTicker)?'on':'')+'" onclick="toggleWatchAndRefresh(&quot;'+parentTicker+'&quot;)">'+(isWatched(parentTicker)?'★':'☆')+'</button>':''}
@@ -5719,7 +5719,7 @@ function renderCompanyPage(parentTicker){
         +shareholders.map(sh=>{
           const total=Object.values(sh.shares).reduce((s,q)=>s+q,0);
           const vp=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);
-          return '<tr><td style="font-weight:500">'+sh.name+'</td>'
+          return '<tr><td style="font-weight:500">'+esc(sh.name)+'</td>'
             +allTickers.map(t=>'<td class="r" style="font-family:var(--mono)">'+(sh.shares[t]||0)+'</td>').join('')
             +'<td class="r" style="font-weight:500">'+total+'</td>'
             +'<td class="r" style="color:var(--amber)">'+vp+'</td></tr>';
@@ -5737,7 +5737,7 @@ function renderCompanyPage(parentTicker){
       el.innerHTML='<table><thead><tr><th>Holder</th>'
         +allTickers.map(t=>'<th class="r">'+t+'</th>').join('')
         +'<th class="r">Total</th><th class="r">Voting power</th></tr></thead><tbody>'
-        +freshSh.map(sh=>{const total=Object.values(sh.shares).reduce((s,q)=>s+q,0);const vp=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);return '<tr><td style="font-weight:500">'+sh.name+'</td>'+allTickers.map(t=>'<td class="r" style="font-family:var(--mono)">'+(sh.shares[t]||0)+'</td>').join('')+'<td class="r" style="font-weight:500">'+total+'</td><td class="r" style="color:var(--amber)">'+vp+'</td></tr>';}).join('')+'</tbody></table>';
+        +freshSh.map(sh=>{const total=Object.values(sh.shares).reduce((s,q)=>s+q,0);const vp=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);return '<tr><td style="font-weight:500">'+esc(sh.name)+'</td>'+allTickers.map(t=>'<td class="r" style="font-family:var(--mono)">'+(sh.shares[t]||0)+'</td>').join('')+'<td class="r" style="font-weight:500">'+total+'</td><td class="r" style="color:var(--amber)">'+vp+'</td></tr>';}).join('')+'</tbody></table>';
     }).catch(()=>{const loadingLabel=document.getElementById('shareholder-loading');if(loadingLabel)loadingLabel.remove();});
     html+='</div></div>';
   }
@@ -5767,7 +5767,7 @@ function renderCompanyPage(parentTicker){
     else{
       html+='<div class="card"><div class="section-title">Dividend history</div>'
         +'<table><thead><tr><th>Time</th><th>Per share</th><th>Total paid</th><th>Recipients</th><th>Note</th></tr></thead><tbody>'
-        +companyDivs.map(d=>'<tr><td style="color:var(--text2)">'+d.ts+'</td><td style="font-family:var(--mono)">'+fmt(d.per_share)+'</td><td style="color:var(--green);font-family:var(--mono)">'+fmt(d.total)+'</td><td>'+(d.payouts||[]).length+'</td><td style="font-size:12px;color:var(--text2)">'+d.note+'</td></tr>').join('')
+        +companyDivs.map(d=>'<tr><td style="color:var(--text2)">'+d.ts+'</td><td style="font-family:var(--mono)">'+fmt(d.per_share)+'</td><td style="color:var(--green);font-family:var(--mono)">'+fmt(d.total)+'</td><td>'+(d.payouts||[]).length+'</td><td style="font-size:12px;color:var(--text2)">'+esc(d.note)+'</td></tr>').join('')
         +'</tbody></table></div>';
     }
   }
@@ -6092,7 +6092,7 @@ function renderLeaderboard(){
       <option value="">All classrooms</option>
       ${DB.classrooms.map(c=>`<option value="${c.id}" ${UI.lbClassroom===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
     </select>`:'';
-  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard</span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${u.name}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${getClassroomName(u.classroom_id)}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=10000?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
+  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard</span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${esc(u.name)}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${getClassroomName(u.classroom_id)}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=10000?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
 }
 function renderFundLeaderboard(){
   const ranked=(DB.funds||[]).filter(f=>!isHiddenTestEntity(f.manager_id)).map(f=>{
@@ -6271,7 +6271,7 @@ function renderPortfolio(){
     const rows=held.length?held.map(([t,q])=>{
       const c=getCo(t);if(!c)return'';
       const val=c.price*q,chg=priceChg(c);
-      return '<tr><td><span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></td><td>'+c.name+'</td><td>'+q+'</td><td style="font-family:var(--mono)">'+fmt(c.price)+'</td><td style="font-weight:500;font-family:var(--mono)">'+fmt(val)+'</td><td class="'+(chg>=0?'price-up':'price-down')+'">'+fmtChg(chg)+'</td><td><button class="btn btn-sm" onclick="UI.companyPage=null;setTab(&quot;market&quot;);setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Trade</button></td></tr>';
+      return '<tr><td><span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></td><td>'+esc(c.name)+'</td><td>'+q+'</td><td style="font-family:var(--mono)">'+fmt(c.price)+'</td><td style="font-weight:500;font-family:var(--mono)">'+fmt(val)+'</td><td class="'+(chg>=0?'price-up':'price-down')+'">'+fmtChg(chg)+'</td><td><button class="btn btn-sm" onclick="UI.companyPage=null;setTab(&quot;market&quot;);setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Trade</button></td></tr>';
     }).join(''):'<tr><td colspan="7"><div class="empty">No holdings</div></td></tr>';
     const _sharpe=calcSharpe(u.id),_beta=calcBeta(u.id),_var=calcVaR(u.id),_pnl=calcPnLAttribution(u.id);
     const analyticsRow=(_sharpe!=null||_beta!=null||_var!=null)?
@@ -6301,7 +6301,7 @@ function renderPortfolio(){
   if(UI.portfolioTab==='shorts'){
     const shortRows=sh.length?sh.map(([t,pos])=>{
       const c=getCo(t);if(!c)return'';const p=(pos.avgPrice-c.price)*pos.qty;
-      return '<div class="short-pos"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-weight:500">'+c.name+' <span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></span><button class="btn btn-sm btn-warning" onclick="UI.companyPage=null;setTab(&quot;market&quot;);UI.panelMode=&quot;cover&quot;;setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Cover</button></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:12px"><div><div style="color:var(--text2)">Qty</div><div>'+pos.qty+'</div></div><div><div style="color:var(--text2)">Avg price</div><div style="font-family:var(--mono)">'+fmt(pos.avgPrice)+'</div></div><div><div style="color:var(--text2)">Current</div><div style="font-family:var(--mono)">'+fmt(c.price)+'</div></div><div><div style="color:var(--text2)">P&L</div><div style="font-family:var(--mono);color:'+(p>=0?'var(--green)':'var(--red)')+'">'+fmt(p)+'</div></div></div></div>';
+      return '<div class="short-pos"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-weight:500">'+esc(c.name)+' <span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></span><button class="btn btn-sm btn-warning" onclick="UI.companyPage=null;setTab(&quot;market&quot;);UI.panelMode=&quot;cover&quot;;setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Cover</button></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:12px"><div><div style="color:var(--text2)">Qty</div><div>'+pos.qty+'</div></div><div><div style="color:var(--text2)">Avg price</div><div style="font-family:var(--mono)">'+fmt(pos.avgPrice)+'</div></div><div><div style="color:var(--text2)">Current</div><div style="font-family:var(--mono)">'+fmt(c.price)+'</div></div><div><div style="color:var(--text2)">P&L</div><div style="font-family:var(--mono);color:'+(p>=0?'var(--green)':'var(--red)')+'">'+fmt(p)+'</div></div></div></div>';
     }).join(''):'<div class="empty">No open short positions</div>';
     const collTotal=Object.values(shorts(u)).reduce((s,p)=>s+p.collateral,0);
     return tabs+`<div class="grid3"><div class="mcard"><div class="mlabel">Open shorts</div><div class="mval">${sh.length}</div></div><div class="mcard"><div class="mlabel">Unrealised P&L</div><div class="mval ${_spnl>=0?'green':'red'}" style="font-family:var(--mono)">${fmt(_spnl)}</div></div><div class="mcard"><div class="mlabel">Collateral locked${infoBubble('When you short a stock, 1.5x the value of the shares you borrowed gets set aside from your cash as a safety deposit. You get it back (plus or minus your profit or loss) when you cover the position.')}</div><div class="mval" style="font-family:var(--mono)">${fmt(collTotal)}</div></div></div>${shortRows}`;
@@ -6309,7 +6309,7 @@ function renderPortfolio(){
 
   if(UI.portfolioTab==='watchlist'){
     if(!watched.length)return tabs+'<div class="empty">No stocks on your watchlist.<br>Click ☆ on any stock to add it.</div>';
-    const wrows=watched.map(c=>{const chg=priceChg(c);return '<tr><td><span class="badge b-gray" style="font-family:var(--mono)">'+c.ticker+'</span></td><td>'+c.name+'</td><td style="font-family:var(--mono)">'+fmt(c.price)+'</td><td class="'+(chg>=0?'price-up':'price-down')+'">'+fmtChg(chg)+'</td><td>'+c.shares_avail.toLocaleString()+'</td><td><button class="wstar on" onclick="toggleWatch(&quot;'+c.ticker+'&quot;)">★</button></td><td><button class="btn btn-sm btn-primary" onclick="UI.companyPage=null;setTab(&quot;market&quot;);setTimeout(()=>openPanel(&quot;'+c.ticker+'&quot;),50)">Trade</button></td></tr>';}).join('');
+    const wrows=watched.map(c=>{const chg=priceChg(c);return '<tr><td><span class="badge b-gray" style="font-family:var(--mono)">'+c.ticker+'</span></td><td>'+esc(c.name)+'</td><td style="font-family:var(--mono)">'+fmt(c.price)+'</td><td class="'+(chg>=0?'price-up':'price-down')+'">'+fmtChg(chg)+'</td><td>'+c.shares_avail.toLocaleString()+'</td><td><button class="wstar on" onclick="toggleWatch(&quot;'+c.ticker+'&quot;)">★</button></td><td><button class="btn btn-sm btn-primary" onclick="UI.companyPage=null;setTab(&quot;market&quot;);setTimeout(()=>openPanel(&quot;'+c.ticker+'&quot;),50)">Trade</button></td></tr>';}).join('');
     return tabs+'<div class="card"><div class="section-title">Watched stocks</div><table><thead><tr><th>Ticker</th><th>Company</th><th>Price</th><th>Change</th><th>Avail.</th><th></th><th></th></tr></thead><tbody>'+wrows+'</tbody></table></div>';
   }
 
@@ -6318,7 +6318,7 @@ function renderPortfolio(){
 
   // dividends tab
   if(!myDivs.length)return tabs+'<div class="empty">No dividends received yet</div>';
-  const divRows=myDivs.map(d=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);if(!p)return'';return '<tr><td style="color:var(--text2)">'+d.ts+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+d.ticker+'</span></td><td style="font-family:var(--mono)">'+fmt(d.per_share)+'</td><td>'+p.shares+'</td><td style="color:var(--green);font-family:var(--mono)">'+fmt(p.payout)+'</td><td style="font-size:12px;color:var(--text2)">'+d.note+'</td></tr>';}).join('');
+  const divRows=myDivs.map(d=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);if(!p)return'';return '<tr><td style="color:var(--text2)">'+d.ts+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+d.ticker+'</span></td><td style="font-family:var(--mono)">'+fmt(d.per_share)+'</td><td>'+p.shares+'</td><td style="color:var(--green);font-family:var(--mono)">'+fmt(p.payout)+'</td><td style="font-size:12px;color:var(--text2)">'+esc(d.note)+'</td></tr>';}).join('');
   return tabs+'<div class="card"><div class="section-title">Dividend history</div><table><thead><tr><th>Time</th><th>Company</th><th>Per share</th><th>Shares</th><th>Received</th><th>Note</th></tr></thead><tbody>'+divRows+'</tbody></table></div>';
 }
 
@@ -6327,7 +6327,7 @@ function renderPortfolio(){
 // ═══════════════════════════════════════════════
 function renderTrades(adminView){
   const u=cu();const trades=adminView?DB.trades:[...DB.trades].filter(t=>t.buyer_id===u.id||t.seller_id===u.id);
-  return `<div class="card"><div class="section-title">${adminView?'All trades':'Your trades'}</div><table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th>${adminView?'<th>Buyer</th><th>Seller</th>':''}</tr></thead><tbody>${trades.length?[...trades].reverse().map(t=>`<tr><td style="color:var(--text2)">${t.ts}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.price)}</td><td>${t.qty}</td><td><span class="badge ${t.type==='short'?'b-purple':t.type==='cover'?'b-amber':t.type==='book_match'?'b-teal':t.type==='limit_buy'||t.type==='limit_sell'?'b-blue':'b-gray'}">${t.type==='book_match'?'matched':t.type==='limit_buy'?'limit buy':t.type==='limit_sell'?'limit sell':t.type||'market'}</span></td>${adminView?`<td>${['exchange','short'].includes(t.buyer_id)?'JEX':getUser(t.buyer_id)?.name||'?'}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':getUser(t.seller_id)?.name||'?'}</td>`:''}</tr>`).join(''):`<tr><td colspan="7"><div class="empty">No trades yet</div></td></tr>`}</tbody></table></div>`;
+  return `<div class="card"><div class="section-title">${adminView?'All trades':'Your trades'}</div><table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th>${adminView?'<th>Buyer</th><th>Seller</th>':''}</tr></thead><tbody>${trades.length?[...trades].reverse().map(t=>`<tr><td style="color:var(--text2)">${t.ts}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.price)}</td><td>${t.qty}</td><td><span class="badge ${t.type==='short'?'b-purple':t.type==='cover'?'b-amber':t.type==='book_match'?'b-teal':t.type==='limit_buy'||t.type==='limit_sell'?'b-blue':'b-gray'}">${t.type==='book_match'?'matched':t.type==='limit_buy'?'limit buy':t.type==='limit_sell'?'limit sell':t.type||'market'}</span></td>${adminView?`<td>${['exchange','short'].includes(t.buyer_id)?'JEX':esc(getUser(t.buyer_id)?.name||'?')}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':esc(getUser(t.seller_id)?.name||'?')}</td>`:''}</tr>`).join(''):`<tr><td colspan="7"><div class="empty">No trades yet</div></td></tr>`}</tbody></table></div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -6626,7 +6626,7 @@ function renderFoundersTab(co,u){
     myInvites.forEach(inv=>{
       const invCo=DB.companies.find(c=>c.owner_id===inv.company_user_id);
       html+='<div class="app-row"><div class="app-info">'
-        +'<div class="app-name">Founder invitation: <strong>'+(invCo?.name||'Unknown')+'</strong></div>'
+        +'<div class="app-name">Founder invitation: <strong>'+esc((invCo?.name||'Unknown'))+'</strong></div>'
         +'<div class="app-meta">Invited by '+inv.invited_by+' · '+inv.ts+'</div></div>'
         +'<div class="btn-row">'
         +'<button class="btn btn-success btn-sm" onclick="respondToInvite(&quot;'+inv.id+'&quot;,true)">Accept</button>'
@@ -6643,15 +6643,15 @@ function renderFoundersTab(co,u){
   accepted.forEach(m=>{
     const s=getUser(m.student_id);
     html+='<div class="app-row"><div class="app-info">'
-      +'<div class="app-name">'+(s?.name||'?')+' <span class="badge b-blue">Founder</span></div>'
+      +'<div class="app-name">'+esc((s?.name||'?'))+' <span class="badge b-blue">Founder</span></div>'
       +'<div class="app-meta">'+(s?.email||'')+'</div></div>'
-      +'<button class="btn btn-sm btn-danger" onclick="removeFounder(&quot;'+m.id+'&quot;,&quot;'+(s?.name||'?')+'&quot;)">Remove</button>'
+      +'<button class="btn btn-sm btn-danger" onclick="removeFounder(&quot;'+m.id+'&quot;,&quot;'+esc((s?.name||'?'))+'&quot;)">Remove</button>'
       +'</div>';
   });
   pending.forEach(m=>{
     const s=getUser(m.student_id);
     html+='<div class="app-row"><div class="app-info">'
-      +'<div class="app-name">'+(s?.name||'?')+' <span class="badge b-gray">Invite pending</span></div>'
+      +'<div class="app-name">'+esc((s?.name||'?'))+' <span class="badge b-gray">Invite pending</span></div>'
       +'<div class="app-meta">Waiting for response</div></div></div>';
   });
   html+='</div>';
@@ -6662,7 +6662,7 @@ function renderFoundersTab(co,u){
       +'<div class="row" style="align-items:flex-end">'
       +'<div class="frow" style="flex:1"><label class="flabel">Select student</label>'
       +'<select id="invite-student"><option value="">— Select a student —</option>'
-      +availableStudents.map(s=>'<option value="'+s.id+'">'+s.name+'</option>').join('')
+      +availableStudents.map(s=>'<option value="'+s.id+'">'+esc(s.name)+'</option>').join('')
       +'</select></div>'
       +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Inviting…&quot;,()=>doInviteFounder(&quot;'+co.owner_id+'&quot;))">Send invite</button></div>'
       +'</div></div>';
@@ -6677,7 +6677,7 @@ function renderFoundersTab(co,u){
       +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:12px">'
       +'<div><label class="flabel">Founder</label>'
       +'<select id="alloc-student"><option value="">— Select —</option>'
-      +accepted.map(m=>{const s=getUser(m.student_id);return s?'<option value="'+s.id+'">'+s.name+'</option>':''}).join('')
+      +accepted.map(m=>{const s=getUser(m.student_id);return s?'<option value="'+s.id+'">'+esc(s.name)+'</option>':''}).join('')
       +'</select></div>'
       +'<div><label class="flabel">Share class</label>'
       +'<select id="alloc-ticker"><option value="">— Select —</option>'
@@ -6688,7 +6688,7 @@ function renderFoundersTab(co,u){
       +'</div>'
       +'<button class="btn btn-warning" onclick="busy(this,&quot;Requesting…&quot;,()=>doRequestFounderAlloc())">Submit allocation request</button>'
       +(allAllocs.length?'<hr class="divider"><table><thead><tr><th>Founder</th><th>Ticker</th><th>Shares</th><th>Reason</th><th>Status</th></tr></thead><tbody>'
-        +allAllocs.map(a=>'<tr><td>'+a.student_name+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+a.ticker+'</span></td><td>'+a.shares.toLocaleString()+'</td><td style="font-size:12px;color:var(--text2)">'+(a.reason||'—')+'</td><td><span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-amber')+'">'+a.status+'</span></td></tr>').join('')
+        +allAllocs.map(a=>'<tr><td>'+esc(a.student_name)+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+a.ticker+'</span></td><td>'+a.shares.toLocaleString()+'</td><td style="font-size:12px;color:var(--text2)">'+esc(a.reason||'—')+'</td><td><span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-amber')+'">'+a.status+'</span></td></tr>').join('')
         +'</tbody></table>':'')
       +'</div>';
   }
@@ -6699,7 +6699,7 @@ function renderClassesTab(co){
   const myClasses=DB.shareClasses.filter(c=>c.parent_ticker===co.ticker&&c.ticker!==co.ticker);
   const myApps=DB.classApps.filter(a=>a.parent_ticker===co.ticker).reverse();
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
-  const studentOptions=students.map(s=>'<option value="'+s.id+'">'+s.name+'</option>').join('');
+  const studentOptions=students.map(s=>'<option value="'+s.id+'">'+esc(s.name)+'</option>').join('');
   const baseIsConverted=!!DB.shareClasses.find(c=>c.ticker===co.ticker);
   const basePendingConversion=!!DB.classApps.find(a=>a.proposed_ticker===co.ticker&&a.status==='pending');
   // Get base class metadata if converted
@@ -6975,7 +6975,7 @@ function renderDilTab(co){
     if(history.length){
       html+='<hr class="divider"><div class="section-title" style="font-size:13px;margin-bottom:8px">History</div>'
         +'<table><thead><tr><th>Time</th><th>New shares</th><th>+%</th><th>Reason</th><th>Status</th></tr></thead><tbody>'
-        +history.map(d=>'<tr><td style="color:var(--text2)">'+d.ts+'</td><td>+'+d.new_shares.toLocaleString()+'</td><td style="color:var(--amber)">+'+d.pct_increase+'%</td><td style="font-size:12px">'+d.reason+'</td><td><span class="badge '+(d.status==='approved'?'b-green':d.status==='rejected'?'b-red':'b-amber')+'">'+d.status+'</span></td></tr>').join('')
+        +history.map(d=>'<tr><td style="color:var(--text2)">'+d.ts+'</td><td>+'+d.new_shares.toLocaleString()+'</td><td style="color:var(--amber)">+'+d.pct_increase+'%</td><td style="font-size:12px">'+esc(d.reason)+'</td><td><span class="badge '+(d.status==='approved'?'b-green':d.status==='rejected'?'b-red':'b-amber')+'">'+d.status+'</span></td></tr>').join('')
         +'</tbody></table>';
     }
     html+='</div>';
@@ -7408,10 +7408,10 @@ function renderAdminClasses(){
   return '<div class="card"><div class="section-title">Pending share class applications '
     +(pending.length?'<span class="badge b-amber" style="margin-left:4px">'+pending.length+'</span>':'')+'</div>'
     +(pending.length?pending.map(a=>'<div class="app-row"><div class="app-info">'
-      +'<div class="app-name">'+a.company_name+' — <span class="badge b-gray" style="font-family:var(--mono)">'+a.proposed_ticker+'</span> Class '+a.class+'</div>'
+      +'<div class="app-name">'+esc(a.company_name)+' — <span class="badge b-gray" style="font-family:var(--mono)">'+a.proposed_ticker+'</span> Class '+a.class+'</div>'
       +'<div class="app-meta">'+a.votes_per_share+' vote'+(a.votes_per_share!==1?'s':'')+'/share · '+a.shares.toLocaleString()+' shares @ '+fmt(a.price)
-      +(a.restricted?' · <span class="badge b-red">Restricted</span> to: '+(a.whitelist||[]).map(id=>getUser(id)?.name||id).join(', '):'')+'</div>'
-      +(a.reason?'<div class="app-meta">Reason: '+a.reason.replace('[CONVERT]','[Conversion]')+'</div>':'')
+      +(a.restricted?' · <span class="badge b-red">Restricted</span> to: '+esc((a.whitelist||[]).map(id=>getUser(id)?.name||id).join(', ')):'')+'</div>'
+      +(a.reason?'<div class="app-meta">Reason: '+esc(a.reason.replace('[CONVERT]','[Conversion]'))+'</div>':'')
       +'</div><div class="btn-row">'
       +'<button class="btn btn-success btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewClassApp(&quot;'+a.id+'&quot;,true))">Approve</button>'
       +'<button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewClassApp(&quot;'+a.id+'&quot;,false))">Reject</button>'
@@ -7422,7 +7422,7 @@ function renderAdminClasses(){
       +'<div class="ibox ibox-blue">Removing a <strong>conversion</strong> strips the class label but keeps the stock trading. Removing a <strong>new class</strong> delists it entirely.</div>'
       +activeEntries.map(([parentTicker,entry])=>{
         return '<div style="padding:10px 0;border-bottom:1px solid var(--border)">'
-          +'<div style="font-size:12px;font-weight:500;color:var(--text2);margin-bottom:8px;padding:0 2px">'+entry.name+' ('+parentTicker+')</div>'
+          +'<div style="font-size:12px;font-weight:500;color:var(--text2);margin-bottom:8px;padding:0 2px">'+esc(entry.name)+' ('+parentTicker+')</div>'
           +entry.classes.map(c=>{
             const isConv=c.ticker===c.parent_ticker;
             return '<div class="app-row" style="margin-bottom:4px"><div class="app-info">'
@@ -7438,7 +7438,7 @@ function renderAdminClasses(){
       }).join('')+'</div>':'')
     +(reviewed.length?'<div class="card"><div class="section-title">Application history</div>'
       +reviewed.map(a=>'<div class="app-row"><div class="app-info">'
-        +'<div class="app-name">'+a.company_name+' — '+a.proposed_ticker+' Class '+a.class+'</div>'
+        +'<div class="app-name">'+esc(a.company_name)+' — '+a.proposed_ticker+' Class '+a.class+'</div>'
         +'<div class="app-meta">'+a.ts+'</div></div>'
         +'<span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-gray')+'">'+a.status+'</span></div>'
       ).join('')+'</div>':'');
@@ -7693,7 +7693,7 @@ function renderAdminDashboard(){
     <div class="mcard"><div class="mlabel">Active limit orders</div><div class="mval">${DB.limitOrders.filter(o=>o.status==='open').length}</div></div>
   </div>
   <div class="grid3" style="margin-bottom:14px">
-    <div class="mcard"><div class="mlabel">🏆 Leaderboard leader</div><div class="mval" style="font-size:15px;margin-top:4px">${ranked[0]?.name||'—'}</div>${ranked[0]?`<div style="font-size:12px;color:var(--green);font-family:var(--mono);margin-top:2px">${fmt(ranked[0]._nw)}</div>`:''}
+    <div class="mcard"><div class="mlabel">🏆 Leaderboard leader</div><div class="mval" style="font-size:15px;margin-top:4px">${esc(ranked[0]?.name||'—')}</div>${ranked[0]?`<div style="font-size:12px;color:var(--green);font-family:var(--mono);margin-top:2px">${fmt(ranked[0]._nw)}</div>`:''}
     </div>
     <div class="mcard"><div class="mlabel">📈 Biggest mover</div><div class="mval" style="font-size:15px;margin-top:4px">${bigMover?.ticker||'—'}</div>${bigMover?`<div style="font-size:12px;color:${bigMover.chg>=0?'var(--green)':'var(--red)'};font-family:var(--mono);margin-top:2px">${fmtChg(bigMover.chg)}</div>`:''}
     </div>
@@ -7713,8 +7713,8 @@ function renderAdminFounderAllocs(){
   return '<div class="card"><div class="section-title">Pending founder share allocations '
     +(pending.length?'<span class="badge b-amber" style="margin-left:4px">'+pending.length+'</span>':'')+'</div>'
     +(pending.length?pending.map(a=>'<div class="app-row"><div class="app-info">'
-      +'<div class="app-name">'+a.student_name+' <span class="badge b-blue">student</span></div>'
-      +'<div class="app-meta"><strong>'+a.shares.toLocaleString()+'</strong> shares of <span style="font-family:var(--mono)">'+a.ticker+'</span> ('+a.company_name+')'+(a.reason?' — '+a.reason:'')+'</div>'
+      +'<div class="app-name">'+esc(a.student_name)+' <span class="badge b-blue">student</span></div>'
+      +'<div class="app-meta"><strong>'+a.shares.toLocaleString()+'</strong> shares of <span style="font-family:var(--mono)">'+a.ticker+'</span> ('+esc(a.company_name)+')'+(a.reason?' — '+esc(a.reason):'')+'</div>'
       +'<div class="app-meta">'+a.ts+'</div>'
       +'</div><div class="btn-row">'
       +'<button class="btn btn-success btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewFounderAllocation(&quot;'+a.id+'&quot;,true))">Approve</button>'
@@ -7725,10 +7725,10 @@ function renderAdminFounderAllocs(){
     +(reviewed.length?'<div class="card"><div class="section-title">History</div>'
       +'<table><thead><tr><th>Student</th><th>Ticker</th><th>Shares</th><th>Reason</th><th>Status</th><th>Time</th></tr></thead><tbody>'
       +reviewed.map(a=>'<tr>'
-        +'<td>'+a.student_name+'</td>'
+        +'<td>'+esc(a.student_name)+'</td>'
         +'<td><span class="badge b-gray" style="font-family:var(--mono)">'+a.ticker+'</span></td>'
         +'<td>'+a.shares.toLocaleString()+'</td>'
-        +'<td style="font-size:12px;color:var(--text2)">'+(a.reason||'—')+'</td>'
+        +'<td style="font-size:12px;color:var(--text2)">'+esc(a.reason||'—')+'</td>'
         +'<td><span class="badge '+(a.status==='approved'?'b-green':'b-red')+'">'+a.status+'</span></td>'
         +'<td style="font-size:12px;color:var(--text2)">'+a.ts+'</td>'
         +'</tr>').join('')
@@ -7781,7 +7781,7 @@ function renderAdminListed(){
       <td class="${a.pct>=0?'price-up':'price-down'}" style="font-family:var(--mono)">${a.pct>=0?'+':''}${a.pct}%</td>
       <td style="font-family:var(--mono)">${fmt(a.old_price)}</td>
       <td style="font-family:var(--mono);font-weight:500">${fmt(a.new_price)}</td>
-      <td style="font-size:12px;color:var(--text2)">${a.reason||'—'}</td>
+      <td style="font-size:12px;color:var(--text2)">${esc(a.reason||'—')}</td>
       <td style="font-size:12px;color:var(--text2)">${a.applied_by||'—'}</td>
       <td style="font-size:12px;color:var(--text2)">${a.ts||''}</td>
     </tr>`).join('')}</tbody></table>`:''}
@@ -8189,13 +8189,13 @@ function renderAdminVoteOversight(){
     const total=opt1+opt2||1;
     return`<div style="padding:12px;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <div><strong>${v.question}</strong> <span class="badge b-gray" style="font-family:var(--mono)">${v.parent_ticker}</span></div>
+        <div><strong>${esc(v.question)}</strong> <span class="badge b-gray" style="font-family:var(--mono)">${v.parent_ticker}</span></div>
         <span class="badge ${isVoteOpen(v)?'b-green':'b-gray'}">${isVoteOpen(v)?'open':'closed'}</span>
       </div>
-      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">${co?.name||v.parent_ticker} · ${ballots.length} voters · ${v.ts}</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">${esc(co?.name||v.parent_ticker)} · ${ballots.length} voters · ${v.ts}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
-        <div style="background:var(--bg3);border-radius:4px;padding:6px 8px">${v.option1}: <strong>${opt1}</strong> votes (${Math.round(opt1/total*100)}%)</div>
-        <div style="background:var(--bg3);border-radius:4px;padding:6px 8px">${v.option2}: <strong>${opt2}</strong> votes (${Math.round(opt2/total*100)}%)</div>
+        <div style="background:var(--bg3);border-radius:4px;padding:6px 8px">${esc(v.option1)}: <strong>${opt1}</strong> votes (${Math.round(opt1/total*100)}%)</div>
+        <div style="background:var(--bg3);border-radius:4px;padding:6px 8px">${esc(v.option2)}: <strong>${opt2}</strong> votes (${Math.round(opt2/total*100)}%)</div>
       </div>
     </div>`;
   }
@@ -8275,7 +8275,7 @@ function renderTreasurerPriceLog(){
       <td class="${a.pct>=0?'price-up':'price-down'}" style="font-family:var(--mono)">${a.pct>=0?'+':''}${a.pct}%</td>
       <td style="font-family:var(--mono)">${fmt(a.old_price)}</td>
       <td style="font-family:var(--mono);font-weight:500">${fmt(a.new_price)}</td>
-      <td style="font-size:12px;color:var(--text2)">${a.reason||'—'}</td>
+      <td style="font-size:12px;color:var(--text2)">${esc(a.reason||'—')}</td>
       <td style="font-size:12px;color:var(--text2)">${a.applied_by||'—'}</td>
     </tr>`).join('')}
     </tbody></table>`:'<div class="empty">No price adjustments yet</div>'}
@@ -8621,7 +8621,7 @@ async function boot(){
       }
     }
   }catch(err){
-    document.getElementById('app').innerHTML=`<div class="config-page"><div class="config-card"><div style="font-family:var(--mono);font-size:20px;font-weight:600;margin-bottom:12px;color:var(--red)">Connection failed</div><div class="ibox ibox-red" style="margin-bottom:16px">Could not connect to Supabase.<br><br><strong>Error:</strong> ${err.message}</div><div style="font-size:13px;color:var(--text2);margin-bottom:12px">Check that your Supabase URL and anon key are correct.</div><button class="btn btn-primary" onclick="boot()">Retry</button></div></div>`;
+    document.getElementById('app').innerHTML=`<div class="config-page"><div class="config-card"><div style="font-family:var(--mono);font-size:20px;font-weight:600;margin-bottom:12px;color:var(--red)">Connection failed</div><div class="ibox ibox-red" style="margin-bottom:16px">Could not connect to Supabase.<br><br><strong>Error:</strong> ${esc(err.message)}</div><div style="font-size:13px;color:var(--text2);margin-bottom:12px">Check that your Supabase URL and anon key are correct.</div><button class="btn btn-primary" onclick="boot()">Retry</button></div></div>`;
   }
 }
 boot();
