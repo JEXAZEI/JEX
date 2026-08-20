@@ -1291,7 +1291,12 @@ async function generateSessionRecap(u){
   try{rec=await sb.rpc('rpc_post_session_recap',{p_title:title,p_body:recapBody});}
   catch(e){console.warn('Session recap post failed:',e);return;}
   DB.minutes=DB.minutes||[];
-  DB.minutes.unshift(rec);
+  // Only store a real row. sb.rpc() returns null for an empty response body,
+  // and a null in DB.minutes crashes renderMarket() -- which filters the
+  // noticeboard with m.type -- for every page load until a reload clears it.
+  // The market page is the first thing every student sees, so it must not be
+  // one void RPC away from a TypeError.
+  if(rec)DB.minutes.unshift(rec);
 }
 // ── Classroom management ──────────────────────────────
 async function createClassroom(){
@@ -2636,7 +2641,7 @@ async function postAnnouncement(title,body,level){
   let rec;
   try{rec=await sb.rpc('rpc_post_announcement',{p_title:title.trim(),p_body:(body||'').trim(),p_level:level||'info'});}
   catch(e){return toast(rpcErrorMessage(e));}
-  DB.announcements.unshift(rec);
+  if(rec)DB.announcements.unshift(rec);   // see postSessionRecap: never store a null
   await logActivity('announcement','Announcement posted: '+title.trim(),{userId:u.id,userName:u.name});
   clearDraft('ann-body');toast('Announcement posted');render();
 }
@@ -8275,7 +8280,7 @@ async function postMinutes(title,body){
   let rec;
   try{rec=await sb.rpc('rpc_post_minutes',{p_title:title.trim(),p_body:body.trim()});}
   catch(e){return toast(rpcErrorMessage(e));}
-  DB.minutes.unshift(rec);
+  if(rec)DB.minutes.unshift(rec);   // see postSessionRecap: never store a null
   await logActivity('minutes','Meeting minutes posted: '+title.trim(),{userId:u.id,userName:u.name});
   await pushNotificationToAll('minutes','📋 New meeting minutes posted: '+title.trim());
   clearDraft('min-body');toast('Meeting minutes posted');render();
@@ -8299,7 +8304,7 @@ async function postOfficialNotice(title,body){
   let rec;
   try{rec=await sb.rpc('rpc_post_official_notice',{p_title:title,p_body:body});}
   catch(e){return toast(rpcErrorMessage(e));}
-  DB.announcements.unshift(rec);
+  if(rec)DB.announcements.unshift(rec);   // see postSessionRecap: never store a null
   clearDraft('notice-body');clearDraft('min-body');toast('Official notice posted');render();
 }
 function renderAdminMinutes(){

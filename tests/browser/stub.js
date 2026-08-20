@@ -330,6 +330,109 @@ const RPC = {
     o.status='cancelled';
     return {cancelled:true, order:o};
   },
+  // ── The instructor's own daily workflow ──────────────
+  rpc_admin_save_session: (p)=>{
+    Object.assign(DATA.jex_session[0], p.p_data||{});
+    return {session: DATA.jex_session[0]};
+  },
+  rpc_push_notification: (p)=>{
+    const rec={id:'nt-'+(_tradeSeq++), user_id:p.p_user_id, type:p.p_type, message:p.p_message,
+      ticker:p.p_ticker||null, read:false, ts:TS, created_at:nowIso()};
+    DATA.jex_notifications.push(rec);
+    return rec;
+  },
+  rpc_push_notification_all: (p)=>{
+    const made=[];
+    for(const u of DATA.jex_users){
+      if((p.p_exclude_ids||[]).includes(u.id)) continue;
+      const rec={id:'nt-'+(_tradeSeq++), user_id:u.id, type:p.p_type, message:p.p_message,
+        ticker:p.p_ticker||null, read:false, ts:TS, created_at:nowIso()};
+      DATA.jex_notifications.push(rec); made.push(rec);
+    }
+    return made;
+  },
+  rpc_record_session_open_prices: ()=>{
+    const m={};
+    DATA.jex_companies.forEach(c=>{m[c.ticker]=c.price;});
+    DATA.jex_session[0].session_open_prices=m;
+    // The client does Object.assign(DB.session, r.session), so the whole row
+    // has to come back, not just the field that changed.
+    return {session:DATA.jex_session[0]};
+  },
+  rpc_post_session_recap: (p)=>{
+    const rec={id:'min-'+(_tradeSeq++), type:'session_recap', title:p.p_title, body:p.p_body,
+      author_name:(caller()||{}).name||'Admin', ts:TS, created_at:nowIso()};
+    DATA.jex_minutes.unshift(rec);
+    return rec;
+  },
+  rpc_post_minutes: (p)=>{
+    const rec={id:'min-'+(_tradeSeq++), type:'minutes', title:p.p_title, body:p.p_body,
+      author_name:(caller()||{}).name||'Secretary', ts:TS, created_at:nowIso()};
+    DATA.jex_minutes.unshift(rec);
+    return rec;
+  },
+  rpc_post_official_notice: (p)=>{
+    const rec={id:'a-'+(_tradeSeq++), title:p.p_title, body:p.p_body, level:'notice',
+      author_name:(caller()||{}).name||'Secretary', ts:TS, created_at:nowIso()};
+    DATA.jex_announcements.unshift(rec);
+    return rec;
+  },
+  rpc_post_announcement: (p)=>{
+    const rec={id:'a-'+(_tradeSeq++), title:p.p_title, body:p.p_body, level:p.p_level||'info',
+      author_name:(caller()||{}).name||'Admin', ts:TS, created_at:nowIso()};
+    DATA.jex_announcements.unshift(rec);
+    return rec;
+  },
+  rpc_mark_notifications_read: ()=>{
+    const id=currentUserId();
+    DATA.jex_notifications.forEach(n=>{ if(n.user_id===id) n.read=true; });
+    return null;
+  },
+  rpc_expire_day_orders: ()=>({expired:[]}),
+  approve_registration: (p)=>{
+    const r=DATA.jex_pending.find(x=>x.id===p.p_pending_id);
+    if(!r) reject('This registration was already approved');
+    const u={id:'u-new-'+(_tradeSeq++), name:r.name, username:r.username, role:r.role,
+      status:'approved', cash:p.p_starting_cash, holdings:{}, shorts:{}, watchlist:[],
+      fund_units:{}, classroom_id:p.p_classroom_id||null, created_at:nowIso()};
+    DATA.jex_users.push(u);
+    DATA.jex_pending = DATA.jex_pending.filter(x=>x.id!==p.p_pending_id);
+    return u;
+  },
+  rpc_review_ipo: (p)=>{
+    const a=DATA.jex_ipo_applications.find(x=>x.id===p.p_id);
+    if(!a) reject('Application not found');
+    if(a.status!=='pending') reject('This application was already reviewed');
+    a.status = p.p_approve ? 'approved' : 'rejected';
+    if(!p.p_approve) return {approved:false, application:a};
+    const owner={id:'u-ipo-'+(_tradeSeq++), name:a.name, username:a.ticker.toLowerCase(),
+      role:'company', status:'approved', cash:0, holdings:{}, shorts:{}, watchlist:[],
+      fund_units:{}, created_at:nowIso()};
+    DATA.jex_users.push(owner);
+    const co={id:'c-'+a.ticker, ticker:a.ticker, name:a.name, price:a.price, shares:a.shares,
+      shares_avail:a.shares, status:'listed', owner_id:owner.id, description:a.description,
+      price_history:[{p:a.price, t:nowIso()}], financials:[], index_base_adjust:1, created_at:nowIso()};
+    DATA.jex_companies.push(co);
+    return {approved:true, name:a.name, ticker:a.ticker, company:co, owner, application:a};
+  },
+  rpc_review_dilution: (p)=>{
+    const a=DATA.jex_dilution_applications.find(x=>x.id===p.p_app_id);
+    if(!a) reject('Application not found');
+    if(a.status!=='pending') reject('This application was already reviewed');
+    a.status = p.p_approve ? 'approved' : 'rejected';
+    if(!p.p_approve) return {approved:false, application:a};
+    const co=findCo(a.ticker);
+    const newShares=co.shares + a.new_shares;
+    // Price adjusts down proportionally; the index is held flat by
+    // index_base_adjust, exactly as the shipped migration does it.
+    const price=Math.max(0.01, r2(co.price * co.shares / newShares));
+    const adj=(co.index_base_adjust||1) * (co.shares/newShares);
+    co.shares=newShares; co.shares_avail=co.shares_avail + a.new_shares;
+    co.index_base_adjust=adj;
+    pushPrice(co, price);
+    return {approved:true, application:a, company:co, price, shares:newShares,
+            shares_avail:co.shares_avail, price_history:co.price_history, index_base_adjust:adj};
+  },
   rpc_cast_vote: (p)=>{
     const u=caller();
     const v=DATA.jex_votes.find(x=>x.id===p.p_vote_id);
