@@ -40,7 +40,12 @@ const noPromise=[];
 for(const n of names){
   if(new RegExp('^async function '+n+'\\(','m').test(src))continue;
   const body=new RegExp('^function '+n+'\\([^)]*\\)\\{[\\s\\S]*?\\n\\}','m').exec(src);
-  if(body&&/\n\s*return [a-z]/.test(body[0]))continue;
+  // Any `return someCall(...)` counts, wherever it sits on the line -- these
+  // dispatch as `if(mode==='buy')return placeBuy(...)`, so requiring return to
+  // start the line missed them. `return toast(...)` is excluded: it is the
+  // early-out for validation failures and returns undefined, so it says
+  // nothing about whether the real work is handed back to busy().
+  if(body&&/\breturn (?!toast\b)[a-z]\w*\(/.test(body[0]))continue;
   noPromise.push(n);
 }
 check('no wrapped handler is fire-and-forget', noPromise.length===0, noPromise.join(', '));
