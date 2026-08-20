@@ -241,6 +241,7 @@ let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[]
 let SHEETS_URL=null;
 let _realtimeChannels=[];
 
+let _rtBackoff=0;
 function subscribeRealtime(){
   if(!SUPABASE_URL||SUPABASE_URL==='YOUR_SUPABASE_URL')return;
   // Unsubscribe from any existing channels
@@ -305,7 +306,7 @@ function subscribeRealtime(){
         // stays open either way) was indistinguishable from a working one
         // until events silently never arrived.
         if(msg.ref==='1'&&msg.event==='phx_reply'){
-          if(msg.payload?.status==='ok')console.log('JEX Realtime: channel join confirmed, subscribed to',tables.join(', '));
+          if(msg.payload?.status==='ok'){_rtBackoff=0;console.log('JEX Realtime: channel join confirmed, subscribed to',tables.join(', '));}
           else console.warn('JEX Realtime: channel join REJECTED:',JSON.stringify(msg.payload));
           return;
         }
@@ -324,8 +325,15 @@ function subscribeRealtime(){
       // logged since this fires on every disconnect, including ones a
       // firewall/proxy caused before the connection ever really opened.
       console.warn('JEX Realtime: connection closed (code '+e.code+(e.reason?', reason: '+e.reason:'')+') -- reconnecting in 5s');
-      // Reconnect after 5s if still logged in
-      if(UI.userId)setTimeout(subscribeRealtime,5000);
+      // Reconnect fast, then back off. A flat 5s meant every drop cost a
+      // guaranteed 5 seconds of missed trades and session changes, and drops
+      // are routine (sleep/wake, wifi switch, proxy idle timeout). Start at
+      // 1s so the common transient case is nearly invisible, doubling to 30s
+      // so a genuinely dead endpoint is not hammered.
+      if(UI.userId){
+        _rtBackoff=Math.min(_rtBackoff?_rtBackoff*2:1000,30000);
+        setTimeout(subscribeRealtime,_rtBackoff);
+      }
     };
   }catch(e){
     console.warn('Realtime unavailable, falling back to polling:',e.message);
@@ -421,7 +429,7 @@ function handleRealtimeUpdate(table,event,newRow,oldRow){
   if(blockReason)console.warn('JEX Realtime: applied the update but skipped re-rendering because',blockReason);
   if(!blockReason){
     clearTimeout(window._rtRenderTimer);
-    window._rtRenderTimer=setTimeout(()=>render(),150);
+    window._rtRenderTimer=setTimeout(()=>renderBackground(),150);
   }
 }
 let _lastActivity=Date.now();
@@ -1626,6 +1634,46 @@ document.addEventListener('input',e=>{
   if(t&&t.tagName==='TEXTAREA'&&t.id){saveDraft(t.id,t.value);_draftsRestored.add(t.id);}
 });
 
+// ── Background repaints ─────────────────────────────────
+// A repaint the USER did not trigger: a realtime event, or autoRefresh.
+// These must never disturb what someone is in the middle of typing, which
+// is why they used to be blocked outright by userIsFillingForm(). Blocking
+// was the wrong lever -- it meant the entire app stopped updating for as
+// long as any field anywhere held text, which is exactly when a trader most
+// wants to see live prices. Now the typed state is carried ACROSS the
+// repaint instead, so the repaint can always happen.
+let _bgRender=false;
+let _formSnapshot=null;
+function renderBackground(){
+  _bgRender=true;
+  try{render();}finally{_bgRender=false;}
+}
+// Only fields the user actually typed into (value differs from the rendered
+// value="..." default) are carried over, so a re-rendered field that simply
+// has a default is left alone.
+function snapshotFormState(){
+  const snap={};
+  document.querySelectorAll('input[id],textarea[id],select[id]').forEach(el=>{
+    if(el.tagName==='SELECT'){if(el.selectedIndex>0)snap[el.id]={v:el.value,sel:false};return;}
+    if(el.value&&el.value!==el.defaultValue)snap[el.id]={v:el.value,
+      start:el.selectionStart,end:el.selectionEnd,sel:document.activeElement===el};
+  });
+  return Object.keys(snap).length?snap:null;
+}
+function restoreFormState(snap){
+  if(!snap)return;
+  for(const id of Object.keys(snap)){
+    const el=document.getElementById(id);if(!el)continue;
+    const s=snap[id];
+    // Never clobber a value the new render deliberately put there.
+    if(el.value&&el.value!==el.defaultValue)continue;
+    el.value=s.v;
+    if(s.sel){
+      try{el.focus();if(s.start!=null&&el.setSelectionRange)el.setSelectionRange(s.start,s.end);}catch(e){}
+    }
+  }
+}
+
 function userIsFillingForm(){
   const active=document.activeElement;
   if(active&&['INPUT','TEXTAREA','SELECT'].includes(active.tagName))return 'an input is currently focused ('+active.id+')';
@@ -1655,13 +1703,25 @@ function userIsFillingForm(){
   // trade panel was simply open on screen, silently blocking every
   // realtime/auto-refresh re-render for as long as it stayed open, with
   // nothing the user had actually typed being at risk of being lost.
-  const inputs=document.querySelectorAll('input[type="text"],input[type="number"],input[type="email"],input[type="password"],textarea');
-  for(const inp of inputs){if(inp.value&&inp.value.trim().length>0&&inp.value!==inp.defaultValue)return 'input #'+inp.id+' has user-typed content ("'+inp.value+'")';}
+  // The "any field anywhere holds text" clause that used to live here is
+  // gone. It stopped the ENTIRE app from updating -- realtime re-renders and
+  // the 20s autoRefresh alike -- for as long as a single field held content,
+  // anywhere on the page, focused or not. A trader with a quantity typed in
+  // saw no price moves, no trades, and no session open/close until they
+  // cleared it. Draft persistence made it permanent: restoreDrafts() re-fills
+  // textareas from localStorage after every render, so anyone who once typed
+  // a bug report or IPO description and never submitted it had this returning
+  // true forever, on every page.
+  // Typed state now survives a background repaint instead (see
+  // snapshotFormState/restoreFormState), so there is nothing left to protect
+  // by refusing to render. A focused field is still respected above.
   return '';
 }
 async function autoRefresh(){
   if(!UI.userId)return; // not logged in
-  if(userIsFillingForm())return; // don't interrupt forms
+  // Fetching never disturbs anyone -- only the repaint can, and that is now
+  // safe. This used to bail out entirely, so a single filled-in field also
+  // stopped the fallback from even asking the server for fresh data.
   const now=Date.now();
   if(now-_lastRefresh<18000)return; // debounce
   _lastRefresh=now;
@@ -1720,7 +1780,7 @@ async function autoRefresh(){
     const newUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     // Always re-render to show fresh prices, but don't interrupt forms
     if(!userIsFillingForm()){
-      render();
+      renderBackground();
     } else if(newUnread!==prevUnread) {
       // At minimum update the bell badge
       const tb=document.querySelector('.user-pill');if(tb)tb.outerHTML=renderTopbar();
@@ -8495,6 +8555,8 @@ function getPageContent(){
   return '';
 }
 function render(){
+  // Carry typed input across a repaint the user did not ask for.
+  if(_bgRender)_formSnapshot=snapshotFormState();
   if(window._rtRenderTimer)console.log('JEX Realtime: render() executing (navTab='+UI.navTab+')');
   destroyCharts();
   const app=document.getElementById('app');
@@ -8548,8 +8610,9 @@ function render(){
       allT.forEach(t=>{const co=getCo(t);if(co){destroyChart('cp-chart-'+t);buildChart('cp-chart-'+t,co);}});
     }
   },60);
-  // render() rebuilds the DOM wholesale, so any in-progress prose in a
-  // textarea is gone with it. Re-fill from the saved draft afterwards.
+  // Order matters: put the user's in-flight typing back first, then let
+  // restoreDrafts() fill only whatever is still genuinely empty.
+  if(_formSnapshot){restoreFormState(_formSnapshot);_formSnapshot=null;}
   restoreDrafts();
 }
 function setTab(t){UI.navTab=t;UI.panelTicker=null;destroyCharts();render();}
