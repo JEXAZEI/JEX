@@ -882,7 +882,26 @@ const sPnl=u=>Object.entries(shorts(u)).reduce((s,[t,pos])=>{const c=getCo(t);if
 // there would make that display wrong instead.
 const shortCollateral=u=>Object.entries(shorts(u)).reduce((s,[,pos])=>s+(pos.collateral||0),0);
 const divRec=u=>DB.dividends.reduce((s,d)=>{const p=(d.payouts||[]).find(x=>x.userId===u.id);return s+(p?p.payout:0);},0);
-const nw=u=>Math.round((u.cash+pv(u)+sPnl(u)+shortCollateral(u))*100)/100;
+// Money deposited into a fund is still the depositor's money -- it is just
+// held as units instead of cash. Leaving it out of net worth meant a deposit
+// looked like a straight loss of the whole amount: put 400 into a fund and
+// your net worth fell by 400 the moment you did it, you dropped down the
+// leaderboard for using a headline feature, and snapshotNW() wrote that
+// understated figure into jex_nw_history -- so the portfolio chart, Sharpe,
+// VaR and beta were all computed from a number that moved for no economic
+// reason (and spiked back up on withdrawal).
+//
+// Units are marked at the fund's current NAV, the same figure the funds page
+// shows. The manager's performance fee is deliberately NOT deducted here: it
+// is only charged on realized profit at withdrawal, may never be charged at
+// all, and netting a hypothetical fee out of a live balance would make net
+// worth depend on when someone happens to withdraw.
+const fundValue=u=>Object.entries(u.fund_units||{}).reduce((s,[fid,pos])=>{
+  if(!pos||!(pos.units>0))return s;
+  const f=(DB.funds||[]).find(x=>x.id===fid);
+  return f?s+currentFundNav(f)*pos.units:s;
+},0);
+const nw=u=>Math.round((u.cash+pv(u)+sPnl(u)+shortCollateral(u)+fundValue(u))*100)/100;
 const isAdmin=u=>(['chairman','president','secretary','treasurer','compliance_officer'].includes(u?.role));
 const isChairman=u=>u?.role==='chairman'||u?.role==='president';
 const isPresident=u=>u?.role==='president';
