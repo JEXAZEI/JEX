@@ -479,7 +479,10 @@ async function loadAll(){
     sb.get('jex_users','order=created_at.asc&select='+JEX_USERS_SAFE_SELECT),
     sb.get('jex_session','id=eq.1'),
     sb.get('jex_companies','order=created_at.asc'),
-    sb.get('jex_announcements','order=created_at.desc'),
+    // Display-only and append-forever: nothing aggregates over the whole
+    // table, so the full history was being downloaded on every page load
+    // to render a list nobody scrolls to the bottom of.
+    sb.get('jex_announcements','order=created_at.desc&limit=100'),
     sb.get('jex_halts','order=created_at.asc'),
   ]);
   // Apply phase 1 immediately so login renders fast
@@ -505,15 +508,40 @@ async function loadAll(){
     ()=>sb.get('jex_trades','order=created_at.desc&limit=200&select=id,ticker,qty,price,buyer_id,seller_id,type,ts'),  // only last 200 trades
     ()=>sb.get('jex_dividends','order=created_at.asc'),
     ()=>sb.get('jex_buybacks','order=created_at.asc'),
-    ()=>sb.get('jex_limit_orders','order=created_at.asc'),
+    // Split deliberately. Open/after-hours orders drive the order book,
+    // the matching poller and the two batch transitions, so that set has to
+    // be COMPLETE -- capping it would silently drop live orders out of the
+    // book. Terminal orders (filled/cancelled/expired) are display-only
+    // history, and they accumulate forever: without a cap, every order any
+    // student has ever placed was re-downloaded on every page load. Same
+    // tradeoff already taken for jex_trades, and the same caveat -- the
+    // Orders history view now shows the most recent 200 exchange-wide.
+    ()=>Promise.all([
+      sb.get('jex_limit_orders','status=in.(open,after_hours)&order=created_at.asc'),
+      sb.get('jex_limit_orders','status=not.in.(open,after_hours)&order=created_at.desc&limit=200'),
+    ]).then(([active,recent])=>[...active,...recent]),
     ()=>sb.get('jex_share_classes','order=created_at.asc'),
     ()=>sb.get('jex_class_applications','order=created_at.asc'),
     ()=>sb.get('jex_votes','order=created_at.desc'),
     ()=>sb.get('jex_vote_ballots','order=created_at.asc'),
-    ()=>sb.get('jex_price_alerts','order=created_at.asc'),
+    // Same split. checkPriceAlerts() polls every untriggered alert every 3s
+    // (any client may trigger one; the RPC re-validates), so that set must
+    // be complete. Already-triggered alerts are per-user history only.
+    ()=>Promise.all([
+      // not.is.true, not is.false: the client treats a NULL `triggered` as
+      // untriggered (!a.triggered), so is.false would drop such a row from
+      // the poller entirely and its alert would never fire.
+      sb.get('jex_price_alerts','triggered=not.is.true&order=created_at.asc'),
+      sb.get('jex_price_alerts','triggered=is.true&order=created_at.desc&limit=100'),
+    ]).then(([pending,fired])=>[...pending,...fired]),
     ()=>sb.get('jex_nw_history','order=created_at.desc&limit=200'),
     ()=>sb.get('jex_company_members','order=created_at.asc'),
-    ()=>sb.get('jex_founder_allocations','order=created_at.desc'),
+    // Pending allocations gate the admin queue and the duplicate-request
+    // check, so they stay complete; reviewed ones are history.
+    ()=>Promise.all([
+      sb.get('jex_founder_allocations','status=eq.pending&order=created_at.desc'),
+      sb.get('jex_founder_allocations','status=neq.pending&order=created_at.desc&limit=100'),
+    ]).then(([pending,reviewed])=>[...pending,...reviewed]),
     ()=>sb.get('jex_price_adjustments','order=created_at.desc&limit=50'),
     ()=>sb.get('jex_classrooms','order=created_at.asc'),
     ()=>sb.get('jex_stop_loss','status=eq.active&order=created_at.asc'),
@@ -521,7 +549,14 @@ async function loadAll(){
     ()=>sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
     ()=>sb.get('jex_funds','order=created_at.asc'),
     ()=>sb.get('jex_index_history','order=created_at.asc&limit=500'),
-    ()=>sb.get('jex_snapshots','order=created_at.desc&limit=50'),
+    // Biggest single over-fetch in the app. Every jex_snapshots row carries
+    // a full serialized dump of every user's cash/holdings/shorts and every
+    // company's price, and 50 of them were downloaded on EVERY page load --
+    // then never read. The client only ever touches label/created_by/ts to
+    // render the list and id to restore; rpc_admin_restore_snapshot reads
+    // the state blob itself, server-side. Verified against renderSnapshotTab
+    // and doRestoreSnapshot -- those four fields are the only ones used.
+    ()=>sb.get('jex_snapshots','order=created_at.desc&limit=50&select=id,label,created_by,ts,created_at'),
   ],6);
   Object.assign(DB,{pending,news,ipoApps,dilApps,
     trades,dividends,buybacks,limitOrders,
