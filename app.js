@@ -1831,6 +1831,16 @@ async function checkGoogleSession(){
     console.log('JEX boot: checkGoogleSession done (resolved='+resolved+')');
     _oauthReturnActive=false;
     if(wasOauthReturn&&!resolved)googleSignInFailed();
+    // Repaint with the flag cleared. checkGoogleSessionInner() renders its
+    // own outcome (signed in, pending approval, new-signup form) -- but it
+    // does that while _oauthReturnActive is STILL true, because this finally
+    // is what clears it. render() therefore took its `if(_oauthReturnActive)`
+    // branch and drew the "Connecting to exchange..." splash over whatever
+    // the inner call had just decided. Nothing rendered afterwards, so the
+    // splash sat there forever on a completed, successful sign-in -- the
+    // console showing "checkGoogleSession done (resolved=true)" and then
+    // silence. One render here settles every path.
+    try{render();}catch(e){console.error('JEX boot: post-auth render failed',e);}
   }
 }
 // Drops the user onto the normal login screen (never a Google-only oauth
@@ -8633,6 +8643,17 @@ async function boot(){
       } else {
         UI.userId=null; // session invalid
       }
+    }
+    // Backstop: every path out of the auth block must leave SOMETHING on
+    // screen. Only the signed-in branch above rendered -- a falsy UI.userId,
+    // or a saved id with no matching user, fell out of boot() having painted
+    // nothing since the splash, so the app hung on "Connecting to
+    // exchange..." with a fully successful boot behind it. Rendering when
+    // already signed in is a cheap no-op repaint; not rendering at all is
+    // the bug.
+    if(!UI.userId||!DB.users.find(x=>x.id===UI.userId)){
+      console.log('JEX boot: no signed-in user resolved — showing login');
+      render();
     }
   }catch(err){
     document.getElementById('app').innerHTML=`<div class="config-page"><div class="config-card"><div style="font-family:var(--mono);font-size:20px;font-weight:600;margin-bottom:12px;color:var(--red)">Connection failed</div><div class="ibox ibox-red" style="margin-bottom:16px">Could not connect to Supabase.<br><br><strong>Error:</strong> ${esc(err.message)}</div><div style="font-size:13px;color:var(--text2);margin-bottom:12px">Check that your Supabase URL and anon key are correct.</div><button class="btn btn-primary" onclick="boot()">Retry</button></div></div>`;
