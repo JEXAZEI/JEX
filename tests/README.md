@@ -66,7 +66,7 @@ Scenarios, each a transform of the seeded exchange:
 
 | scenario | state |
 |---|---|
-| `default` | a mid-semester classroom, driven end to end: every page, every admin tab as the role that owns it, XSS payloads, realtime events, drafts, `busy()`, a real market buy |
+| `default` | a mid-semester classroom, driven end to end: every page, every admin tab as the role that owns it, XSS payloads, realtime events, drafts, `busy()`, and the real student trading flows |
 | `default-sweep` | the same exchange, swept for render failures and audited handler by handler |
 | `empty` | day one: no companies, no trades, no history, session closed |
 | `closed` | trading closed |
@@ -75,6 +75,22 @@ Scenarios, each a transform of the seeded exchange:
 | `classes` | a company split into share classes |
 | `ragged` | schema-legal nulls, an empty name, a zero price, a negative balance |
 | `mobile` | the default run at a phone-sized viewport (the bottom-nav branch) |
+
+The `default` scenario fires the flows a student actually uses -- buy, sell,
+short, cover, watchlist, limit order, vote -- through the real handlers, and
+checks the numbers that come back. `stub.js` reimplements the server's
+arithmetic for those paths (the same impact curve, the same 150% short
+collateral, the same rounding) so a buy can be asserted to move cash,
+holdings, `shares_avail` and the price consistently, and a cover to release
+exactly the collateral it locked plus its P&L. That verifies the CLIENT --
+that it applies what it is handed, that its own pre-checks fire before
+anything reaches the server, and that a rejection becomes a message rather
+than a crash. It is not a test of the SQL, which runs in Postgres and is
+never executed here.
+
+Orders are paced 1.8s apart on purpose: `checkRateLimit()` allows at most 3
+in any 5s window, and firing them back to back is what it exists to stop. The
+limiter has its own check rather than only being worked around.
 
 Two checks in the sweep are worth calling out because they find things
 reading cannot. Every page is rendered for every seeded user and every tab,
