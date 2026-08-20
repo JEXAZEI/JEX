@@ -724,7 +724,7 @@ function exportCSV(filename,rows,headers){
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;a.click();
 }
 function exportTableCSV(table){
-  const now=new Date().toISOString().slice(0,10);
+  const now=azDateStamp();   // Arizona, not UTC: after 5pm AZ, UTC is tomorrow
   switch(table){
     case 'trades':
       exportCSV('jex-trades-'+now+'.csv',DB.trades,['ts','ticker','qty','price','buyer_id','seller_id','type']);
@@ -762,7 +762,17 @@ function copyTicker(ticker){
   navigator.clipboard?.writeText(ticker).then(()=>toast('Copied: '+ticker)).catch(()=>toast(ticker+' (copy manually)'));
 }
 const uid=()=>'id_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
-const ts=()=>new Date().toLocaleTimeString();
+// Matches what the server writes -- to_char(now() at time zone 'America/Phoenix',
+// 'Mon FMDD, FMHH12:MI:SS AM') -- so an optimistically added row reads the same
+// before and after a reload. It used to be toLocaleTimeString(), which gave the
+// BROWSER's timezone and no date at all, so a dividend paid from a laptop set to
+// another timezone showed the wrong time until the next refresh replaced it.
+const ts=()=>{
+  const p=new Intl.DateTimeFormat('en-US',{timeZone:AZ_TZ,month:'short',day:'numeric',
+    hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}).formatToParts(new Date());
+  const g=t=>(p.find(x=>x.type===t)||{}).value||'';
+  return g('month')+' '+g('day')+', '+g('hour')+':'+g('minute')+':'+g('second')+' '+g('dayPeriod').toUpperCase();
+};
 const isoNow=()=>new Date().toISOString();
 
 // Daily (since this session opened) is the default %-change everywhere --
@@ -1039,7 +1049,45 @@ function destroyCharts(){Object.keys(charts).forEach(k=>destroyChart(k));charts=
 // SESSION
 // ═══════════════════════════════════════════════
 const pad=n=>n<10?'0'+n:String(n);
-function getAZTime(){return new Date(new Date().toLocaleString('en-US',{timeZone:'America/Phoenix'}));}
+// ── Arizona time ────────────────────────────────────────
+// JEX runs on Arizona time everywhere -- the schedule, the session clock and
+// every server-written timestamp. Arizona does not observe DST, so it is
+// UTC-7 all year and the offset never needs a lookup table; what it does
+// need is care about WHICH of the two kinds of value is in hand:
+//
+//   * a real instant (Date.now(), created_at, ends_at) -- correct on its own,
+//     format it with azParts()/fmtAZTime()
+//   * a "wall clock" Date whose LOCAL getters read as Arizona -- what
+//     getAZTime() returns, for asking what hour/day it is in Phoenix
+//
+// Feeding the second kind to something expecting the first converts twice.
+// That is exactly what the admin session panel used to do, and it read seven
+// hours off for anyone whose device was not itself set to Arizona.
+const AZ_TZ='America/Phoenix';
+function azParts(d){
+  const p=new Intl.DateTimeFormat('en-US',{timeZone:AZ_TZ,hour12:false,
+    year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',
+    weekday:'short'}).formatToParts(d||new Date());
+  const g=t=>(p.find(x=>x.type===t)||{}).value||'';
+  return {year:+g('year'), month:+g('month'), day:+g('day'),
+          // en-US hour12:false yields "24" for midnight in some ICU versions.
+          hour:(+g('hour'))%24, minute:+g('minute'), second:+g('second'),
+          weekday:['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].indexOf(g('weekday'))};
+}
+// A Date whose LOCAL getters (getHours/getDay/getDate/toDateString) read as
+// Arizona wall clock. Its absolute instant is deliberately not meaningful --
+// never subtract it from Date.now() and never hand it to a formatter.
+//
+// Built from numeric fields rather than the old
+// new Date(new Date().toLocaleString('en-US',{timeZone})) round trip, whose
+// correctness rested on the engine re-parsing a localized string. That format
+// is not in the spec, and recent ICU emits a narrow no-break space before
+// AM/PM that some parsers reject outright -- on the code path that decides
+// when the market opens.
+function getAZTime(from){
+  const a=azParts(from);
+  return new Date(a.year, a.month-1, a.day, a.hour, a.minute, a.second);
+}
 // True once the calendar day (Arizona time, same timezone the scheduler
 // already standardizes on) has rolled over since session_open_prices was
 // last captured -- lets the daily %-change baseline reset every day like a
@@ -1047,10 +1095,35 @@ function getAZTime(){return new Date(new Date().toLocaleString('en-US',{timeZone
 // "open" across multiple days instead of being closed and reopened each one.
 function isNewTradingDay(){
   if(!DB.session.session_started_at)return false;
-  const lastAz=new Date(new Date(DB.session.session_started_at).toLocaleString('en-US',{timeZone:'America/Phoenix'}));
-  return lastAz.toDateString()!==getAZTime().toDateString();
+  const a=azParts(new Date(DB.session.session_started_at)), b=azParts(new Date());
+  return a.year!==b.year||a.month!==b.month||a.day!==b.day;
 }
-function fmtAZTime(d){return d.toLocaleString('en-US',{timeZone:'America/Phoenix',weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true})+' MST';}
+// Takes a REAL instant (defaults to now), not a getAZTime() wall-clock Date.
+// MST, not MDT: Phoenix stays on standard time all year.
+function fmtAZTime(d){
+  return (d||new Date()).toLocaleString('en-US',{timeZone:AZ_TZ,weekday:'short',month:'short',
+    day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true})+' MST';
+}
+// The Arizona calendar date, for filenames and titles. new Date().toISOString()
+// is UTC, which after 5pm Arizona is already tomorrow.
+function azDateStamp(d){const a=azParts(d);return a.year+'-'+pad(a.month)+'-'+pad(a.day);}
+function azDateLabel(d){const a=azParts(d);return a.month+'/'+a.day+'/'+a.year;}
+// The date half of the ts string every server RPC writes:
+//   to_char(now() at time zone 'America/Phoenix', 'Mon FMDD, FMHH12:MI:SS AM')
+// e.g. "Aug 20, 9:15:00 AM" -> "Aug 20,". Used to pick out today's rows.
+//
+// The three "today's trades" figures used to test ts.includes() against
+// toLocaleDateString(), i.e. "8/20/2026" -- a format ts has never been in --
+// so every one of them matched nothing. The admin dashboard read 0 trades
+// today, the exchange stats showed no volume, no most-active stock and no
+// biggest trade, and every session recap posted "Total trades: 0" no matter
+// how busy the session had been.
+function azTsPrefix(d){
+  const p=new Intl.DateTimeFormat('en-US',{timeZone:AZ_TZ,month:'short',day:'numeric'}).formatToParts(d||new Date());
+  const g=t=>(p.find(x=>x.type===t)||{}).value||'';
+  return g('month')+' '+g('day')+',';
+}
+const isTodayTs=t=>!!t&&String(t).startsWith(azTsPrefix());
 // Runs server-side (rpc_admin_save_session) -- saveSession() itself had no
 // auth check at all, and neither did most of its callers (saveBudgetThreshold,
 // saveDivThreshold, savePriceBand, saveCBPct, saveEmailJSConfig, startTimer,
@@ -1267,15 +1340,14 @@ async function generateSessionRecap(u){
   const movers=listed.map(c=>({ticker:c.ticker,name:c.name,chg:priceChg(c)})).sort((a,b)=>Math.abs(b.chg)-Math.abs(a.chg));
   const bigMover=movers[0];
   // Today's trades
-  const today=new Date().toLocaleDateString();
-  const todayTrades=DB.trades.filter(t=>t.ts&&t.ts.includes(today));
+  const todayTrades=DB.trades.filter(t=>isTodayTs(t.ts));
   const totalVol=todayTrades.reduce((s,t)=>s+t.price*t.qty,0);
   const bigTrade=todayTrades.length?todayTrades.reduce((a,b)=>b.price*b.qty>a.price*a.qty?b:a):null;
   // Leaderboard snapshot
   const ranked=students.map(s=>({name:s.name,nw:nw(s)})).sort((a,b)=>b.nw-a.nw);
   // Build recap announcement
   const recapBody=[
-    '📊 Session recap — '+new Date().toLocaleDateString(),
+    '📊 Session recap — '+azDateLabel(),
     '',
     '🏆 Leaderboard leader: '+( ranked[0]?.name||'—')+' ('+fmt(ranked[0]?.nw||0)+')',
     '📈 Biggest mover: '+(bigMover?bigMover.ticker+' '+(bigMover.chg>=0?'+':'')+bigMover.chg.toFixed(1)+'%':'—'),
@@ -1284,7 +1356,7 @@ async function generateSessionRecap(u){
     '',
     'Next session: TBD',
   ].filter(Boolean).join('\n');
-  const title='Session recap — '+new Date().toLocaleDateString();
+  const title='Session recap — '+azDateLabel();
   // Runs server-side (rpc_post_session_recap) -- a raw POST to jex_minutes
   // is no longer possible for anyone (see minutes_announcements_forgery_fix_migration.sql).
   let rec;
@@ -7266,10 +7338,12 @@ function renderWeeklySchedule(){
     ${DB.session.weekly_override?'<div class="ibox ibox-amber" style="margin-top:10px">⏸ Manually overridden for the rest of today\'s window</div>':''}`;
 }
 function renderAdminSession(students){
+  // fmtAZTime() takes a real instant; `az` below is a wall-clock Date and is
+  // only used for the scheduler's hour/minute fields.
   const az=getAZTime(),sched=DB.session.scheduled_close;
   return`<div class="card"><div class="section-title">Session control</div>
     <div class="grid3" style="margin-bottom:14px"><div class="mcard"><div class="mlabel">Status</div><div class="mval">${DB.session.status}</div></div><div class="mcard"><div class="mlabel">Time remaining</div><div class="mval" id="admin-timer-txt">${DB.session.ends_at?Math.max(0,Math.round((DB.session.ends_at-Date.now())/1000))+'s':'—'}</div></div><div class="mcard"><div class="mlabel">Active students</div><div class="mval">${students.length}</div></div></div>
-    <div class="ibox ibox-blue" style="margin-bottom:14px">Arizona time (MST, UTC−7): <strong style="font-family:var(--mono)">${fmtAZTime(az)}</strong><br><span style="font-size:11px;opacity:0.8">Arizona does not observe Daylight Saving Time.</span></div>
+    <div class="ibox ibox-blue" style="margin-bottom:14px">Arizona time (MST, UTC−7): <strong style="font-family:var(--mono)">${fmtAZTime()}</strong><br><span style="font-size:11px;opacity:0.8">Arizona does not observe Daylight Saving Time.</span></div>
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">Schedule trading hours (MST)</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:12px">
@@ -7841,7 +7915,7 @@ function resolveFlagForm(flagId,action){
 function renderAdminDashboard(){
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
   const companies=DB.companies.filter(c=>c.status==='listed');
-  const todayTrades=DB.trades.filter(t=>t.ts&&t.ts.includes(new Date().toLocaleDateString()));
+  const todayTrades=DB.trades.filter(t=>isTodayTs(t.ts));
   const totalMktCap=companies.filter(c=>!c.is_index_fund).reduce((s,c)=>s+c.price*c.shares,0);
   const openOrders=DB.limitOrders.filter(o=>o.status==='open').length;
   const halted=DB.halts.length;
@@ -8060,8 +8134,7 @@ function renderStudentOrders(){
 function renderExchangeStats(){
   const listed=DB.companies.filter(c=>c.status==='listed'&&!isHiddenTestEntity(c.owner_id));
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved'&&!isHiddenTestEntity(u.id));
-  const today=new Date().toLocaleDateString();
-  const todayTrades=DB.trades.filter(t=>t.ts&&t.ts.includes(today)&&!isHiddenTestEntity(getCo(t.ticker)?.owner_id));
+  const todayTrades=DB.trades.filter(t=>isTodayTs(t.ts)&&!isHiddenTestEntity(getCo(t.ticker)?.owner_id));
   const totalVol=todayTrades.reduce((s,t)=>s+t.price*t.qty,0);
   const totalMktCap=listed.filter(c=>!c.is_index_fund).reduce((s,c)=>s+c.price*c.shares,0);
   const movers=listed.map(c=>({ticker:c.ticker,name:c.name,chg:priceChg(c),price:c.price})).sort((a,b)=>Math.abs(b.chg)-Math.abs(a.chg));

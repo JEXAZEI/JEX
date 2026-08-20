@@ -51,6 +51,7 @@ that would otherwise be re-broken silently by a future edit.
 | `test_leaderboard` | a frozen snapshot never resurrects a removed student |
 | `test_boot_render` | boot always reaches a rendered screen, never a permanent splash |
 | `test_realtime` | repaints carry typed input instead of being blocked; coalescing and reconnect backoff |
+| `test_time` | Arizona time: wall-clock vs instant, the server's `ts` display format, day rollover, no DST — every case run in four timezones |
 
 ## The browser harness (`tests/browser/`)
 
@@ -75,6 +76,22 @@ Scenarios, each a transform of the seeded exchange:
 | `classes` | a company split into share classes |
 | `ragged` | schema-legal nulls, an empty name, a zero price, a negative balance |
 | `mobile` | the default run at a phone-sized viewport (the bottom-nav branch) |
+| `tz-utc` | the default run with the DEVICE in UTC |
+| `tz-tokyo` | the default run with the device in Asia/Tokyo, a day ahead of Arizona |
+
+The two timezone scenarios exist because every Arizona-time bug found so far
+was invisible from Arizona. The app declares itself on Arizona time -- the
+schedule, the session clock, every server-written timestamp -- so a student at
+home, or a laptop whose clock was never set, is the case that exposes anything
+still reading the device's own zone.
+
+One trap when adding driver steps: the driver lives inside a JS template
+literal, where an unrecognized escape like `\d` collapses to a bare `d`. A
+regex written with `\d` still compiles, still runs, and simply never matches --
+a test that cannot fail. Write driver regexes without backslash escapes
+(`[0-9]`, not `\d`); `run.js` lints the generated driver for eaten escapes and
+refuses to launch if it finds one, and syntax-checks it so a quoting slip
+reports immediately instead of as a 150-second hang.
 
 The `default` scenario fires the flows a student actually uses -- buy, sell,
 short, cover, watchlist, limit order, vote -- through the real handlers, and
