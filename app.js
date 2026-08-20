@@ -713,8 +713,14 @@ const priceChg=c=>{
 function computeIndex(classroomId){
   // Generalized JXI math -- classroomId null means "whole exchange" (JXI
   // itself); a classroom id scopes the basket to that classroom's
-  // companies only (via owner_id -> jex_users.classroom_id, since
-  // companies don't carry classroom_id directly). See
+  // companies only, via owner_id -> jex_users.classroom_id. jex_companies
+  // DOES have its own classroom_id column (rpc_review_ipo stamps it at
+  // listing), but nothing may read it: rpc_admin_reassign_classroom updates
+  // only jex_users, so that column is frozen at whatever the owner's
+  // classroom was on IPO day and goes stale the first time a student is
+  // moved. The owner join is the single source of truth -- server-side
+  // index_live_value() and index_constituent_tickers() both join the same
+  // way, so client and server agree on basket membership. See
   // classroom_index_migration.sql's server-side index_live_value() for the
   // matching generalization.
   //
@@ -7588,7 +7594,7 @@ function renderAdminNews(){
 function renderAdminListed(){
   return`<div class="card"><div class="section-title">Listed companies</div>
     <table><thead><tr><th>Company</th><th>Ticker</th><th class="r">Price</th><th>Change</th><th>Shares</th><th>Owner</th><th></th></tr></thead>
-    <tbody>${[...DB.companies].sort((a,b)=>(b.is_index_fund?1:0)-(a.is_index_fund?1:0)).map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${esc(c.name)}${getClassroomName(c.classroom_id)?` <span class="badge b-gray" style="font-size:10px">${esc(getClassroomName(c.classroom_id))}</span>`:''} ${c.status==='delisted'?'<span class="badge b-red" style="font-size:10px">delisted</span>':''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${esc(c.ticker)}')" title="Click to copy">${esc(c.ticker)}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${esc(owner?owner.name:'—')}</td><td>${c.status==='delisted'?
+    <tbody>${[...DB.companies].sort((a,b)=>(b.is_index_fund?1:0)-(a.is_index_fund?1:0)).map(c=>{const owner=DB.users.find(u=>u.id===c.owner_id),chg=priceChg(c);return`<tr><td style="font-weight:500">${esc(c.name)}${getClassroomName(owner?.classroom_id)?` <span class="badge b-gray" style="font-size:10px">${esc(getClassroomName(owner?.classroom_id))}</span>`:''} ${c.status==='delisted'?'<span class="badge b-red" style="font-size:10px">delisted</span>':''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${esc(c.ticker)}')" title="Click to copy">${esc(c.ticker)}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sharesBar(c)}</td><td style="font-size:12px;color:var(--text2)">${esc(owner?owner.name:'—')}</td><td>${c.status==='delisted'?
     `<button class="btn btn-sm btn-primary" onclick="relistCompany('${c.ticker}')">Re-list</button>`:
     `<button class="btn btn-sm btn-danger" onclick="delistCompany('${c.ticker}')">Delist</button>`
   }</td></tr>`;}).join('')||`<tr><td colspan="7"><div class="empty">No listed companies</div></td></tr>`}
