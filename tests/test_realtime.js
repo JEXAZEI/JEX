@@ -93,5 +93,26 @@ check('a confirmed join resets the backoff', /status==='ok'\)\{_rtBackoff=0;/.te
 let b=0,seq=[];for(let i=0;i<7;i++){b=Math.min(b?b*2:1000,30000);seq.push(b);}
 check('schedule is 1s,2s,4s,8s,16s,30s,30s', JSON.stringify(seq)===JSON.stringify([1000,2000,4000,8000,16000,30000,30000]), seq.join(','));
 
+console.log('\n=== other users\' data stays fresh ===');
+check('autoRefresh now fetches jex_users', /sb\.get\('jex_users','order=created_at\.asc&select='\+JEX_USERS_SAFE_SELECT\),\n\s*\]\);/.test(src));
+check('it uses the safe select (no password/email on the wire)',
+  /jex_users[^\n]*JEX_USERS_SAFE_SELECT/.test(src)&&!/JEX_USERS_SAFE_SELECT\s*=\s*'[^']*(password|sec_a)/.test(src));
+check('the signed-in user is merged, never overwritten', /if\(nu\.id!==UI\.userId\)Object\.assign\(cur,nu\)/.test(src));
+check('jex_users is NOT added to the realtime subscription list',
+  !/tables=\[[^\]]*'jex_users'/.test(src));
+
+// merge semantics
+(function(){
+  const UIu='me';
+  const DBusers=[{id:'me',cash:999},{id:'them',cash:10},{id:'gone',cash:5}];
+  const fresh=[{id:'me',cash:1},{id:'them',cash:77}];
+  const byId=new Map(DBusers.map(u=>[u.id,u]));
+  fresh.forEach(nu=>{const cur=byId.get(nu.id);if(cur){if(nu.id!==UIu)Object.assign(cur,nu);}else DBusers.push(nu);});
+  const out=DBusers.filter(u=>fresh.some(nu=>nu.id===u.id)||u.id===UIu);
+  check('another user\'s balance is updated', out.find(u=>u.id==='them').cash===77);
+  check('your own optimistic balance is not rewound', out.find(u=>u.id==='me').cash===999);
+  check('a removed user drops out of DB.users', !out.some(u=>u.id==='gone'));
+})();
+
 console.log(fails?('\n'+fails+' FAILURES'):'\nAll passed');
 process.exit(fails?1:0);

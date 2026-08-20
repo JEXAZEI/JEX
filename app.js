@@ -1727,7 +1727,7 @@ async function autoRefresh(){
   _lastRefresh=now;
   try{
     // Only reload lightweight tables that change frequently
-    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports,newFunds]=await Promise.all([
+    const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports,newFunds,newUsers]=await Promise.all([
       // Was a client-supplied user_id=eq. filter -- not a real security
       // boundary since SELECT was table-wide open (see the
       // notification-privacy-fix migration). rpc_get_my_notifications
@@ -1746,6 +1746,15 @@ async function autoRefresh(){
       sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
       safeRpc('rpc_admin_list_bug_reports').then(r=>r||[]),
       sb.get('jex_funds','order=created_at.asc'),
+      // Other people's cash/holdings/shorts were fetched once at boot and then
+      // never again: jex_users is deliberately NOT in the realtime publication
+      // (logical replication ships the WHOLE row, which would broadcast every
+      // password hash and email to every connected browser -- the exact thing
+      // JEX_USERS_SAFE_SELECT exists to prevent). Without a refresh here, the
+      // live leaderboard, shareholder lists and every other net-worth figure
+      // for anyone but yourself stayed frozen at page-load values until a
+      // reload.
+      sb.get('jex_users','order=created_at.asc&select='+JEX_USERS_SAFE_SELECT),
     ]);
     const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
@@ -1774,6 +1783,14 @@ async function autoRefresh(){
     const existingIds=new Set(DB.trades.map(t=>t.id));
     newTrades.forEach(t=>{if(!existingIds.has(t.id))DB.trades.unshift(t);});
     DB.limitOrders=newLimitOrders;
+    // Merge rather than replace: the signed-in user's own row carries local
+    // state applied optimistically by applyTradeResult, and a wholesale swap
+    // could briefly rewind their balance to a pre-trade read.
+    if(Array.isArray(newUsers)&&newUsers.length){
+      const byId=new Map(DB.users.map(u=>[u.id,u]));
+      newUsers.forEach(nu=>{const cur=byId.get(nu.id);if(cur){if(nu.id!==UI.userId)Object.assign(cur,nu);}else DB.users.push(nu);});
+      DB.users=DB.users.filter(u=>newUsers.some(nu=>nu.id===u.id)||u.id===UI.userId);
+    }
     // Update session timer if needed
     if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
     // Re-render if notifications changed or always update market data silently
