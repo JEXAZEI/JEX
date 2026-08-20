@@ -6082,9 +6082,23 @@ function closePanel(){UI.panelTicker=null;destroyCharts();document.getElementByI
 // ═══════════════════════════════════════════════
 function renderLeaderboard(){
   const lbSnap=DB.session.leaderboard_snapshot;
-  const isFrozen=lbSnap&&DB.session.status!=='open';
+  // .length matters: [] is truthy, so a session closed with no approved
+  // students stored an empty snapshot that froze the leaderboard BLANK until
+  // some later close happened to overwrite it. Fall back to live standings.
+  const isFrozen=lbSnap&&lbSnap.length>0&&DB.session.status!=='open';
   let ranked=isFrozen?lbSnap:DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nw(u),_divs:divRec(u),name:u.name,id:u.id,classroom_id:u.classroom_id})).sort((a,b)=>b._nw-a._nw);
   ranked=ranked.filter(u=>!isHiddenTestEntity(u.id));
+  // The frozen snapshot is a copy of the standings taken by setSession() at
+  // session close and stored on jex_session. Removing a student updates
+  // jex_users but never touches that copy, so a deleted account kept
+  // appearing on the leaderboard -- with their old net worth -- until the
+  // next close happened to overwrite it. Re-check every frozen entry
+  // against the live roster so a removed or no-longer-approved account
+  // drops out immediately, including from snapshots already stored.
+  if(isFrozen)ranked=ranked.filter(e=>{
+    const live=getUser(e.id);
+    return live&&live.role==='student'&&live.status==='approved';
+  });
   if(UI.lbClassroom)ranked=ranked.filter(u=>u.classroom_id===UI.lbClassroom);
   const rc=i=>i===0?'r-gold':i===1?'r-silver':i===2?'r-bronze':'';
   const frozenBadge=isFrozen?'<span class="badge b-amber" style="font-size:11px;font-weight:400">📸 Frozen at close</span>':'';
