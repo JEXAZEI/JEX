@@ -241,5 +241,36 @@ check('the circuit-breaker cooldown measures created_at against Date.now()',
   /const haltedAt=new Date\(h\.created_at\|\|h\.ts\)\.getTime\(\);[\s\S]{0,120}now-haltedAt<5\*60\*1000/.test(src));
 check('daysAgo divides by a whole day in ms', /\/86400000\)/.test(src));
 
+console.log('\n=== every displayed time is Arizona, not the device ===');
+// The chart axis, the "Open" anchor and the vote-close line all used to render
+// in the device's timezone, so the same chart read differently in the
+// classroom and at a student's house.
+check('chart labels pin the timezone', /function fmtChartLabel[\s\S]{0,600}timeZone:AZ_TZ/.test(src));
+check('chart labels no longer use the device locale/zone',
+  !/function fmtChartLabel[\s\S]{0,600}toLocale(Time|Date)String\(\[\]/.test(src));
+check('the Open anchor compares Arizona calendar days',
+  /function anchorPointLabel[\s\S]{0,400}azParts\(d\)/.test(src));
+check('and not the device\'s toDateString',
+  !/function anchorPointLabel[\s\S]{0,400}d\.toDateString\(\)===new Date\(\)\.toDateString\(\)/.test(src));
+check('vote close time is formatted in Arizona', /fmtAZTime\(new Date\(v\.closes_at\)\)/.test(src));
+check('no display path calls toLocaleString with no timezone',
+  !/toLocale(Date|Time)?String\(\[\]/.test(codeOnly));
+{
+  // Same instant, four zones, one label.
+  const seen=new Set(), anchors=new Set();
+  for(const tz of ZONES){
+    const r=inTZ(tz, `
+      const d=new Date(${JSON.stringify(INSTANT)});
+      console.log(JSON.stringify({
+        lab:d.toLocaleTimeString('en-US',{timeZone:AZ_TZ,hour:'2-digit',minute:'2-digit'}),
+        day:d.toLocaleDateString('en-US',{timeZone:AZ_TZ,month:'short',day:'numeric'})}));`);
+    seen.add(r.lab); anchors.add(r.day);
+  }
+  check('a 1D chart label is identical in every timezone', seen.size===1, [...seen].join(' | '));
+  check('and reads as the Arizona hour', /07:30/.test([...seen][0]), [...seen][0]);
+  check('a dated label is identical in every timezone', anchors.size===1&&[...anchors][0]==='Aug 20',
+    [...anchors].join(' | '));
+}
+
 console.log(fails?('\n'+fails+' FAILURES'):'\nAll passed');
 process.exit(fails?1:0);
