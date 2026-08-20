@@ -1028,7 +1028,7 @@ async function saveSession(data){
   Object.assign(DB.session,r.session);
 }
 function adjStockForm(){
-  adjustStockPrice(
+  return adjustStockPrice(
     document.getElementById('adj-ticker')?.value,
     document.getElementById('adj-pct')?.value,
     document.getElementById('adj-reason')?.value
@@ -2536,7 +2536,7 @@ function doInviteFounder(companyTicker){
   const co=DB.companies.find(c=>c.owner_id===companyTicker)||getCo(companyTicker);
   const coName=co?co.name:'this company';
   if(!confirm('Send a founder invitation to '+( student?.name||studentId)+' for '+coName+'?'))return;
-  sendFounderInvite(companyTicker,studentId);
+  return sendFounderInvite(companyTicker,studentId); // returned for busy()
 }
 function doRequestFounderAlloc(){
   const ticker=document.getElementById('alloc-ticker')?.value;
@@ -2545,7 +2545,7 @@ function doRequestFounderAlloc(){
   const reason=document.getElementById('alloc-reason')?.value;
   if(!ticker)return toast('Select a share class');
   if(!studentId)return toast('Select a founder');
-  requestFounderAllocation(ticker,studentId,shares,reason);
+  return requestFounderAllocation(ticker,studentId,shares,reason); // returned for busy()
 }
 // (merged into sendFounderInvite)
 async function respondToInvite(memberId,accept){
@@ -2798,7 +2798,7 @@ function flagForm(targetId,targetType){
   const reason=prompt('Reason for flagging '+targetName+':');
   if(reason===null)return;
   if(!reason||reason.trim().length<5)return toast('Enter a reason (at least 5 characters)');
-  flagAccount(targetId,targetName,targetType,reason);
+  return flagAccount(targetId,targetName,targetType,reason); // returned for busy()
 }
 
 // ═══════════════════════════════════════════════
@@ -4788,7 +4788,7 @@ async function closeVote(voteId){
   toast('Vote closed');render();
 }
 function postVoteForm(parentTicker){
-  postVote(parentTicker,
+  return postVote(parentTicker,
     document.getElementById('vote-q')?.value,
     document.getElementById('vote-a')?.value,
     document.getElementById('vote-b')?.value);
@@ -5754,7 +5754,7 @@ function renderCompanyPage(parentTicker){
       +'<div class="row" style="align-items:flex-end">'
       +'<div class="frow" style="flex:1"><label class="flabel">Direction</label><select id="alert-dir"><option value="above">Above</option><option value="below">Below</option></select></div>'
       +'<div class="frow" style="flex:1"><label class="flabel">Target price ($)</label><input type="number" id="alert-price" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
-      +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="addAlertForm(&quot;'+parentTicker+'&quot;)">Set alert</button></div></div>'
+      +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Adding…&quot;,()=>addAlertForm(&quot;'+parentTicker+'&quot;))">Set alert</button></div></div>'
       +(myAlerts.length?'<hr class="divider"><div style="font-size:12px;font-weight:500;margin-bottom:8px">Active alerts</div>'
         +myAlerts.map(a=>'<div class="app-row" style="margin-bottom:6px"><div class="app-info"><div class="app-name">'+(a.direction||a['direction']||'?')+' '+fmt(parseFloat(a.target_price||a['target_price'])||0)+'</div></div>'
           +'<button class="btn btn-sm btn-danger" onclick="deletePriceAlert(&quot;'+a.id+'&quot;)">Remove</button></div>').join(''):'')
@@ -5958,7 +5958,7 @@ function setupCompanyPageSwipe(){
   },{passive:true});
 }
 function addAlertForm(ticker){
-  addPriceAlert(ticker,document.getElementById('alert-price')?.value,document.getElementById('alert-dir')?.value);
+  return addPriceAlert(ticker,document.getElementById('alert-price')?.value,document.getElementById('alert-dir')?.value); // returned for busy()
 }
 function cpTrade(mode){
   const t=UI.companyPage;const q=get('cp-qty')?.value;
@@ -6213,13 +6213,13 @@ function renderFundDetail(fundId){
         <div class="mcard"><div class="mlabel">Current value</div><div class="mval" style="font-family:var(--mono)">${fmt(myValue)}</div></div>
         <div class="mcard"><div class="mlabel">Unrealized gain</div><div class="mval ${myGain>=0?'green':'red'}" style="font-family:var(--mono)">${myGain>=0?'+':''}${fmt(myGain)}</div></div>
       </div>
-      <div class="frow"><label class="flabel">Withdraw units (up to ${myPos.units})</label><div style="display:flex;gap:8px"><input type="number" id="fund-withdraw-units" placeholder="units" min="0" max="${myPos.units}" step="0.0001" style="flex:1"><button class="btn btn-danger btn-sm" onclick="withdrawFromFund('${f.id}',get('fund-withdraw-units')?.value)">Withdraw</button></div>
+      <div class="frow"><label class="flabel">Withdraw units (up to ${myPos.units})</label><div style="display:flex;gap:8px"><input type="number" id="fund-withdraw-units" placeholder="units" min="0" max="${myPos.units}" step="0.0001" style="flex:1"><button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Withdrawing…&quot;,()=>withdrawFromFund('${f.id}',get('fund-withdraw-units')?.value))">Withdraw</button></div>
       <div style="font-size:11px;color:var(--text2);margin-top:4px">A ${f.fee_pct}% performance fee applies only to your realized profit at withdrawal.</div></div>`;
     } else {
       html+='<div class="empty" style="margin-bottom:12px">You have no position in this fund</div>';
     }
     if(f.status==='active'){
-      html+=`<div class="frow"><label class="flabel">Deposit amount</label><div style="display:flex;gap:8px"><input type="number" id="fund-deposit-amount" placeholder="e.g. 500" min="0" step="0.01" style="flex:1"><button class="btn btn-primary btn-sm" onclick="depositToFund('${f.id}',get('fund-deposit-amount')?.value)">Deposit</button></div></div>`;
+      html+=`<div class="frow"><label class="flabel">Deposit amount</label><div style="display:flex;gap:8px"><input type="number" id="fund-deposit-amount" placeholder="e.g. 500" min="0" step="0.01" style="flex:1"><button class="btn btn-primary btn-sm" onclick="busy(this,&quot;Depositing…&quot;,()=>depositToFund('${f.id}',get('fund-deposit-amount')?.value))">Deposit</button></div></div>`;
     }
     html+='</div>';
   }
@@ -6664,7 +6664,7 @@ function renderFoundersTab(co,u){
       +'<select id="invite-student"><option value="">— Select a student —</option>'
       +availableStudents.map(s=>'<option value="'+s.id+'">'+s.name+'</option>').join('')
       +'</select></div>'
-      +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="doInviteFounder(&quot;'+co.owner_id+'&quot;)">Send invite</button></div>'
+      +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Inviting…&quot;,()=>doInviteFounder(&quot;'+co.owner_id+'&quot;))">Send invite</button></div>'
       +'</div></div>';
   } else {
     html+='<div class="ibox ibox-teal">Maximum 3 founders reached.</div>';
@@ -6686,7 +6686,7 @@ function renderFoundersTab(co,u){
       +'<div><label class="flabel">Shares</label><input type="number" id="alloc-shares" placeholder="e.g. 100" min="1"></div>'
       +'<div><label class="flabel">Reason</label><input type="text" id="alloc-reason" placeholder="Founder compensation"></div>'
       +'</div>'
-      +'<button class="btn btn-warning" onclick="doRequestFounderAlloc()">Submit allocation request</button>'
+      +'<button class="btn btn-warning" onclick="busy(this,&quot;Requesting…&quot;,()=>doRequestFounderAlloc())">Submit allocation request</button>'
       +(allAllocs.length?'<hr class="divider"><table><thead><tr><th>Founder</th><th>Ticker</th><th>Shares</th><th>Reason</th><th>Status</th></tr></thead><tbody>'
         +allAllocs.map(a=>'<tr><td>'+a.student_name+'</td><td><span class="badge b-gray" style="font-family:var(--mono)">'+a.ticker+'</span></td><td>'+a.shares.toLocaleString()+'</td><td style="font-size:12px;color:var(--text2)">'+(a.reason||'—')+'</td><td><span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-amber')+'">'+a.status+'</span></td></tr>').join('')
         +'</tbody></table>':'')
@@ -6776,7 +6776,7 @@ function renderClassesTab(co){
     +'<div id="cls-whitelist-wrap" style="display:none"><div class="frow"><label class="flabel">Select allowed students (hold Ctrl/Cmd for multiple)</label>'
     +'<select id="cls-whitelist" multiple style="height:100px">'+studentOptions+'</select></div></div>'
     +'<div class="frow"><label class="flabel">Reason for issuance</label><textarea id="cls-reason" rows="2" placeholder="e.g. Issuing Class B to founders..."></textarea></div>'
-    +'<button class="btn btn-primary" onclick="submitClassAppForm(&quot;'+co.ticker+'&quot;)">Submit for approval</button>'
+    +'<button class="btn btn-primary" onclick="busy(this,&quot;Submitting…&quot;,()=>submitClassAppForm(&quot;'+co.ticker+'&quot;))">Submit for approval</button>'
     +'</div>';
 
   // ── Application history ───────────────────────────────
@@ -6803,7 +6803,7 @@ function submitClassAppForm(parentTicker){
   const whitelistEl=document.getElementById('cls-whitelist');
   const whitelist=restricted&&whitelistEl?Array.from(whitelistEl.selectedOptions).map(o=>o.value):[];
   const reason=document.getElementById('cls-reason')?.value;
-  submitClassApplication(parentTicker,clsType,votes,shares,price,restricted,whitelist,reason);
+  return submitClassApplication(parentTicker,clsType,votes,shares,price,restricted,whitelist,reason); // returned for busy()
 }
 // Toggle whitelist UI
 function previewLogo(input){
@@ -6848,7 +6848,7 @@ function renderCompanyVotesTab(co){
     +'<div class="frow" style="margin-bottom:0"><label class="flabel">Option A</label><input type="text" id="vote-a" placeholder="Yes" value="Yes"></div>'
     +'<div class="frow" style="margin-bottom:0"><label class="flabel">Option B</label><input type="text" id="vote-b" placeholder="No" value="No"></div>'
     +'</div>'
-    +'<button class="btn btn-primary" onclick="postVoteForm(&quot;'+co.ticker+'&quot;)">Post vote</button>'
+    +'<button class="btn btn-primary" onclick="busy(this,&quot;Posting…&quot;,()=>postVoteForm(&quot;'+co.ticker+'&quot;))">Post vote</button>'
     +'</div>'
     +(myVotes.length?'<div class="section-title" style="margin-bottom:10px">Active & past votes</div>'+myVotes.map(v=>renderVoteCard(v,true,false)).join('')
     :'<div class="card"><div class="empty">No votes posted yet.</div></div>')+
@@ -6912,7 +6912,7 @@ function renderDivTab(co,myDivs){
     const form=document.getElementById('div-form');
     if(form){
       if(totalCirc>0){
-        form.innerHTML=`<div class="frow"><label class="flabel">Dividend per share ($)</label><input type="number" id="div-ps" placeholder="e.g. 0.50" min="0.01" step="0.01" oninput="updateDivPrev('${co.ticker}')"></div><div id="div-prev"></div><div class="frow" style="margin-top:10px"><label class="flabel">Note to investors</label><input type="text" id="div-note" placeholder="e.g. Q1 earnings dividend"></div><button class="btn btn-success" onclick="issueDividend('${co.ticker}',get('div-ps')?.value,get('div-note')?.value)">Pay dividend now</button>`;
+        form.innerHTML=`<div class="frow"><label class="flabel">Dividend per share ($)</label><input type="number" id="div-ps" placeholder="e.g. 0.50" min="0.01" step="0.01" oninput="updateDivPrev('${co.ticker}')"></div><div id="div-prev"></div><div class="frow" style="margin-top:10px"><label class="flabel">Note to investors</label><input type="text" id="div-note" placeholder="e.g. Q1 earnings dividend"></div><button class="btn btn-success" onclick="busy(this,&quot;Paying…&quot;,()=>issueDividend('${co.ticker}',get('div-ps')?.value,get('div-note')?.value))">Pay dividend now</button>`;
       } else {
         form.innerHTML='<div class="empty">No shareholders yet.</div>';
       }
@@ -6945,7 +6945,7 @@ function renderFinancialsMgmtTab(co,myFinancials){
 }
 function renderBBTab(co,myBBs){
   const sold=co.shares-co.shares_avail,owner=cu();
-  return`<div class="card"><div class="section-title">Share buyback${infoBubble('The company repurchases its own outstanding shares using its cash. This permanently retires the shares (they do not go back into the pool of shares available to buy) and reduces the total share count.')}</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${sold.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div></div>${sold>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Shares to buy back</label><input type="number" id="bb-qty" placeholder="50" min="1" max="${sold}" oninput="updateBBPrev('${co.ticker}')"></div><div style="padding-bottom:12px"><button class="btn btn-primary" onclick="doBuyback('${co.ticker}',get('bb-qty')?.value)">Buy back</button></div></div><div id="bb-prev"></div>`:'<div class="empty">No shares in circulation.</div>'}</div>${myBBs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${myBBs.map(b=>`<tr><td style="color:var(--text2)">${b.ts}</td><td>${b.qty}</td><td style="font-family:var(--mono)">${fmt(b.price)}</td><td style="font-weight:500;font-family:var(--mono)">${fmt(b.total)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
+  return`<div class="card"><div class="section-title">Share buyback${infoBubble('The company repurchases its own outstanding shares using its cash. This permanently retires the shares (they do not go back into the pool of shares available to buy) and reduces the total share count.')}</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${sold.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div></div>${sold>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Shares to buy back</label><input type="number" id="bb-qty" placeholder="50" min="1" max="${sold}" oninput="updateBBPrev('${co.ticker}')"></div><div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Buying back…&quot;,()=>doBuyback('${co.ticker}',get('bb-qty')?.value))">Buy back</button></div></div><div id="bb-prev"></div>`:'<div class="empty">No shares in circulation.</div>'}</div>${myBBs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${myBBs.map(b=>`<tr><td style="color:var(--text2)">${b.ts}</td><td>${b.qty}</td><td style="font-family:var(--mono)">${fmt(b.price)}</td><td style="font-weight:500;font-family:var(--mono)">${fmt(b.total)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
 }
 function updateBBPrev(ticker){const co=getCo(ticker);if(!co)return;const q=parseInt(get('bb-qty')?.value)||0;const p=get('bb-prev');if(p)p.innerHTML=q>0?impactPreview(co,q,'buy'):'';}
 function renderDilTab(co){
@@ -7185,7 +7185,7 @@ function renderAdminSession(students){
     <div class="section-title" style="font-size:12px;margin-bottom:8px">Add classroom</div>
     <div class="row" style="align-items:flex-end;gap:8px">
       <div class="frow" style="flex:1;margin-bottom:0"><label class="flabel">Classroom name</label><input type="text" id="cls-name" placeholder="e.g. Period 1"></div>
-      <div><button class="btn btn-primary btn-sm" onclick="createClassroom()">+ Add classroom</button></div>
+      <div><button class="btn btn-primary btn-sm" onclick="busy(this,&quot;Creating…&quot;,()=>createClassroom())">+ Add classroom</button></div>
     </div>
 
     <div class="divider" style="margin:14px 0"></div>
@@ -7217,7 +7217,7 @@ function renderAdminSession(students){
       </div>
       <div class="frow" style="min-width:100px"><label class="flabel">Ticker</label><input type="text" id="cls-idx-ticker" placeholder="e.g. PD1X" style="text-transform:uppercase" maxlength="8"></div>
       <div class="frow" style="flex:2;min-width:150px"><label class="flabel">Name</label><input type="text" id="cls-idx-name" placeholder="e.g. Period 1 Index"></div>
-      <div><button class="btn btn-primary btn-sm" onclick="createClassroomIndex()">+ Create index</button></div>
+      <div><button class="btn btn-primary btn-sm" onclick="busy(this,&quot;Creating…&quot;,()=>createClassroomIndex())">+ Create index</button></div>
     </div>
     <div class="divider"></div>
     <div class="section-title" style="font-size:13px;margin-bottom:10px">🎮 Practice mode</div>
@@ -7245,8 +7245,8 @@ function renderAdminSession(students){
 }
 function renderAdminRegs(pS,pC,students,companies){
   return`<div class="card">
-    ${pS.length?`<div class="section-title">Pending students</div>${pS.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-blue">student</span></div><div class="app-meta">${esc(r.email)} ${r.email_verified?'<span class="badge b-green" style="font-size:9px">✓ verified</span>':'<span class="badge b-gray" style="font-size:9px">not verified</span>'} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><select id="classroom-${r.id}" style="width:110px;font-size:11px"><option value="">No classroom</option>${DB.classrooms.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:100px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
-    ${pC.length?`<div class="section-title">Pending companies</div>${pC.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-amber">company</span></div><div class="app-meta">${esc(r.email)} ${r.email_verified?'<span class="badge b-green" style="font-size:9px">✓ verified</span>':'<span class="badge b-gray" style="font-size:9px">not verified</span>'} — ${esc(r.description||'')} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><select id="classroom-${r.id}" style="width:110px;font-size:11px"><option value="">No classroom</option>${DB.classrooms.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="approveReg('${r.id}',get('cash-${r.id}')?.value)">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReg('${r.id}')">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
+    ${pS.length?`<div class="section-title">Pending students</div>${pS.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-blue">student</span></div><div class="app-meta">${esc(r.email)} ${r.email_verified?'<span class="badge b-green" style="font-size:9px">✓ verified</span>':'<span class="badge b-gray" style="font-size:9px">not verified</span>'} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><select id="classroom-${r.id}" style="width:110px;font-size:11px"><option value="">No classroom</option>${DB.classrooms.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:100px"><button class="btn btn-success btn-sm" onclick="busy(this,&quot;Approving…&quot;,()=>approveReg('${r.id}',get('cash-${r.id}')?.value))">Approve</button><button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Rejecting…&quot;,()=>rejectReg('${r.id}'))">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
+    ${pC.length?`<div class="section-title">Pending companies</div>${pC.map(r=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(r.name)} <span class="badge b-amber">company</span></div><div class="app-meta">${esc(r.email)} ${r.email_verified?'<span class="badge b-green" style="font-size:9px">✓ verified</span>':'<span class="badge b-gray" style="font-size:9px">not verified</span>'} — ${esc(r.description||'')} — ${r.ts}</div></div><div class="btn-row" style="align-items:center"><select id="classroom-${r.id}" style="width:110px;font-size:11px"><option value="">No classroom</option>${DB.classrooms.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input type="number" id="cash-${r.id}" placeholder="Starting $" value="${DB.session.starting_cash||10000}" min="0" style="width:110px"><button class="btn btn-success btn-sm" onclick="busy(this,&quot;Approving…&quot;,()=>approveReg('${r.id}',get('cash-${r.id}')?.value))">Approve</button><button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Rejecting…&quot;,()=>rejectReg('${r.id}'))">Reject</button></div></div>`).join('')}<hr class="divider">`:''}
     ${!DB.pending.length?`<div class="empty" style="padding:16px">No pending registrations</div><hr class="divider">`:''}
     <div class="section-title" style="margin-top:4px">Approved accounts</div>
     ${[...students,...companies].length?`<table><thead><tr><th>Name</th><th>Role</th><th>Email</th><th class="r">Cash</th></tr></thead><tbody>${[...students,...companies].map(u=>`<tr><td>${esc(u.name)}</td><td>${roleBadge(u.role)}</td><td style="color:var(--text2)">${esc(u.email)}</td><td class="r" style="font-family:var(--mono)">${fmt(u.cash)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No approved accounts yet</div>'}
@@ -7278,10 +7278,10 @@ function renderAdminResetForm(){
   form.innerHTML=header+`<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Security question: ${esc(u.sec_q||'—')}</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="admin-reset-pw" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('admin-reset-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="adminResetPw('${u.id}',get('admin-reset-pw')?.value)">Reset password</button>`;
 }
 function renderAdminIPO(pIPO,rIPO){
-  return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${esc(a.description||'no desc')}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewIPO('${a.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewIPO('${a.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}`;
+  return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${esc(a.description||'no desc')}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewIPO('${a.id}',true))">Approve</button><button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewIPO('${a.id}',false))">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}`;
 }
 function renderAdminDilution(pDil,rDil){
-  return`<div class="card"><div class="section-title">Pending dilution requests</div>${pDil.length?pDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span> <span class="badge b-coral">+${d.pct_increase}%</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares — "${esc(d.reason)}"</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="reviewDilution('${d.id}',true)">Approve</button><button class="btn btn-danger btn-sm" onclick="reviewDilution('${d.id}',false)">Reject</button></div></div>`).join(''):'<div class="empty">No pending dilution requests</div>'}${rDil.length?`<hr class="divider">${rDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares</div></div><span class="badge ${d.status==='approved'?'b-green':'b-red'}">${d.status}</span></div>`).join('')}`:''}`;
+  return`<div class="card"><div class="section-title">Pending dilution requests</div>${pDil.length?pDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span> <span class="badge b-coral">+${d.pct_increase}%</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares — "${esc(d.reason)}"</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewDilution('${d.id}',true))">Approve</button><button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewDilution('${d.id}',false))">Reject</button></div></div>`).join(''):'<div class="empty">No pending dilution requests</div>'}${rDil.length?`<hr class="divider">${rDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares</div></div><span class="badge ${d.status==='approved'?'b-green':'b-red'}">${d.status}</span></div>`).join('')}`:''}`;
 }
 function renderAdminBalances(students){
   const rows=students.map(u=>({name:u.name,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pv(u)*100)/100,divs:Math.round(divRec(u)*100)/100,nw:nw(u)})).sort((a,b)=>b.nw-a.nw);
@@ -7413,8 +7413,8 @@ function renderAdminClasses(){
       +(a.restricted?' · <span class="badge b-red">Restricted</span> to: '+(a.whitelist||[]).map(id=>getUser(id)?.name||id).join(', '):'')+'</div>'
       +(a.reason?'<div class="app-meta">Reason: '+a.reason.replace('[CONVERT]','[Conversion]')+'</div>':'')
       +'</div><div class="btn-row">'
-      +'<button class="btn btn-success btn-sm" onclick="reviewClassApp(&quot;'+a.id+'&quot;,true)">Approve</button>'
-      +'<button class="btn btn-danger btn-sm" onclick="reviewClassApp(&quot;'+a.id+'&quot;,false)">Reject</button>'
+      +'<button class="btn btn-success btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewClassApp(&quot;'+a.id+'&quot;,true))">Approve</button>'
+      +'<button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewClassApp(&quot;'+a.id+'&quot;,false))">Reject</button>'
       +'</div></div>').join('')
     :'<div class="empty">No pending applications</div>')
     +'</div>'
@@ -7499,8 +7499,8 @@ function renderAdminFlags(){
         <div style="font-size:13px;color:var(--text2);margin-bottom:10px">${esc(f.reason)}</div>
         ${isChairPres?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input type="text" id="res-note-${f.id}" placeholder="Resolution note (optional)" style="flex:1;font-size:12px;padding:5px 8px">
-          <button class="btn btn-sm btn-success" onclick="resolveFlagForm('${f.id}','resolved')">✓ Resolve</button>
-          <button class="btn btn-sm btn-warning" onclick="resolveFlagForm('${f.id}','dismissed')">Dismiss</button>
+          <button class="btn btn-sm btn-success" onclick="busy(this,&quot;Resolving…&quot;,()=>resolveFlagForm('${f.id}','resolved'))">✓ Resolve</button>
+          <button class="btn btn-sm btn-warning" onclick="busy(this,&quot;Resolving…&quot;,()=>resolveFlagForm('${f.id}','dismissed'))">Dismiss</button>
         </div>`:'<div style="font-size:12px;color:var(--text2)">Awaiting Chairman/President review</div>'}
       </div>`;
     });
@@ -7657,7 +7657,7 @@ function updateFlagTargets(){
 }
 function resolveFlagForm(flagId,action){
   const note=document.getElementById('res-note-'+flagId)?.value;
-  resolveFlag(flagId,action,note);
+  return resolveFlag(flagId,action,note); // returned for busy()
 }
 function renderAdminDashboard(){
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
@@ -7717,8 +7717,8 @@ function renderAdminFounderAllocs(){
       +'<div class="app-meta"><strong>'+a.shares.toLocaleString()+'</strong> shares of <span style="font-family:var(--mono)">'+a.ticker+'</span> ('+a.company_name+')'+(a.reason?' — '+a.reason:'')+'</div>'
       +'<div class="app-meta">'+a.ts+'</div>'
       +'</div><div class="btn-row">'
-      +'<button class="btn btn-success btn-sm" onclick="reviewFounderAllocation(&quot;'+a.id+'&quot;,true)">Approve</button>'
-      +'<button class="btn btn-danger btn-sm" onclick="reviewFounderAllocation(&quot;'+a.id+'&quot;,false)">Reject</button>'
+      +'<button class="btn btn-success btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewFounderAllocation(&quot;'+a.id+'&quot;,true))">Approve</button>'
+      +'<button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewFounderAllocation(&quot;'+a.id+'&quot;,false))">Reject</button>'
       +'</div></div>').join('')
     :'<div class="empty">No pending founder share requests</div>')
     +'</div>'
@@ -7772,7 +7772,7 @@ function renderAdminListed(){
         <input type="number" id="adj-pct" placeholder="e.g. 15 or -10" step="0.1"></div>
       <div class="frow" style="flex:2"><label class="flabel">Reason (optional)</label>
         <input type="text" id="adj-reason" placeholder="e.g. Regulatory fine"></div>
-      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="adjStockForm()">Apply</button></div>
+      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Applying…&quot;,()=>adjStockForm())">Apply</button></div>
     </div>
     ${DB.priceAdjustments&&DB.priceAdjustments.length?`<hr class="divider"><div style="font-size:12px;font-weight:500;margin-bottom:8px">Recent adjustments</div>
     <table><thead><tr><th>Ticker</th><th>Change</th><th>Old price</th><th>New price</th><th>Reason</th><th>By</th><th>Time</th></tr></thead>
@@ -8076,7 +8076,7 @@ function renderAdminOfficialNotices(){
     <div class="ibox ibox-blue">Official notices appear on the market page with a formal styling, distinct from regular announcements. Use for procedural communications like session schedules or deadlines.</div>
     <div class="frow"><label class="flabel">Notice title</label><input type="text" id="notice-title" placeholder="e.g. Notice of upcoming earnings deadline"></div>
     <div class="frow"><label class="flabel">Notice body</label><textarea id="notice-body" rows="5" placeholder="To all market participants:&#10;&#10;Please be advised that..."></textarea></div>
-    <button class="btn btn-primary" onclick="postOfficialNotice(get('notice-title')?.value,get('notice-body')?.value)">Post official notice</button>
+    <button class="btn btn-primary" onclick="busy(this,&quot;Posting…&quot;,()=>postOfficialNotice(get('notice-title')?.value,get('notice-body')?.value))">Post official notice</button>
   </div>
   ${notices.length?`<div class="card"><div class="section-title">Posted notices (${notices.length})</div>
     ${notices.map(a=>`<div style="padding:12px 0;border-bottom:1px solid var(--border)">
@@ -8135,8 +8135,8 @@ function renderAdminMinutes(){
     <div class="frow"><label class="flabel">Title</label><input type="text" id="min-title" placeholder="e.g. Board meeting — March 21"></div>
     <div class="frow"><label class="flabel">Minutes</label><textarea id="min-body" rows="6" placeholder="Attendees: ...&#10;&#10;Agenda:&#10;1. ...&#10;&#10;Decisions made:&#10;..."></textarea></div>
     <div style="display:flex;gap:8px">
-      <button class="btn btn-primary" onclick="postMinutes(get('min-title')?.value,get('min-body')?.value)">Post minutes</button>
-      <button class="btn" onclick="postOfficialNotice(get('min-title')?.value,get('min-body')?.value)">Post as official notice</button>
+      <button class="btn btn-primary" onclick="busy(this,&quot;Posting…&quot;,()=>postMinutes(get('min-title')?.value,get('min-body')?.value))">Post minutes</button>
+      <button class="btn" onclick="busy(this,&quot;Posting…&quot;,()=>postOfficialNotice(get('min-title')?.value,get('min-body')?.value))">Post as official notice</button>
     </div>
   </div>
   ${DB.minutes.length?`<div class="card"><div class="section-title">Posted minutes (${DB.minutes.length})</div>
@@ -8313,8 +8313,8 @@ function renderTreasurerBudgetWarnings(){
         ${d.note?`<div class="app-meta">${esc(d.note)}</div>`:''}
       </div>
       <div class="btn-row">
-        <button class="btn btn-success btn-sm" onclick="reviewDivApproval('${d.id}',true)">Approve</button>
-        <button class="btn btn-danger btn-sm" onclick="reviewDivApproval('${d.id}',false)">Reject</button>
+        <button class="btn btn-success btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewDivApproval('${d.id}',true))">Approve</button>
+        <button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewDivApproval('${d.id}',false))">Reject</button>
       </div>
     </div>`).join(''):'<div class="empty">No pending dividend approvals</div>'}
   </div>`;
