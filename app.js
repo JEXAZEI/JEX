@@ -118,11 +118,45 @@ const sb = {
   async post(t,d){const minimal=t==='jex_users'||t==='jex_pending';const h=await this.headers({'Prefer':'return='+(minimal?'minimal':'representation')});const r=await fetchWithTimeout(this.url(t),{method:'POST',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return minimal?null:r.json();},
   async patch(t,q,d){const minimal=t==='jex_users'||t==='jex_pending';const h=await this.headers({'Prefer':'return='+(minimal?'minimal':'representation')});const r=await fetchWithTimeout(this.url(t,q),{method:'PATCH',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return minimal?null:r.json();},
   async del(t,q){const h=await this.headers();const r=await fetchWithTimeout(this.url(t,q),{method:'DELETE',headers:h});if(!r.ok)throw new Error(await r.text());},
-  async rpc(fn,params){const h=await this.headers({'Accept':'application/json'});const r=await fetchWithTimeout(SUPABASE_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:h,body:JSON.stringify(params||{})});if(!r.ok)throw new Error(await r.text());
-    // `returns void` RPCs (e.g. rpc_admin_clear_client_errors) come back as an
-    // empty 204 body -- r.json() on an empty body throws "Unexpected end of
-    // JSON input", so read as text first and only parse if there's anything there.
-    const t=await r.text();return t?JSON.parse(t):null;}
+  async rpc(fn,params){
+    // Deadlock retry, and ONLY deadlock. See retryable() above for why writes
+    // are otherwise never retried: a write whose RESPONSE was lost may well
+    // have landed, and repeating it would apply it twice.
+    //
+    // A deadlock abort is the one exception, because Postgres guarantees the
+    // losing transaction rolled back completely -- nothing was applied, so
+    // re-running it is safe. It matters here because the trade RPCs lock
+    // jex_users before jex_companies while rpc_pay_dividend and rpc_buyback
+    // lock them the other way round, so a dividend paid while someone is
+    // mid-trade on that same ticker can deadlock. Postgres picks a victim and
+    // aborts it; without this, a student sees a raw "deadlock detected" and
+    // their trade simply did not happen.
+    //
+    // The real fix is one consistent lock order server-side; this keeps a
+    // classroom moving in the meantime, and stays worth having afterwards.
+    // The randomised backoff is so the two colliding transactions do not line
+    // up and collide again on the retry.
+    const DEADLOCK=/40P01|40001|deadlock detected|could not serialize/i;
+    for(let attempt=0;;attempt++){
+      const h=await this.headers({'Accept':'application/json'});
+      const r=await fetchWithTimeout(SUPABASE_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:h,body:JSON.stringify(params||{})});
+      if(!r.ok){
+        const body=await r.text();
+        // A response we actually received and can read. A network-level
+        // rejection never reaches here -- fetchWithTimeout throws, and that
+        // propagates untouched, because an unanswered write must not repeat.
+        if(attempt<2&&DEADLOCK.test(body)){
+          await new Promise(res=>setTimeout(res,120+Math.random()*280));
+          continue;
+        }
+        throw new Error(body);
+      }
+      // `returns void` RPCs (e.g. rpc_admin_clear_client_errors) come back as an
+      // empty 204 body -- r.json() on an empty body throws "Unexpected end of
+      // JSON input", so read as text first and only parse if there's anything there.
+      const t=await r.text();return t?JSON.parse(t):null;
+    }
+  }
 };
 // Calls an RPC and swallows any failure (permission-denied for a role that
 // legitimately shouldn't have access, network hiccup, etc.) into `null`
@@ -1210,18 +1244,40 @@ async function reviewDivApproval(id,approve){
   toast(da.company_name+' paid '+fmt(da.per_share)+'/share (Treasurer-approved)');
   render();
 }
+// The whole promise of practice mode is that it can be undone. Two ordering
+// bugs used to break that promise silently, in front of a class:
+//
+//   Starting:  the session flag was flipped with whatever doSaveSnapshot()
+//              returned, INCLUDING null when the save had failed. The banner
+//              said practice mode was on, everyone traded believing it was
+//              reversible, and at the end there was nothing to restore.
+//
+//   Ending:    practice_snapshot_id was set to null BEFORE the restore ran.
+//              If the restore then failed -- RPC error, dropped connection,
+//              the tab closed between the two awaits -- the id was already
+//              gone, the automatic rollback with it, and every practice trade
+//              was permanent. The snapshot row still existed, so it was
+//              technically recoverable by hunting through the Snapshots tab
+//              for "Auto-snapshot before practice mode", but nothing said so.
+//
+// Now: refuse to start without a snapshot, and only clear the id once the
+// restore has actually succeeded.
 async function togglePracticeMode(){
   if(!isAdmin(cu()))return toast('Admin access required');
   const now=!DB.session.practice_mode;
   if(now){
     if(!confirm('Start practice mode? An automatic snapshot will be saved so the exchange can be restored exactly to this state when practice mode ends.'))return;
     const snapId=await doSaveSnapshot('Auto-snapshot before practice mode');
+    if(!snapId)return toast('Could not save the snapshot — practice mode NOT started, so nothing becomes unreversible. Try again.');
     await saveSession({practice_mode:now,practice_snapshot_id:snapId});
   } else {
     if(!confirm('End practice mode? The exchange will be automatically restored to its state from just before practice mode started, undoing all practice trades.'))return;
     const snapId=DB.session.practice_snapshot_id;
+    if(snapId){
+      const restored=await doRestoreSnapshot(snapId);
+      if(!restored)return toast('Restore failed — still in practice mode, and the snapshot is kept. Try ending practice mode again.');
+    }
     await saveSession({practice_mode:now,practice_snapshot_id:null});
-    if(snapId)await doRestoreSnapshot(snapId);
   }
   await pushNotificationToAll('session',now?'🎮 Practice mode started — trades do not count toward rankings.':'✅ Practice mode ended — real trading resumes.');
   toast(now?'Practice mode ON':'Practice mode OFF');render();
@@ -1238,12 +1294,17 @@ async function toggleDevMode(){
   if(now){
     if(!confirm('Start Dev Mode? Only Chairman/President and test accounts will be able to sign in — every other logged-in student will be signed out within seconds. An automatic snapshot will be saved so the exchange can be restored exactly to this state when Dev Mode ends.'))return;
     const snapId=await doSaveSnapshot('Auto-snapshot before dev mode');
+    // Same ordering as togglePracticeMode -- see the note above it.
+    if(!snapId)return toast('Could not save the snapshot — Dev Mode NOT started. Try again.');
     await saveSession({dev_mode:now,dev_snapshot_id:snapId});
   } else {
     if(!confirm('End Dev Mode? The exchange will be automatically restored to its state from just before Dev Mode started, undoing all testing.'))return;
     const snapId=DB.session.dev_snapshot_id;
+    if(snapId){
+      const restored=await doRestoreSnapshot(snapId);
+      if(!restored)return toast('Restore failed — still in Dev Mode, and the snapshot is kept. Try ending Dev Mode again.');
+    }
     await saveSession({dev_mode:now,dev_snapshot_id:null});
-    if(snapId)await doRestoreSnapshot(snapId);
   }
   toast(now?'Dev Mode ON':'Dev Mode OFF');render();
 }
@@ -1310,9 +1371,13 @@ async function restoreSnapshot(snapshotId){
   if(!confirm('Restore this snapshot? All current holdings, prices, and cash will be overwritten.'))return;
   await doRestoreSnapshot(snapshotId);
 }
+// Returns true only if the restore actually completed. Both the failure and
+// success paths used to return undefined, so a caller wanting to know whether
+// it was safe to discard the snapshot had no way to find out.
 async function doRestoreSnapshot(snapshotId){
-  if(!isAdmin(cu()))return toast('Admin access required');
-  const snap=DB.snapshots.find(s=>s.id===snapshotId);if(!snap)return toast('Snapshot not found');
+  if(!isAdmin(cu())){toast('Admin access required');return false;}
+  const snap=DB.snapshots.find(s=>s.id===snapshotId);
+  if(!snap){toast('Snapshot not found');return false;}
   toast('Restoring snapshot...');
   // Restoring cash/holdings/shorts/price/shares_avail runs server-side
   // (rpc_admin_restore_snapshot), reading the snapshot's data from
@@ -1325,13 +1390,14 @@ async function doRestoreSnapshot(snapshotId){
   // trade history left behind.
   let r;
   try{r=await sb.rpc('rpc_admin_restore_snapshot',{p_activity_id:snapshotId});}
-  catch(e){return toast(rpcErrorMessage(e));}
+  catch(e){toast(rpcErrorMessage(e));return false;}
   DB.limitOrders=DB.limitOrders.filter(o=>o.status!=='open'&&o.status!=='after_hours');
   DB.stopLossOrders=[];
   await logActivity('snapshot','Snapshot restored: '+snap.label,{userId:cu()?.id,userName:cu()?.name});
   await loadAll();
   const tradesMsg=r&&r.removed_trades?' ('+r.removed_trades+' trade'+(r.removed_trades!==1?'s':'')+' rolled back)':'';
   toast('✓ Snapshot restored: '+snap.label+tradesMsg);
+  return true;
 }
 function renderSnapshotTab(){
   const snaps=DB.snapshots;

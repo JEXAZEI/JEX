@@ -1304,6 +1304,126 @@ ${PRELUDE}
     return stamp;
   });
 
+  // ── Practice mode: the instructor's undo button ─────────────────────
+  // The whole promise is that practice trades can be rolled back. These
+  // drive the failure paths deliberately, because that is where the promise
+  // used to break -- silently, mid-class.
+  const yes = async fn => { const c=window.confirm; window.confirm=()=>true;
+    try{ return await fn(); } finally{ window.confirm=c; } };
+
+  await step('a practice round rolls back the trades made during it', async ()=>{
+    UI.userId='u-chair'; UI.navTab='admin'; UI.adminTab='snapshots'; UI.companyPage=null; render();
+    DB.session.status='open'; stub.data.jex_session[0].status='open';
+    const me=stub.data.jex_users.find(u=>u.id==='u-stu');
+    const cash0=me.cash, held0=(me.holdings.ACME||0);
+    const co0=stub.data.jex_companies.find(c=>c.ticker==='ACME').price;
+
+    await yes(()=>togglePracticeMode());
+    if(!DB.session.practice_mode) throw new Error('practice mode did not start');
+    if(!DB.session.practice_snapshot_id) throw new Error('no snapshot id was recorded');
+
+    // Trade during the practice round.
+    UI.userId='u-stu'; UI.navTab='market'; render();
+    await paceOrders();
+    await placeBuy('ACME', 4);
+    const mid=stub.data.jex_users.find(u=>u.id==='u-stu');
+    if((mid.holdings.ACME||0)===held0) throw new Error('the practice trade did not happen');
+
+    UI.userId='u-chair'; UI.navTab='admin'; UI.adminTab='snapshots'; render();
+    await yes(()=>togglePracticeMode());
+    if(DB.session.practice_mode) throw new Error('practice mode did not end');
+
+    const after=stub.data.jex_users.find(u=>u.id==='u-stu');
+    if(Math.abs(after.cash-cash0)>0.01) throw new Error('cash not rolled back: '+after.cash+' vs '+cash0);
+    if((after.holdings.ACME||0)!==held0) throw new Error('holdings not rolled back: '+after.holdings.ACME);
+    const coNow=stub.data.jex_companies.find(c=>c.ticker==='ACME').price;
+    if(Math.abs(coNow-co0)>0.01) throw new Error('price not rolled back: '+coNow+' vs '+co0);
+    return 'rolled back to '+cash0;
+  });
+
+  await step('a failed snapshot does NOT start practice mode', async ()=>{
+    // The old code flipped the flag with whatever came back, null included:
+    // the banner said practice mode was on, everyone traded believing it was
+    // reversible, and at the end there was nothing to restore.
+    UI.userId='u-chair'; UI.navTab='admin'; UI.adminTab='snapshots'; render();
+    stub.failSnapshotSave = true;
+    try{ await yes(()=>togglePracticeMode()); }
+    finally{ stub.failSnapshotSave = false; }
+    if(DB.session.practice_mode)
+      throw new Error('practice mode started with no snapshot -- nothing would be reversible');
+    if(DB.session.practice_snapshot_id)
+      throw new Error('a snapshot id was recorded despite the save failing');
+    return 'refused to start';
+  });
+
+  await step('a failed restore keeps practice mode ON and keeps the snapshot', async ()=>{
+    // The old code nulled practice_snapshot_id BEFORE restoring. If the
+    // restore then failed, the id was gone with it and every practice trade
+    // was permanent.
+    UI.userId='u-chair'; UI.navTab='admin'; UI.adminTab='snapshots'; render();
+    await yes(()=>togglePracticeMode());
+    if(!DB.session.practice_mode) throw new Error('could not start practice mode for this check');
+    const snapId=DB.session.practice_snapshot_id;
+    if(!snapId) throw new Error('no snapshot id to lose');
+
+    stub.failSnapshotRestore = true;
+    try{ await yes(()=>togglePracticeMode()); }
+    finally{ stub.failSnapshotRestore = false; }
+
+    if(!DB.session.practice_mode)
+      throw new Error('practice mode was turned off even though the restore failed');
+    if(DB.session.practice_snapshot_id!==snapId)
+      throw new Error('the snapshot id was discarded on a failed restore -- the rollback is now unreachable');
+
+    // And retrying once the failure clears must work.
+    await yes(()=>togglePracticeMode());
+    if(DB.session.practice_mode) throw new Error('the retry did not end practice mode');
+    return 'held the snapshot, then recovered';
+  });
+
+  await step('doRestoreSnapshot reports success and failure', async ()=>{
+    const id=stub.data.jex_snapshots[0] && stub.data.jex_snapshots[0].id;
+    if(!id) throw new Error('no snapshot to restore');
+    const okRes=await doRestoreSnapshot(id);
+    if(okRes!==true) throw new Error('a successful restore returned '+okRes);
+    stub.failSnapshotRestore = true;
+    let badRes;
+    try{ badRes=await doRestoreSnapshot(id); }
+    finally{ stub.failSnapshotRestore = false; }
+    if(badRes!==false) throw new Error('a failed restore returned '+badRes);
+    return 'true / false';
+  });
+
+  await step('a non-admin cannot restore a snapshot', async ()=>{
+    UI.userId='u-stu';
+    const id=stub.data.jex_snapshots[0].id;
+    const before=stub.rpcCalls.filter(c=>c.fn==='rpc_admin_restore_snapshot').length;
+    const res=await doRestoreSnapshot(id);
+    if(res!==false) throw new Error('a student got '+res+' from a restore');
+    if(stub.rpcCalls.filter(c=>c.fn==='rpc_admin_restore_snapshot').length!==before)
+      throw new Error('a student\u2019s restore reached the server');
+    UI.userId='u-chair';
+    return 'refused';
+  });
+
+  await step('restoring clears working orders and stop-losses', async ()=>{
+    UI.userId='u-chair'; UI.navTab='admin'; UI.adminTab='snapshots'; render();
+    const o={id:'lo-snap', user_id:'u-stu', ticker:'ACME', side:'buy', qty:1,
+      limit_price:1, status:'open', order_type:'gtc', created_at:new Date().toISOString()};
+    DB.limitOrders.push(o); stub.data.jex_limit_orders.push(o);
+    const sl={id:'sl-snap', user_id:'u-stu', ticker:'ACME', qty:1, trigger_price:1,
+      status:'active', ts:'now', created_at:new Date().toISOString()};
+    DB.stopLossOrders.push(sl); stub.data.jex_stop_loss.push(sl);
+    const id=stub.data.jex_snapshots[0].id;
+    await doRestoreSnapshot(id);
+    if(stub.data.jex_limit_orders.some(x=>x.id==='lo-snap'&&x.status==='open'))
+      throw new Error('an open order survived the restore');
+    if(stub.data.jex_stop_loss.length)
+      throw new Error('a stop-loss survived the restore');
+    UI.userId='u-stu'; UI.navTab='market'; render();
+    return 'cleared';
+  });
+
   // ── Day one: registration and login ─────────────────────────────────
   // Thirty students all signing up and signing in at once is the very first
   // thing that has to work, and none of this path had ever been executed.
