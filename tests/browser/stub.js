@@ -197,12 +197,25 @@ function pushPrice(co, price){
   co.price = price;
   co.price_history = (co.price_history||[]).concat([{p:price, t:nowIso()}]);
 }
-// Mirrors currentFundNav(): an empty fund is worth 10 a unit.
+// Mirrors currentFundNav(): cash + holdings at market + short P&L + short
+// collateral, per unit, and 10 for a fund with no units outstanding.
+//
+// All four terms matter. A short's collateral leaves the fund's cash when the
+// position opens, so it has to be added back to value the fund -- and the
+// deployed rpc_fund_deposit left it out while rpc_fund_withdraw included it,
+// which let anyone deposit at a low NAV and withdraw at a high one for
+// instant risk-free profit, paid for by the other unit-holders. There is ONE
+// definition here for the same reason the migration collapses the SQL to one:
+// three copies is how two of them drifted.
 function fundNav(f){
   const held=Object.entries(f.holdings||{}).reduce((sum,[t,q])=>{
     const c=findCo(t); return sum+(c?c.price*q:0);
   },0);
-  const total=r2(f.cash+held);
+  const shortPnl=Object.entries(f.shorts||{}).reduce((sum,[t,p])=>{
+    const c=findCo(t); return c?sum+r2(p.avgPrice-c.price)*p.qty:sum;
+  },0);
+  const collateral=Object.entries(f.shorts||{}).reduce((sum,[,p])=>sum+(p.collateral||0),0);
+  const total=r2(f.cash+held+shortPnl+collateral);
   return f.units_outstanding>0 ? Math.round((total/f.units_outstanding)*10000)/10000 : 10;
 }
 let _tradeSeq = 1000;
