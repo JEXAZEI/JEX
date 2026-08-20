@@ -695,6 +695,124 @@ ${PRELUDE}
     return 'handled';
   });
 
+  // ── The instructor's own workflow ───────────────────────────────────
+  // Opening and closing the session, and approving what students file, are
+  // the actions the teacher performs live in front of a class. If any of
+  // them throws or half-applies, the lesson stops.
+  await step('the chairman can open and close the session', async ()=>{
+    UI.userId='u-chair'; UI.navTab='admin'; UI.adminTab='session'; UI.companyPage=null; render();
+    await setSession('closed');
+    if(DB.session.status!=='closed') throw new Error('close left status '+DB.session.status);
+    render();
+    await setSession('open');
+    if(DB.session.status!=='open') throw new Error('open left status '+DB.session.status);
+    render();
+    if(!appText().trim()) throw new Error('the session panel went blank');
+    return 'closed then reopened';
+  });
+
+  await step('opening the session notifies students', ()=>{
+    // Checked on the server side of the stub, not DB.notifications: the
+    // client only merges a notification into DB when it is addressed to the
+    // signed-in user, and the chairman is signed in here. That restraint is
+    // the point -- an admin's browser must not accumulate other students'
+    // notifications.
+    const n = stub.data.jex_notifications.filter(x=>x.type==='session');
+    if(!n.length) throw new Error('no session notifications were pushed');
+    if(!n.some(x=>x.user_id==='u-stu')) throw new Error('the student got no session notification');
+    if(DB.notifications.some(x=>x.user_id && x.user_id!=='u-chair'))
+      throw new Error("the chairman's browser holds another user's notifications");
+    return n.length+' pushed, none leaked into the admin session';
+  });
+
+  await step('opening the session records the opening prices', async ()=>{
+    // setSession() fires recordSessionOpenPrices() without awaiting it, so the
+    // new prices land a moment after the call returns. That is fine in the app
+    // -- the server writes jex_session itself and is the authority for the
+    // price band -- but the check has to wait for it rather than race it.
+    for(let i=0;i<20 && (DB.session.session_open_prices||{}).ACME===12;i++) await sleep(50);
+    const p = DB.session.session_open_prices||{};
+    if(!p.ACME) throw new Error('no opening price recorded for ACME');
+    if(Math.abs(p.ACME - DB.companies.find(c=>c.ticker==='ACME').price) > 0.001)
+      throw new Error('opening price '+p.ACME+' does not match the live price');
+    return 'ACME opened at '+p.ACME;
+  });
+
+  await step('a student cannot control the session', async ()=>{
+    UI.userId='u-stu';
+    const was = DB.session.status;
+    await setSession('closed');
+    UI.userId='u-chair';
+    if(DB.session.status !== was) throw new Error('a student closed the market');
+    return 'refused';
+  });
+
+  await step('approving a registration creates the student', async ()=>{
+    UI.userId='u-chair'; UI.navTab='admin'; UI.adminTab='registrations'; render();
+    const pend = DB.pending[0];
+    if(!pend) throw new Error('nothing pending to approve');
+    const users0 = DB.users.length;
+    await approveReg(pend.id, 10000, null);
+    if(DB.users.length !== users0+1) throw new Error('no user was created');
+    if(DB.pending.some(p=>p.id===pend.id)) throw new Error('the request stayed in the queue');
+    const made = DB.users[DB.users.length-1];
+    if(made.cash !== 10000) throw new Error('starting cash '+made.cash);
+    render();
+    if(!appText().trim()) throw new Error('the registrations tab went blank afterwards');
+    return made.name+' @ '+made.cash;
+  });
+
+  await step('approving an IPO lists the company and it is tradeable', async ()=>{
+    UI.adminTab='ipo'; render();
+    const app = DB.ipoApps.find(a=>a.status==='pending');
+    if(!app) throw new Error('no pending IPO');
+    await reviewIPO(app.id, true);
+    const co = DB.companies.find(c=>c.ticker===app.ticker);
+    if(!co) throw new Error(app.ticker+' was not listed');
+    if(co.shares_avail !== app.shares) throw new Error('float '+co.shares_avail+' expected '+app.shares);
+    UI.navTab='market'; UI.companyPage=null; render();
+    if(!appText().includes(app.ticker)) throw new Error('the new ticker is not on the market page');
+    UI.navTab='admin';
+    return app.ticker+' listed with '+co.shares_avail+' shares';
+  });
+
+  await step('approving a dilution adjusts price and share count together', async ()=>{
+    UI.adminTab='dilution'; render();
+    const app = DB.dilApps.find(d=>d.status==='pending');
+    if(!app) throw new Error('no pending dilution');
+    const co = DB.companies.find(c=>c.ticker===app.ticker);
+    const shares0=co.shares, price0=co.price, cap0=shares0*price0;
+    await reviewDilution(app.id, true);
+    const c = DB.companies.find(x=>x.ticker===app.ticker);
+    if(c.shares !== shares0+app.new_shares) throw new Error('shares '+c.shares);
+    if(c.price >= price0) throw new Error('price did not adjust down: '+c.price);
+    // Issuing shares raises capital; it must not conjure or destroy market cap
+    // through the price adjustment itself.
+    const cap1=c.shares*c.price;
+    if(Math.abs(cap1-cap0) > cap0*0.01)
+      throw new Error('market cap moved from '+cap0.toFixed(2)+' to '+cap1.toFixed(2));
+    return shares0+'->'+c.shares+' shares, '+price0+'->'+c.price;
+  });
+
+  await step('a reviewed application cannot be reviewed twice', async ()=>{
+    const done = DB.dilApps.find(d=>d.status==='approved');
+    if(!done) throw new Error('no reviewed dilution to retry');
+    const co = DB.companies.find(x=>x.ticker===done.ticker);
+    const shares0 = co.shares;
+    await reviewDilution(done.id, true);
+    if(co.shares !== shares0) throw new Error('a second approval issued shares again');
+    return 'refused';
+  });
+
+  await step('the admin pages still render after all of that', ()=>{
+    UI.userId='u-chair'; UI.navTab='admin';
+    for(const at of ['dashboard','session','registrations','ipo','dilution','listed','users','activity']){
+      UI.adminTab=at; render();
+      if(!appText().trim()) throw new Error('blank admin tab '+at+' after the workflow');
+    }
+    UI.userId='u-stu'; UI.navTab='market'; UI.adminTab='dashboard'; render();
+  });
+
   await step('logout renders the login screen', ()=>{
     UI.companyPage=null; UI.navTab='market';
     logout();
