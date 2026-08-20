@@ -717,6 +717,48 @@ const RPC = {
             price_history:co.price_history, total:cost, buyback:bb,
             owner_id:owner.id, owner_cash:owner.cash};
   },
+  // ── Snapshots and practice mode ──────────────────────
+  // stub.failSnapshotSave / failSnapshotRestore let a step force the failure
+  // paths, which is the whole point: the ordering bugs only showed up when
+  // one of these did NOT succeed.
+  rpc_admin_save_snapshot: (p)=>{
+    if(window.__JEX_STUB__.failSnapshotSave) reject('Could not save snapshot');
+    const rec={id:'s-'+(_tradeSeq++), label:p.p_label,
+      created_by:(caller()||{}).name||'Admin', ts:TS, created_at:nowIso()};
+    DATA.jex_snapshots.unshift(rec);
+    // What the real one stores is a full copy of users and companies.
+    rec._data = {
+      users: DATA.jex_users.map(u=>({id:u.id, cash:u.cash,
+        holdings:Object.assign({},u.holdings), shorts:Object.assign({},u.shorts),
+        fund_units:Object.assign({},u.fund_units)})),
+      companies: DATA.jex_companies.map(c=>({ticker:c.ticker, price:c.price,
+        shares:c.shares, shares_avail:c.shares_avail})),
+      trade_high_water: DATA.jex_trades.reduce((m,t)=>Math.max(m, Number(t.id)||0), 0),
+    };
+    return rec;
+  },
+  rpc_admin_restore_snapshot: (p)=>{
+    if(window.__JEX_STUB__.failSnapshotRestore) reject('Restore failed');
+    const snap=DATA.jex_snapshots.find(x=>x.id===p.p_activity_id);
+    if(!snap||!snap._data) reject('Snapshot not found');
+    const d=snap._data;
+    d.users.forEach(su=>{
+      const u=DATA.jex_users.find(x=>x.id===su.id);
+      if(u){u.cash=su.cash; u.holdings=Object.assign({},su.holdings);
+            u.shorts=Object.assign({},su.shorts); u.fund_units=Object.assign({},su.fund_units);}
+    });
+    d.companies.forEach(sc=>{
+      const c=findCo(sc.ticker);
+      if(c){c.price=sc.price; c.shares=sc.shares; c.shares_avail=sc.shares_avail;}
+    });
+    // Roll back every trade made after the snapshot, and clear working orders
+    // -- the same transaction the real RPC does it in.
+    const before=DATA.jex_trades.length;
+    DATA.jex_trades=DATA.jex_trades.filter(t=>(Number(t.id)||0)<=d.trade_high_water);
+    DATA.jex_limit_orders.forEach(o=>{if(o.status==='open'||o.status==='after_hours')o.status='cancelled';});
+    DATA.jex_stop_loss.length=0;
+    return {restored:true, removed_trades:before-DATA.jex_trades.length};
+  },
   rpc_cast_vote: (p)=>{
     const u=caller();
     const v=DATA.jex_votes.find(x=>x.id===p.p_vote_id);

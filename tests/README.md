@@ -51,6 +51,7 @@ that would otherwise be re-broken silently by a future edit.
 | `test_leaderboard` | a frozen snapshot never resurrects a removed student |
 | `test_boot_render` | boot always reaches a rendered screen, never a permanent splash |
 | `test_realtime` | repaints carry typed input instead of being blocked; coalescing and reconnect backoff |
+| `test_deadlock_retry` | sb.rpc retries a Postgres deadlock (guaranteed rolled back) and NOTHING else — a lost response is never repeated |
 | `test_networth` | net worth is flat when a student moves their own money (buy, short, fund deposit) and moves only when the market does |
 | `test_time` | Arizona time: wall-clock vs instant, the server's `ts` display format, day rollover, no DST — every case run in four timezones |
 
