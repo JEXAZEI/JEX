@@ -73,8 +73,8 @@ restoreFormState(s2);
 check('focus returned to the field the user was in', active&&active.id==='note');
 
 console.log('\n=== wiring in app.js ===');
-check('realtime debounce uses a background render',
-  /_rtRenderTimer=setTimeout\(\(\)=>renderBackground\(\),150\)/.test(src));
+check('realtime repaints go through the coalescer',
+  /if\(!blockReason\)scheduleBackgroundRender\(\);/.test(src));
 check('autoRefresh repaints as a background render', /renderBackground\(\);\s*\n\s*\} else if\(newUnread/.test(src));
 check('autoRefresh no longer bails out before fetching',
   !/if\(userIsFillingForm\(\)\)return; \/\/ don't interrupt forms/.test(src));
@@ -112,6 +112,39 @@ check('jex_users is NOT added to the realtime subscription list',
   check('another user\'s balance is updated', out.find(u=>u.id==='them').cash===77);
   check('your own optimistic balance is not rewound', out.find(u=>u.id==='me').cash===999);
   check('a removed user drops out of DB.users', !out.some(u=>u.id==='gone'));
+})();
+
+console.log('\n=== repaint coalescing ===');
+check('a leading-edge coalescer replaced the trailing debounce',
+  /function scheduleBackgroundRender\(\)\{/.test(src)&&!/_rtRenderTimer=setTimeout/.test(src));
+check('the render log no longer keys off a never-cleared timer id',
+  !/if\(window\._rtRenderTimer\)console\.log/.test(src));
+
+// Model the coalescer and drive it with a realistic burst.
+(function(){
+  const GAP=200;
+  let last=0,pending=false,renders=0,now=0,timers=[];
+  const schedule=()=>{
+    const since=now-last;
+    if(since>=GAP){last=now;renders++;return;}
+    if(pending)return;
+    pending=true;
+    timers.push({at:now+(GAP-since),fn:()=>{pending=false;last=now;renders++;}});
+  };
+  const advance=t=>{now=t;timers=timers.filter(x=>{if(x.at<=now){x.fn();return false;}return true;});};
+  // one trade -> jex_companies at t=0, jex_trades at t=180 (the >150ms gap
+  // that used to cost a second full render)
+  advance(0);   schedule();
+  advance(180); schedule();
+  advance(400); timers=timers.filter(x=>{if(x.at<=now){x.fn();return false;}return true;});
+  check('one trade produces a single repaint, not two or three', renders<=2, 'renders='+renders);
+  check('the FIRST event repaints immediately (no 150ms wait)', last===0||renders>=1);
+})();
+(function(){
+  const GAP=200;let last=-1e9,renders=0;
+  // 20 events in a 1s storm
+  for(let t=0;t<1000;t+=50){const since=t-last;if(since>=GAP){last=t;renders++;}}
+  check('a 1s event storm collapses to ~5 repaints, not 20', renders<=6, 'renders='+renders);
 })();
 
 console.log(fails?('\n'+fails+' FAILURES'):'\nAll passed');
