@@ -2839,8 +2839,18 @@ function canManageCompany(co){
 // CO-FOUNDER SYSTEM
 // ═══════════════════════════════════════════════
 
-async function removeFounder(memberId,name){
+// The founder's NAME is deliberately not a parameter. It used to be passed
+// through the onclick attribute, and esc() -- which escapes for HTML text --
+// turned a quote in the name into &quot;, which the HTML parser then decoded
+// back to a bare " INSIDE the JS string literal. A student called
+// Quinn "Q" O'Brien produced removeFounder("cm-1","Quinn "Q" O'Brien"),
+// a syntax error, so the Remove button silently did nothing forever and the
+// company owner had no way to remove that founder. The name is already
+// reachable from the member row, so nothing needs to travel through the
+// attribute but the id.
+async function removeFounder(memberId){
   const m=DB.companyMembers.find(x=>x.id===memberId);if(!m)return;
+  const name=(getUser(m.student_id)||{}).name||'This founder';
   const targetCo=DB.companies.find(c=>c.owner_id===m.company_user_id);
   if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can remove a founder');
   if(!confirm('Remove '+name+' as a founder? They will lose access to manage this company.'))return;
@@ -5432,6 +5442,14 @@ function doRegister(){
 // ═══════════════════════════════════════════════
 // RENDER: CHROME
 // ═══════════════════════════════════════════════
+// Initials for the avatar chip. Guarded because renderTopbar() is on EVERY
+// signed-in page: if it throws, the user has no app at all and no way out of
+// it from the browser. A row whose name is null should cost them an empty
+// avatar, not the whole exchange.
+function userInitials(name){
+  return String(name==null?'':name).trim().split(/\s+/)
+    .map(x=>x[0]||'').join('').slice(0,2).toUpperCase();
+}
 function renderTopbar(){
   const u=cu();
   const unread=myUnreadCount();
@@ -5440,7 +5458,7 @@ function renderTopbar(){
     🔔${unread?`<span style="position:absolute;top:-4px;right:-4px;background:var(--red);color:white;font-size:10px;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:600">${unread}</span>`:''}
   </button>`:'';
   const rtConnected=_realtimeChannels.length>0;
-  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span><span style="font-size:10px;margin-left:8px;color:${rtConnected?'var(--green)':'var(--text3)'}" title="${rtConnected?'Real-time connected':'Polling mode'}">${rtConnected?'●':'○'}</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${esc(u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase())}</div><span>${esc(u.name)}</span>${roleBadge(u.role)}${bellBtn}<button class="logout-btn" onclick="openBugReportModal()" title="Report a bug">🐛</button><button class="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">${isLight?'🌙':'☀️'}</button><button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
+  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span><span style="font-size:10px;margin-left:8px;color:${rtConnected?'var(--green)':'var(--text3)'}" title="${rtConnected?'Real-time connected':'Polling mode'}">${rtConnected?'●':'○'}</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${esc(userInitials(u.name))}</div><span>${esc(u.name||'')}</span>${roleBadge(u.role)}${bellBtn}<button class="logout-btn" onclick="openBugReportModal()" title="Report a bug">🐛</button><button class="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">${isLight?'🌙':'☀️'}</button><button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
 }
 function toggleTheme(){
   document.body.classList.toggle('light-mode');
@@ -6796,8 +6814,8 @@ function renderFoundersTab(co,u){
     const s=getUser(m.student_id);
     html+='<div class="app-row"><div class="app-info">'
       +'<div class="app-name">'+esc((s?.name||'?'))+' <span class="badge b-blue">Founder</span></div>'
-      +'<div class="app-meta">'+(s?.email||'')+'</div></div>'
-      +'<button class="btn btn-sm btn-danger" onclick="removeFounder(&quot;'+m.id+'&quot;,&quot;'+esc((s?.name||'?'))+'&quot;)">Remove</button>'
+      +'<div class="app-meta">'+esc(s?.email||'')+'</div></div>'
+      +'<button class="btn btn-sm btn-danger" onclick="removeFounder(&quot;'+m.id+'&quot;)">Remove</button>'
       +'</div>';
   });
   pending.forEach(m=>{

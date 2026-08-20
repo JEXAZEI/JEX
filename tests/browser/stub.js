@@ -25,6 +25,11 @@ const DATA = {
      cash:9000, holdings:{BETA:5}, shorts:{}, watchlist:[], fund_units:{}, classroom_id:'c-1', created_at:now},
     {id:'u-co', name:'Acme Corp', username:'acme', role:'company', status:'approved', cash:5000,
      holdings:{}, shorts:{}, watchlist:[], fund_units:{}, description:'We make things', classroom_id:'c-1', created_at:now},
+    // A name carrying a double quote and an apostrophe. Both are legal in the
+    // registration form, and both land inside JS string literals in generated
+    // onclick attributes -- which is where quoting goes wrong silently.
+    {id:'u-quote', name:'Quinn "Q" O\'Brien', username:'quinn', role:'student', status:'approved',
+     cash:7000, holdings:{ACME:4}, shorts:{}, watchlist:[], fund_units:{}, classroom_id:'c-1', created_at:now},
     {id:'u-treas', name:'Treasurer', username:'treasurer', role:'treasurer', status:'approved',
      cash:0, holdings:{}, shorts:{}, watchlist:[], fund_units:{}, created_at:now},
     // The officer roles each get their OWN admin tab set (renderAdmin's
@@ -83,7 +88,9 @@ const DATA = {
     {id:'nw-2', user_id:'u-stu', nw:8300, cash:8100, portfolio:200, ts:TS, created_at:'2026-08-19T14:00:00Z'},
     {id:'nw-3', user_id:'u-stu', nw:8583, cash:8500, portfolio:250, ts:TS, created_at:'2026-08-20T09:00:00Z'},
   ],
-  jex_company_members:[], jex_founder_allocations:[], jex_price_adjustments:[],
+  jex_company_members:[{id:'cm-1', company_user_id:'u-co', student_id:'u-quote',
+    status:'accepted', ts:TS, created_at:now}],
+  jex_founder_allocations:[], jex_price_adjustments:[],
   jex_classrooms:[{id:'c-1', name:'Period A', ts:TS, created_at:now}],
   jex_stop_loss:[], jex_minutes:[], jex_dividend_approvals:[],
   jex_funds:[{id:'f-1', name:'Test Growth Fund', manager_id:'u-co', cash:1000, holdings:{},
@@ -286,6 +293,90 @@ window.addEventListener('unhandledrejection', e=>{
   window.__JEX_STUB__.errors.push({type:'unhandledrejection',
     message:r&&r.message?r.message:String(r), stack:r&&r.stack});
 });
+
+// ── Scenarios ──────────────────────────────────────────
+// The seeded exchange above is a mid-semester classroom. These transforms
+// produce the states that actually break render code: the empty exchange the
+// app is in on the first day of class, a closed session, a halted ticker, a
+// student who has never traded, and a company with share classes.
+const SCENARIO = (new URLSearchParams(location.search).get('scenario')) || 'default';
+window.__JEX_STUB__.scenario = SCENARIO;
+const SCENARIOS = {
+  default: function(){},
+
+  // Day one: the chairman has set up the exchange and nothing has happened
+  // yet. Every "latest", "first", "max" and "average" in a render path is
+  // reading an empty array here.
+  empty: function(){
+    DATA.jex_companies.length = 0;
+    DATA.jex_trades.length = 0;
+    DATA.jex_users = DATA.jex_users.filter(u=>u.role!=='company');
+    DATA.jex_users.forEach(u=>{u.holdings={};u.shorts={};u.watchlist=[];u.fund_units={};});
+    for(const t of ['jex_news','jex_announcements','jex_dividends','jex_buybacks','jex_votes',
+                    'jex_limit_orders','jex_ipo_applications','jex_dilution_applications',
+                    'jex_nw_history','jex_index_history','jex_funds','jex_activity',
+                    'jex_snapshots','jex_classrooms','jex_pending'])
+      DATA[t].length = 0;
+    DATA.jex_session[0].session_open_prices = {};
+    DATA.jex_session[0].status = 'closed';
+  },
+
+  // Trading closed. Buy/sell controls must render as disabled rather than
+  // throwing, and the session banner must say so.
+  closed: function(){
+    DATA.jex_session[0].status = 'closed';
+    DATA.jex_session[0].label = 'Market closed';
+  },
+
+  // A halted ticker plus a live circuit-breaker cooldown.
+  halted: function(){
+    DATA.jex_halts.push({id:'h-1', ticker:'ACME', reason:'Circuit breaker', ts:TS, created_at:now});
+    DATA.jex_session[0].circuit_cooldowns = {BETA: Date.now()+120000};
+  },
+
+  // Someone who joined today: no holdings, no shorts, no history, no trades,
+  // no net-worth snapshots. Every chart and every average has one row or none.
+  newstudent: function(){
+    const u = DATA.jex_users.find(x=>x.id==='u-stu');
+    u.holdings={}; u.shorts={}; u.watchlist=[]; u.fund_units={};
+    u.cash = 10000; u.classroom_id = null;
+    DATA.jex_trades.length = 0;
+    DATA.jex_nw_history.length = 0;
+    DATA.jex_limit_orders.length = 0;
+    DATA.jex_dividends.length = 0;
+  },
+
+  // A company that has been split into share classes, which is the one case
+  // where a ticker on screen is not a row in jex_companies by itself.
+  classes: function(){
+    DATA.jex_share_classes.push(
+      {id:'sc-1', ticker:'ACME.A', parent_ticker:'ACME', class:'A', votes_per_share:10,
+       restricted:false, whitelist:[], ts:TS, created_at:now});
+    DATA.jex_companies.push(
+      {id:'c-acme-a', ticker:'ACME.A', name:'Acme Corp Class A', price:14, shares:200,
+       shares_avail:150, status:'listed', owner_id:'u-co', description:'Voting class',
+       price_history:[{p:14,t:now}], financials:[], index_base_adjust:1, created_at:now});
+    DATA.jex_users.find(u=>u.id==='u-stu').holdings['ACME.A'] = 3;
+  },
+
+  // Values that are legal in the database but that render code tends to
+  // assume away: nulls where a string is expected, a company with no price
+  // history at all, an empty name, a zero price, a negative balance.
+  ragged: function(){
+    DATA.jex_companies.push(
+      {id:'c-null', ticker:'NUL', name:'', price:0, shares:0, shares_avail:0, status:'listed',
+       owner_id:null, description:null, price_history:null, financials:null, created_at:now});
+    DATA.jex_users.find(u=>u.id==='u-stu').cash = -25.5;
+    DATA.jex_users.push({id:'u-noname', name:null, username:null, role:'student',
+      status:'approved', cash:0, holdings:null, shorts:null, watchlist:null,
+      fund_units:null, created_at:now});
+    DATA.jex_trades.push({id:3, ticker:'NUL', qty:0, price:0, buyer_id:null, seller_id:null,
+      type:null, ts:null});
+    DATA.jex_news.push({id:'n-null', ticker:'NUL', headline:'', body:null,
+      company_name:null, ts:null, created_at:now});
+  },
+};
+(SCENARIOS[SCENARIO] || SCENARIOS.default)();
 
 // Boot straight into a signed-in student.
 try{ localStorage.setItem('jex-session-v3','u-stu'); }catch(e){}

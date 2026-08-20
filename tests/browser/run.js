@@ -26,10 +26,14 @@ if(!CHROME){console.error('No Chromium found under /opt/pw-browsers');process.ex
 
 const ROOT = path.join(__dirname, '..', '..');
 const PORT = 8731;
-const WALL_TIMEOUT_MS = 90000;
+const WALL_TIMEOUT_MS = 150000;
+// The in-page watchdog fires first, so a stall is reported with the name of
+// the step that hung rather than as a bare runner timeout.
+const DRIVER_WATCHDOG_MS = 100000;
 
-let resolveResult;
-const resultPromise = new Promise(r=>{resolveResult=r;});
+// One result slot per browser run; main() re-arms it before each scenario.
+let resolveResult = null;
+function armResult(){ return new Promise(r=>{resolveResult=r;}); }
 
 const MIME={'.html':'text/html','.js':'text/javascript','.css':'text/css','.json':'application/json'};
 const server = http.createServer((req,res)=>{
@@ -48,18 +52,200 @@ const server = http.createServer((req,res)=>{
 });
 
 // The scenario script runs INSIDE the page.
-const DRIVER = `
-(async () => {
+// Shared preamble for every driver: the step runner and DOM readers.
+const PRELUDE = `
   const out = {steps:[], errors:[], notes:[], consoleErrors:[]};
+  // Exposed so the wrapper can post partial progress if a step hangs -- a
+  // driver that stalls used to report nothing at all, which says only "it
+  // broke somewhere" and costs a bisect to turn into a location.
+  window.__OUT__ = out;
+  out.startedAt = Date.now();
   const sleep = ms => new Promise(r=>setTimeout(r,ms));
   const stub = window.__JEX_STUB__;
   const step = async (name, fn) => {
-    try { const r = await fn(); out.steps.push({name, ok:true, info:r===undefined?'':String(r)}); }
+    out.inFlight = name;
+    const t0 = Date.now();
+    try { const r = await fn(); out.steps.push({name, ok:true, info:(r===undefined?'':String(r))+' ['+(Date.now()-t0)+'ms]'}); }
     catch(e){ out.steps.push({name, ok:false, info:(e && e.message)||String(e), stack:e && e.stack}); }
+    out.inFlight = null;
   };
   const appText = () => (document.getElementById('app')||{}).textContent || '';
   const appHtml = () => (document.getElementById('app')||{}).innerHTML || '';
 
+  // ── inline-handler audit ────────────────────────────────
+  // Nearly every control in JEX is an onclick="..." string built by
+  // concatenating HTML, so a handler can be broken in two ways no unit test
+  // and no amount of reading will catch: the attribute can fail to PARSE
+  // (a name with an apostrophe closing the JS string early, a stray quote
+  // from user data), or it can call a function that no longer exists (renamed,
+  // deleted, or never defined). Both are silent -- the button just does
+  // nothing, or throws into the console, when a student presses it.
+  //
+  // This parses every handler attribute in the rendered DOM and resolves the
+  // functions it calls, without firing any of them, so it is safe to run over
+  // every page in every scenario.
+  const HANDLER_ATTRS = ['onclick','oninput','onchange','onsubmit','onkeydown','onkeyup','onblur','onfocus'];
+  const JS_BUILTINS = new Set(['if','for','while','switch','catch','return','typeof','function','new',
+    'String','Number','Boolean','Array','Object','JSON','Math','Date','parseInt','parseFloat','isNaN',
+    'alert','confirm','prompt','setTimeout','setInterval','encodeURIComponent','decodeURIComponent',
+    'Promise','RegExp','Set','Map','Error','console','window','document','event','this']);
+  // window[fn] is NOT the right test: app.js is a classic script, so its
+  // top-level const/let/function names live in the global LEXICAL environment,
+  // which inline handlers resolve against but which never appears as a window
+  // property. get -- declared as "const get=id=>document.getElementById(id)"
+  // -- is reachable from every onclick in the app and invisible on window.
+  // Evaluating "typeof <name>" in global scope consults both records.
+  const _resolved = new Map();
+  const resolvesGlobally = fn => {
+    if(_resolved.has(fn)) return _resolved.get(fn);
+    let ok = false;
+    try{ ok = new Function('return typeof '+fn)() === 'function'; }catch(e){ ok = false; }
+    _resolved.set(fn, ok);
+    return ok;
+  };
+  const HANDLER_SEL = HANDLER_ATTRS.map(a=>'['+a+']').join(',');
+  const _seenHandlers = new Set();   // the same attribute string recurs on
+                                     // every render; analyse each one once
+  const auditHandlers = (where, bad) => {
+    const root = document.getElementById('app'); if(!root) return 0;
+    let checked=0;
+    for(const el of root.querySelectorAll(HANDLER_SEL)){
+      for(const attr of HANDLER_ATTRS){
+        const code = el.getAttribute(attr);
+        if(code===null) continue;
+        const key = attr+'\\u0000'+code;
+        if(_seenHandlers.has(key)) continue;
+        _seenHandlers.add(key);
+        checked++;
+        try{ new Function('event', code); }
+        catch(e){ bad.push(where+' <'+el.tagName.toLowerCase()+' '+attr+'> DOES NOT PARSE: '+
+          ((e&&e.message)||e)+' -- '+code.slice(0,120)); continue; }
+        // Resolve every called identifier that is not a member access
+        // (x.foo()), not a local, and not a builtin.
+        const re = /(^|[^.\\w$'"])([A-Za-z_$][\\w$]*)\\s*\\(/g;
+        let m;
+        while((m = re.exec(code))){
+          const fn = m[2];
+          if(JS_BUILTINS.has(fn)) continue;
+          if(!resolvesGlobally(fn))
+            bad.push(where+' <'+el.tagName.toLowerCase()+' '+attr+'> calls missing '+fn+'() -- '+code.slice(0,120));
+        }
+      }
+    }
+    return checked;
+  };
+`;
+
+// Every page, every tab, every role -- in whatever state the scenario left the
+// exchange in. Used for the variant scenarios (empty exchange, closed session,
+// halted ticker, brand-new student, share classes, ragged nulls), where the
+// question is not "does the feature work" but "does anything throw".
+const SWEEP_DRIVER = `
+(async () => {
+${PRELUDE}
+  await sleep(1800);
+  const NAV = ['market','exchange','portfolio','orders','trades','funds','news',
+               'notifications','leaderboard','settings','mystock','admin'];
+  const PORT = ['holdings','shorts','watchlist','dividends','history','nwchart'];
+  const CPT  = ['overview','trade','news','votes','shareholders','team','financials',
+                'dividends','alerts','trades'];
+  const MST  = ['stock','founders','classes','votes','news','financials','dividends','buyback','dilution'];
+  const ADT  = ['dashboard','session','announcements','registrations','passwords','ipo','dilution',
+                'classes','founder_allocs','balances','users','listed','news','activity','flags',
+                'bug_reports','retention','snapshots','client_errors','trades','cashflow',
+                'dividends_audit','price_adj_log','budget_warnings','minutes','notices',
+                'shareholders','votes_all'];
+
+  const T0 = Date.now();
+  const el = () => (Date.now()-T0)+'ms';
+  await step('boot leaves the splash', ()=>{
+    const t = appText();
+    if(/Connecting to (JEX|exchange)/.test(t)) throw new Error('still on the splash');
+    if(!t.trim()) throw new Error('#app is empty');
+    return el()+' -- '+t.replace(/\\s+/g,' ').trim().slice(0,40);
+  });
+
+  // Each render is tried individually so one throwing page does not hide the
+  // rest -- the point of a sweep is the complete list of what breaks in this
+  // state, not the first thing that breaks.
+  let handlersChecked = 0;
+  const handlerBad = [];
+  const tryRender = (where, bad) => {
+    try{
+      render();
+      if(!document.getElementById('app').innerHTML.trim()) bad.push(where+': #app went blank');
+      handlersChecked += auditHandlers(where, handlerBad);
+    }catch(e){ bad.push(where+': '+((e&&e.message)||e)+(e&&e.stack?'  @ '+String(e.stack).split('\\n')[1].trim():'')); }
+  };
+
+  const users = DB.users.map(u=>u.id);
+  for(const uid of users){
+    const role = (DB.users.find(u=>u.id===uid)||{}).role;
+    await step('sweep every page as '+role+' ('+uid+')', ()=>{
+      UI.userId = uid; UI.companyPage=null; UI.fundPage=null;
+      const bad=[]; let n=0;
+      for(const nav of NAV){
+        UI.navTab = nav;
+        if(nav==='portfolio'){ for(const p of PORT){ UI.portfolioTab=p; tryRender(nav+'/'+p,bad); n++; } UI.portfolioTab='holdings'; }
+        else if(nav==='admin'){ for(const a of ADT){ UI.adminTab=a; tryRender(nav+'/'+a,bad); n++; } UI.adminTab='dashboard'; }
+        else if(nav==='mystock'){ for(const m of MST){ UI.companyTab=m; tryRender(nav+'/'+m,bad); n++; } UI.companyTab='stock'; }
+        else { tryRender(nav,bad); n++; }
+      }
+      UI.navTab='market';
+      if(bad.length) throw new Error(bad.length+'/'+n+' renders failed -- '+bad.slice(0,6).join(' | '));
+      return n+' renders, '+el();
+    });
+  }
+
+  await step('every listed ticker opens, on every tab', ()=>{
+    UI.userId = (DB.users.find(u=>u.role==='student')||DB.users[0]).id;
+    UI.navTab='market';
+    const bad=[]; let n=0;
+    for(const co of DB.companies){
+      for(const t of CPT){ UI.companyPage=co.ticker; UI.companyPageTab=t; tryRender(co.ticker+'/'+t,bad); n++; }
+    }
+    UI.companyPage=null; UI.companyPageTab='overview'; render();
+    if(bad.length) throw new Error(bad.length+'/'+n+' renders failed -- '+bad.slice(0,6).join(' | '));
+    return n+' renders across '+DB.companies.length+' tickers';
+  });
+
+  await step('every fund page opens', ()=>{
+    UI.navTab='funds';
+    for(const f of DB.funds||[]){ UI.fundPage=f.id; render(); }
+    UI.fundPage=null; render();
+    return (DB.funds||[]).length+' funds';
+  });
+
+  await step('signed-out views still render', ()=>{
+    const keep=UI.userId; UI.userId=null;
+    for(const lv of ['select','register','forgot-email','forgot-secq','forgot-newpw','recover-pw']){
+      UI.loginView=lv; render();
+      if(!appText().trim()) throw new Error('blank login view '+lv);
+    }
+    UI.loginView='select'; UI.userId=keep; render();
+  });
+
+  await step('a realtime repaint in this state does not throw', ()=>{
+    renderBackground(); renderBackground();
+  });
+
+  await step('every inline handler parses and resolves', ()=>{
+    const uniq = [...new Set(handlerBad)];
+    if(uniq.length) throw new Error(uniq.length+' broken handler(s) of '+handlersChecked+
+      ' checked -- '+uniq.slice(0,8).join('  ||  '));
+    return handlersChecked+' handlers across every page';
+  });
+
+  await sleep(300);
+  out.errors = stub.errors;
+  out.consoleErrors = stub.consoleErrors;
+  return out;
+})()
+`;
+
+const DRIVER = `
+(async () => {
+${PRELUDE}
   await sleep(2200);   // boot + the stub's realtime events at t=900ms
 
   await step('boot leaves the splash', ()=>{
@@ -329,73 +515,130 @@ const DRIVER = `
 
 (async function main(){
   await new Promise(r=>server.listen(PORT, r));
-  const userDir = fs.mkdtempSync('/tmp/jex-chrome-');
-
   const harness = fs.readFileSync(path.join(__dirname,'harness.html'),'utf8');
-  const driven = harness.replace('</body>', `<script>
-(async()=>{
-  let res;
-  try{ res = await (${DRIVER}); }
-  catch(e){ res = {steps:[{name:'DRIVER CRASHED', ok:false, info:(e&&e.message)||String(e), stack:e&&e.stack}],
-                   errors:(window.__JEX_STUB__||{}).errors||[], notes:[],
-                   consoleErrors:(window.__JEX_STUB__||{}).consoleErrors||[]}; }
-  // XHR, not fetch: the stub owns window.fetch and the app owns everything else.
-  const x = new XMLHttpRequest();
-  x.open('POST','/__result',true);
-  x.setRequestHeader('Content-Type','text/plain');
-  x.send(JSON.stringify(res));
-})();
-</script></body>`);
-  fs.writeFileSync(path.join(__dirname,'_driven.html'), driven);
+  const keep = process.argv.includes('--keep');
+  const only = (process.argv.find(a=>a.startsWith('--only='))||'').split('=')[1];
 
-  const chrome = spawn(CHROME, ['--headless','--disable-gpu','--no-sandbox','--disable-dev-shm-usage',
-    '--user-data-dir='+userDir, '--no-first-run', '--disable-extensions',
-    `http://127.0.0.1:${PORT}/tests/browser/_driven.html`],
-    {stdio:['ignore','ignore','pipe']});
-  let stderr='';
-  chrome.stderr.on('data',d=>{stderr+=d;});
+  // The full driver exercises the mid-semester exchange end to end. The
+  // variants re-run a whole-app sweep against a deliberately awkward state --
+  // the empty exchange the app is actually in on day one, a closed session, a
+  // halted ticker, a student who has never traded, a company split into share
+  // classes, and rows carrying the nulls the schema permits.
+  const SCENARIOS = [
+    {name:'default',    driver:DRIVER,       args:[]},
+    // The same populated exchange, swept: this is where the inline-handler
+    // audit has the most to look at, because the rich pages are the ones that
+    // build onclick strings out of ids, tickers and student names.
+    {name:'default',    driver:SWEEP_DRIVER, args:[], label:'default-sweep'},
+    {name:'empty',      driver:SWEEP_DRIVER, args:[]},
+    {name:'closed',     driver:SWEEP_DRIVER, args:[]},
+    {name:'halted',     driver:SWEEP_DRIVER, args:[]},
+    {name:'newstudent', driver:SWEEP_DRIVER, args:[]},
+    {name:'classes',    driver:SWEEP_DRIVER, args:[]},
+    {name:'ragged',     driver:SWEEP_DRIVER, args:[]},
+    // Same seeded exchange, phone-sized viewport: renders the mobile bottom
+    // nav branch (_isMobileStudent, window.innerWidth<=640) that the desktop
+    // runs never touch.
+    {name:'default',    driver:DRIVER,       args:['--window-size=380,780'], label:'mobile'},
+  ].filter(sc => !only || (sc.label||sc.name)===only);
 
-  const timeout = new Promise(r=>setTimeout(()=>r(null), WALL_TIMEOUT_MS));
-  const raw = await Promise.race([resultPromise, timeout]);
+  let totalFailed=0, totalSteps=0, failedScenarios=[];
+  for(const sc of SCENARIOS){
+    const label = sc.label || sc.name;
+    console.log('\n\u001b[1m### scenario: '+label+'\u001b[0m');
+    const file = '_driven_'+label+'.html';
+    // A replacer FUNCTION, never a replacement string: String.replace expands
+    // $&, $', $` and $n inside a string replacement, and the driver contains
+    // the character class [^.\\w$'"] -- whose $' spliced the rest of the
+    // document into the middle of a regex literal, so the injected script
+    // failed to PARSE and the page did nothing at all. No steps, no watchdog,
+    // no error: just a runner timeout with no information in it.
+    const driven = harness.replace('</body>', () => '<script>\n' +
+      'function __post(res){\n' +
+      '  // XHR, not fetch: the stub owns window.fetch and the app owns everything else.\n' +
+      '  const x = new XMLHttpRequest();\n' +
+      '  x.open("POST","/__result",true);\n' +
+      '  x.setRequestHeader("Content-Type","text/plain");\n' +
+      '  x.send(JSON.stringify(res));\n}\n' +
+      '(async()=>{\n' +
+      '  let done=false;\n' +
+      '  // Watchdog: if a step hangs, post what has run so far plus the name of\n' +
+      '  // the step still in flight, instead of leaving the runner with nothing.\n' +
+      '  setTimeout(()=>{ if(done) return;\n' +
+      '    const o = window.__OUT__ || {steps:[],errors:[],notes:[]};\n' +
+      '    o.stalled = o.inFlight || "(before the first step)";\n' +
+      '    o.errors = (window.__JEX_STUB__||{}).errors||[];\n' +
+      '    o.consoleErrors = (window.__JEX_STUB__||{}).consoleErrors||[];\n' +
+      '    __post(o); }, ' + DRIVER_WATCHDOG_MS + ');\n' +
+      '  let res;\n' +
+      '  try{ res = await (' + sc.driver + '); }\n' +
+      '  catch(e){ res = window.__OUT__ || {steps:[], errors:[], notes:[]};\n' +
+      '           res.steps.push({name:"DRIVER CRASHED", ok:false, info:(e&&e.message)||String(e), stack:e&&e.stack});\n' +
+      '           res.errors=(window.__JEX_STUB__||{}).errors||[];\n' +
+      '           res.consoleErrors=(window.__JEX_STUB__||{}).consoleErrors||[]; }\n' +
+      '  done=true;\n' +
+      '  __post(res);\n})();\n</script></body>');
+    fs.writeFileSync(path.join(__dirname,file), driven);
 
-  try{ chrome.kill('SIGKILL'); }catch(e){}
-  server.close();
-  if(!process.argv.includes('--keep')){
-    try{fs.unlinkSync(path.join(__dirname,'_driven.html'));}catch(e){}
-  }
-  try{fs.rmSync(userDir,{recursive:true,force:true});}catch(e){}
+    const userDir = fs.mkdtempSync('/tmp/jex-chrome-');
+    const got = armResult();
+    const chrome = spawn(CHROME, ['--headless','--disable-gpu','--no-sandbox','--disable-dev-shm-usage',
+      '--user-data-dir='+userDir, '--no-first-run', '--disable-extensions'].concat(sc.args).concat([
+      'http://127.0.0.1:'+PORT+'/tests/browser/'+file+'?scenario='+sc.name]),
+      {stdio:['ignore','ignore','pipe']});
+    let stderr=''; chrome.stderr.on('data',d=>{stderr+=d;});
 
-  if(raw===null){
-    console.error('The driver never posted a result within '+(WALL_TIMEOUT_MS/1000)+'s.');
-    const interesting = stderr.split('\n').filter(l=>l && !/dbus|DEPRECATED|Fontconfig|GLES|vulkan|sandbox/i.test(l));
-    if(interesting.length) console.error('Chromium stderr:\n'+interesting.slice(0,25).join('\n'));
-    process.exit(1);
-  }
+    let timer;
+    const raw = await Promise.race([got, new Promise(r=>{timer=setTimeout(()=>r(null), WALL_TIMEOUT_MS);})]);
+    clearTimeout(timer);
+    try{ chrome.kill('SIGKILL'); }catch(e){}
+    try{fs.rmSync(userDir,{recursive:true,force:true});}catch(e){}
+    if(!keep){ try{fs.unlinkSync(path.join(__dirname,file));}catch(e){} }
 
-  const res = JSON.parse(raw);
-  let failed=0;
-  for(const s of res.steps){
-    if(s.ok){ console.log('  ok    '+s.name+(s.info?'   ('+s.info+')':'')); }
-    else { failed++; console.log('  FAIL  '+s.name+'   '+(s.info||''));
-           if(s.stack)console.log('        '+String(s.stack).split('\n').slice(0,3).join('\n        ')); }
-  }
-  for(const n of res.notes||[]) console.log('  note  '+n);
-
-  if((res.errors||[]).length){
-    console.log('\nUncaught errors / unhandled rejections in the page:');
-    for(const e of res.errors){
-      failed++;
-      console.log('  ['+e.type+'] '+e.message+(e.source?'  @ '+e.source:''));
-      if(e.stack)console.log('      '+String(e.stack).split('\n').slice(0,4).join('\n      '));
+    if(raw===null){
+      console.error('  the driver never posted a result within '+(WALL_TIMEOUT_MS/1000)+'s.');
+      const interesting = stderr.split('\n').filter(l=>l && !/dbus|DEPRECATED|Fontconfig|GLES|vulkan|sandbox/i.test(l));
+      if(interesting.length) console.error('  chromium stderr:\n  '+interesting.slice(0,15).join('\n  '));
+      totalFailed++; failedScenarios.push(label);
+      continue;
     }
-  } else console.log('\nNo uncaught errors or unhandled rejections.');
 
-  const ce = (res.consoleErrors||[]).filter(m=>!/Failed to load resource|net::ERR/.test(m));
-  if(ce.length){
-    console.log('\nconsole.error() output (not necessarily fatal):');
-    for(const m of ce.slice(0,30)) console.log('  '+m.slice(0,200));
+    const res = JSON.parse(raw);
+    let failed=0;
+    if(res.stalled){
+      failed++;
+      console.log('  STALLED in step: '+res.stalled+'  (after '+res.steps.length+' completed steps)');
+    }
+    for(const s2 of res.steps){
+      if(s2.ok){ console.log('  ok    '+s2.name+(s2.info?'   ('+s2.info+')':'')); }
+      else { failed++; console.log('  FAIL  '+s2.name+'   '+(s2.info||''));
+             if(s2.stack)console.log('        '+String(s2.stack).split('\n').slice(0,3).join('\n        ')); }
+    }
+    for(const n of res.notes||[]) console.log('  note  '+n);
+
+    if((res.errors||[]).length){
+      console.log('  -- uncaught errors / unhandled rejections in the page:');
+      for(const e of res.errors){
+        failed++;
+        console.log('  ERROR ['+e.type+'] '+e.message+(e.source?'  @ '+e.source:''));
+        if(e.stack)console.log('        '+String(e.stack).split('\n').slice(0,4).join('\n        '));
+      }
+    }
+    const ce = (res.consoleErrors||[]).filter(m=>!/Failed to load resource|net::ERR/.test(m));
+    if(ce.length){
+      console.log('  -- console.error() output (not necessarily fatal):');
+      for(const m of ce.slice(0,20)) console.log('        '+m.slice(0,200));
+    }
+
+    totalSteps += res.steps.length;
+    totalFailed += failed;
+    if(failed) failedScenarios.push(label);
+    console.log('  '+(res.steps.length-res.steps.filter(x=>!x.ok).length)+'/'+res.steps.length+' steps passed');
   }
 
-  console.log('\n'+(res.steps.length-res.steps.filter(s=>!s.ok).length)+'/'+res.steps.length+' steps passed');
-  process.exit(failed?1:0);
+  server.close();
+  console.log('\n'+(failedScenarios.length
+    ? failedScenarios.length+' scenario(s) failed: '+[...new Set(failedScenarios)].join(', ')
+    : 'all scenarios green')+'  ('+totalSteps+' steps total)');
+  process.exit(totalFailed?1:0);
 })();

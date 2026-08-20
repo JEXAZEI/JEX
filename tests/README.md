@@ -1,13 +1,21 @@
 # JEX regression tests
 
+There are two harnesses. Run both.
+
 ```
-node tests/run.js            # everything
-node tests/run.js beta pnl   # only suites whose filename matches
-node tests/test_beta.js      # a single suite directly
+node tests/run.js                      # the Node suites (fast, no browser)
+node tests/run.js beta pnl             # only suites whose filename matches
+node tests/test_beta.js                # a single suite directly
+
+node tests/browser/run.js              # the real page in headless Chromium
+node tests/browser/run.js --only=empty # one scenario
+node tests/browser/run.js --keep       # leave the generated page for inspection
 ```
 
-Pure Node. No browser, no network, no database, no dependencies — so it
-runs anywhere `node` does, including a fresh clone.
+The Node suites are pure Node — no browser, no network, no database, no
+dependencies — so they run anywhere `node` does, including a fresh clone.
+The browser harness needs Chromium under `/opt/pw-browsers` and takes about
+two minutes for all nine scenarios.
 
 ## How they work
 
@@ -38,6 +46,45 @@ that would otherwise be re-broken silently by a future edit.
 | `test_overfetch` | split boot queries are true partitions — no row in both halves, none in neither |
 | `test_async_forms` | `busy()` double-submit guard, and draft save/restore/expiry |
 | `test_busy_wiring` | every wrapped `onclick` parses as JS and calls a promise-returning handler |
+| `test_xss` | user text escaped at every render site, and no free text passed through an inline handler |
+| `test_404` | the 404 page is self-contained (it is served for any depth, so relative asset paths would break) |
+| `test_leaderboard` | a frozen snapshot never resurrects a removed student |
+| `test_boot_render` | boot always reaches a rendered screen, never a permanent splash |
+| `test_realtime` | repaints carry typed input instead of being blocked; coalescing and reconnect backoff |
+
+## The browser harness (`tests/browser/`)
+
+`stub.js` fakes Supabase — it intercepts `window.fetch` for PostgREST and
+RPCs, replaces `WebSocket` with one that pushes real `postgres_changes`
+frames, and supplies `Chart` and `emailjs` locally (the CDN copies cannot
+load in a sandbox, and a hanging script tag means the load event never
+fires). `harness.html` is `index.html` with those script tags removed and the
+stub injected. `run.js` serves the tree, launches headless Chromium once per
+scenario, and reads the result back over an XHR POST.
+
+Scenarios, each a transform of the seeded exchange:
+
+| scenario | state |
+|---|---|
+| `default` | a mid-semester classroom, driven end to end: every page, every admin tab as the role that owns it, XSS payloads, realtime events, drafts, `busy()`, a real market buy |
+| `default-sweep` | the same exchange, swept for render failures and audited handler by handler |
+| `empty` | day one: no companies, no trades, no history, session closed |
+| `closed` | trading closed |
+| `halted` | a halted ticker and a live circuit-breaker cooldown |
+| `newstudent` | someone who joined today — no holdings, no history, no snapshots |
+| `classes` | a company split into share classes |
+| `ragged` | schema-legal nulls, an empty name, a zero price, a negative balance |
+| `mobile` | the default run at a phone-sized viewport (the bottom-nav branch) |
+
+Two checks in the sweep are worth calling out because they find things
+reading cannot. Every page is rendered for every seeded user and every tab,
+individually, so one throwing page does not hide the rest. And every inline
+handler in the rendered DOM is parsed with `new Function` and its called
+identifiers resolved — which catches both a handler broken by quoting in
+user data and one calling a function that no longer exists. Resolution uses
+`typeof <name>` evaluated in global scope, not `window[name]`: `app.js` is a
+classic script, so its top-level `const`/`let` names (`get`, `esc`, …) are
+reachable from handlers but never appear as window properties.
 
 ## What these do NOT cover
 
@@ -48,9 +95,13 @@ Worth being blunt about, because the gaps are where bugs will come from:
   definitions, but its behaviour in production is unverified by this suite.
   Anything involving money — trades, dividends, fund withdrawals — is only
   half-covered: the client half.
-- **No real DOM.** Rendering, layout, event wiring and anything visual is
-  mocked or asserted against source text, not exercised in a browser.
-- **No real network, auth, or realtime.** Supabase calls are stubbed.
+- **Nothing visual.** The browser harness proves pages render, handlers
+  resolve and state flows correctly. It cannot tell you the layout is right,
+  the colours are legible, or a button is reachable on a real phone.
+- **No real network or auth.** Supabase calls are stubbed in both harnesses;
+  the Google OAuth round trip in particular is never exercised.
+- **Charts are stubbed.** `Chart` records the config it was handed; nothing
+  is actually plotted, so a wrong axis or scale would not be caught.
 - **No multi-client behaviour.** Races between two browsers are modelled
   arithmetically (see `test_dividend_race`), not actually raced.
 
