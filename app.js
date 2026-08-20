@@ -743,7 +743,16 @@ function computeIndex(classroomId){
     &&(classroomId==null||getUser(c.owner_id)?.classroom_id===classroomId));
   if(!listed.length)return{value:1000,change:0,constituents:[]};
   const constituents=listed.map(c=>{
-    const base=(c.price_history&&c.price_history[0]&&c.price_history[0].p)||c.price;
+    // Base is the IPO price scaled by index_base_adjust, the standard
+    // corporate-action adjustment. A dilution changes the price without
+    // changing what the company is worth, so without this the index fell
+    // on a dilution that destroyed nothing -- a 2:1 dilution took a
+    // 3-company classroom index down 16.67%, costing real money to anyone
+    // holding tradeable index units. index_live_value() applies the same
+    // scaling server-side; the two must stay in step or the price quoted
+    // and the price charged come from different baskets.
+    const rawBase=(c.price_history&&c.price_history[0]&&c.price_history[0].p)||c.price;
+    const base=rawBase*(c.index_base_adjust??1);
     const ratio=base>0?c.price/base:1;
     return{ticker:c.ticker,name:c.name,price:c.price,ratio};
   });
