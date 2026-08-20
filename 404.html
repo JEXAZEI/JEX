@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230f1117'/><text x='16' y='23' font-family='monospace' font-size='20' font-weight='700' fill='%23f0a500' text-anchor='middle'>J</text></svg>">
+<title>Page not found — JEX</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!--
+  Deliberately self-contained: no app.css, no app.js, no Supabase.
+
+  GitHub Pages serves this file for ANY unmatched path, so the browser's
+  URL can be several levels deep (/JEX/foo/bar/baz). A relative
+  <link href="app.css"> would then resolve to /JEX/foo/bar/app.css and 404
+  as well, leaving an unstyled error page. Inlining the (small) subset of
+  the palette this page needs makes it render correctly at any depth, and
+  means a broken link never depends on the app booting successfully.
+
+  The tokens below are copied from app.css :root / body.light-mode. They
+  are duplicated on purpose -- keep them in sync if the palette changes.
+-->
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0f1117;--bg2:#161b27;--bg3:#1c2333;--border:#1e2d47;--border2:#253450;
+  --text:#e8e6e1;--text2:#8896a8;--text3:#4a5568;
+  --amber:#f0a500;--blue:#378ADD;--blue2:#185FA5;
+  --radius:8px;--radius-lg:12px;
+  --font:'DM Sans',system-ui,-apple-system,sans-serif;--mono:'IBM Plex Mono',ui-monospace,monospace;
+}
+body.light-mode{
+  --bg:#f4f6fa;--bg2:#ffffff;--bg3:#eef1f7;--border:#d1d9e6;--border2:#bcc8db;
+  --text:#1a2233;--text2:#4a5a72;--text3:#8896a8;
+}
+body{font-family:var(--font);font-size:14px;color:var(--text);background:var(--bg);
+  min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.wrap{width:100%;max-width:460px}
+.logo{font-family:var(--mono);font-size:16px;font-weight:500;display:flex;align-items:center;
+  gap:10px;justify-content:center;margin-bottom:20px}
+.logo .jex{color:var(--amber)}
+.logo .sep{width:1px;height:16px;background:var(--border)}
+.logo .full{font-family:var(--font);font-size:12px;font-weight:300;color:var(--text2)}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);
+  padding:28px 24px;text-align:center}
+.code{font-family:var(--mono);font-size:44px;font-weight:500;color:var(--amber);line-height:1}
+h1{font-size:17px;font-weight:500;margin:14px 0 6px}
+p{font-size:13px;color:var(--text2);line-height:1.55}
+.path{font-family:var(--mono);font-size:12px;color:var(--text3);background:var(--bg3);
+  border:1px solid var(--border);border-radius:var(--radius);padding:7px 10px;margin:16px 0 4px;
+  word-break:break-all;text-align:left}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:20px}
+.btn{padding:7px 16px;border-radius:var(--radius);font-size:13px;font-weight:500;cursor:pointer;
+  border:1px solid var(--border2);background:transparent;color:var(--text);
+  font-family:var(--font);text-decoration:none;display:inline-block;transition:background 0.15s}
+.btn:hover{background:var(--bg3)}
+.btn-primary{background:var(--blue);color:#fff;border-color:var(--blue)}
+.btn-primary:hover{background:var(--blue2)}
+.foot{font-size:11px;color:var(--text3);margin-top:18px;text-align:center;line-height:1.6}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span></div>
+  <div class="card">
+    <div class="code">404</div>
+    <h1>This page doesn't exist</h1>
+    <p>The address you followed isn't part of JEX. It may have been mistyped, or a link may be out of date.</p>
+    <div class="path" id="path"></div>
+    <div class="btn-row">
+      <a class="btn btn-primary" href="/JEX/index.html" id="go-market">Go to Market</a>
+      <a class="btn" href="/JEX/portfolio.html" id="go-portfolio">My portfolio</a>
+    </div>
+  </div>
+  <div class="foot">If you reached this from a link inside JEX, please report it<br>with the 🐛 button once you're signed back in.</div>
+</div>
+<script>
+(function(){
+  // Match the theme the user picked in the app (app.js writes this key).
+  try{if(localStorage.getItem('jex-theme')==='light')document.body.classList.add('light-mode');}catch(e){}
+
+  // Show what was actually requested, so a mistyped address is obvious and
+  // a genuinely broken internal link is reportable.
+  try{
+    var el=document.getElementById('path');
+    if(el)el.textContent=location.pathname+(location.search||'');
+  }catch(e){}
+
+  // The hrefs above are hard-coded to the current project-page root so they
+  // still work with JavaScript disabled. If the site is ever served from a
+  // different root (a custom domain, or the repo renamed), rewrite them
+  // from the actual path rather than sending people to a second 404.
+  try{
+    var seg=location.pathname.split('/').filter(Boolean);
+    var root=(seg.length&&seg[0].toLowerCase()==='jex')?'/'+seg[0]+'/':'/';
+    var m=document.getElementById('go-market'),p=document.getElementById('go-portfolio');
+    if(m)m.setAttribute('href',root+'index.html');
+    if(p)p.setAttribute('href',root+'portfolio.html');
+  }catch(e){}
+})();
+</script>
+</body>
+</html>
