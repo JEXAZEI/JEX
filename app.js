@@ -1210,7 +1210,7 @@ function renderSnapshotTab(){
     <div class="ibox ibox-blue">Saves current prices, holdings, and cash for all users. Restore any snapshot to roll back the exchange state — useful for practice rounds.</div>
     <div class="row" style="align-items:flex-end">
       <div class="frow" style="flex:1"><label class="flabel">Snapshot name</label><input type="text" id="snap-label" placeholder="e.g. Practice round 1 — end of day"></div>
-      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="saveSnapshot(get('snap-label')?.value)">💾 Save snapshot</button></div>
+      <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Saving…&quot;,()=>saveSnapshot(get('snap-label')?.value))">💾 Save snapshot</button></div>
     </div>
   </div>
   ${snaps.length?`<div class="card"><div class="section-title">Saved snapshots (${snaps.length})</div>
@@ -1570,6 +1570,62 @@ let _lastRefresh=0;
 // conditions is silently true for as long as someone's, say, sitting on
 // their own "My Stock" page is otherwise indistinguishable from render()
 // itself being broken.
+// ── Async feedback ──────────────────────────────────────
+// Wraps a submit action so its own button shows progress and cannot be
+// fired twice. Only two handlers in the whole app disabled their button,
+// so every other slow submit looked like nothing had happened and invited
+// a second click. Deliberately NOT done by de-duplicating at the sb.rpc
+// layer: sharing one in-flight promise between two callers would run each
+// caller's success path twice, and applyTradeResult would then push the
+// same trade into DB.trades and to Google Sheets twice over.
+// Restores the button on the failure path too, via finally -- otherwise a
+// rejected submit leaves the form permanently dead.
+async function busy(el,label,fn){
+  const btn=typeof el==='string'?get(el):el;
+  if(btn&&btn.dataset.jexBusy==='1')return;
+  const orig=btn?btn.textContent:null;
+  if(btn){btn.dataset.jexBusy='1';btn.disabled=true;btn.textContent=label||'Working…';}
+  try{return await fn();}
+  finally{if(btn){delete btn.dataset.jexBusy;btn.disabled=false;if(orig!==null)btn.textContent=orig;}}
+}
+
+// ── Draft persistence ───────────────────────────────────
+// Every textarea in JEX is free-form prose someone typed (IPO pitch,
+// dilution reason, bug report, meeting minutes) -- the kind of thing that
+// hurts to lose to a reload, a crashed tab, or a closed laptop. Inputs are
+// deliberately excluded: those are tickers, prices and quantities, cheap
+// to retype and often pre-filled with defaults a stale draft would fight.
+const DRAFT_PREFIX='jex-draft-';
+const DRAFT_MAX_AGE=24*60*60*1000;
+const _draftsRestored=new Set();
+function saveDraft(id,value){
+  try{
+    if(!value||!value.trim())localStorage.removeItem(DRAFT_PREFIX+id);
+    else localStorage.setItem(DRAFT_PREFIX+id,JSON.stringify({v:value,at:Date.now()}));
+  }catch(e){}
+}
+function clearDraft(id){try{localStorage.removeItem(DRAFT_PREFIX+id);}catch(e){}}
+// Called after every render. A field is restored AT MOST ONCE per session:
+// once it has been restored, a later render finding it empty means the
+// submit succeeded (or the user cleared it deliberately), so the stored
+// draft is dropped rather than resurrected on the next page load.
+function restoreDrafts(){
+  document.querySelectorAll('textarea[id]').forEach(t=>{
+    if(_draftsRestored.has(t.id)){if(!t.value)clearDraft(t.id);return;}
+    if(t.value)return; // rendered with real content -- never overwrite it
+    let d;try{d=JSON.parse(localStorage.getItem(DRAFT_PREFIX+t.id)||'null');}catch(e){return;}
+    if(!d||!d.v)return;
+    if(Date.now()-(d.at||0)>DRAFT_MAX_AGE){clearDraft(t.id);return;}
+    t.value=d.v;_draftsRestored.add(t.id);
+  });
+}
+// One delegated listener rather than per-field wiring, so it keeps working
+// across the innerHTML rebuilds render() does.
+document.addEventListener('input',e=>{
+  const t=e.target;
+  if(t&&t.tagName==='TEXTAREA'&&t.id){saveDraft(t.id,t.value);_draftsRestored.add(t.id);}
+});
+
 function userIsFillingForm(){
   const active=document.activeElement;
   if(active&&['INPUT','TEXTAREA','SELECT'].includes(active.tagName))return 'an input is currently focused ('+active.id+')';
@@ -4046,7 +4102,9 @@ async function refreshDividendPayoutBalances(payouts){
   }catch(e){}
 }
 function submitIPOForm(){
-  submitIPO(get('ipo-name')?.value,get('ipo-ticker')?.value,get('ipo-price')?.value,get('ipo-shares')?.value,get('ipo-desc')?.value);
+  // Returned, not fired-and-forgotten: busy() awaits this to know when to
+  // re-enable the button, and without the return it re-enables instantly.
+  return submitIPO(get('ipo-name')?.value,get('ipo-ticker')?.value,get('ipo-price')?.value,get('ipo-shares')?.value,get('ipo-desc')?.value);
 }
 async function submitIPO(name,ticker,price,shares,desc){
   if(!name||!ticker||!price||!shares)return toast('Fill in all fields');
@@ -6397,7 +6455,7 @@ async function reapply(){
 function renderAppForm(app){
   if(app&&app.status==='pending')return`<div class="card"><div class="empty">Application under review.</div></div>`;
   if(app&&app.status==='approved')return`<div class="card"><div class="empty">Your company is already listed!</div></div>`;
-  return`<div class="card"><div class="section-title">IPO application${infoBubble('IPO stands for Initial Public Offering — the first time a company sells shares to the public. Once approved, your stock gets listed on the market and anyone can buy or sell shares of it.')}</div><div class="row"><div class="frow" style="flex:1"><label class="flabel">Company name</label><input type="text" id="ipo-name" placeholder="Acme Corp"></div><div class="frow" style="flex:1"><label class="flabel">Ticker (3-4 letters)</label><input type="text" id="ipo-ticker" placeholder="ACM" maxlength="4" style="text-transform:uppercase"></div></div><div class="row"><div class="frow" style="flex:1"><label class="flabel">IPO price ($)</label><input type="number" id="ipo-price" placeholder="25.00" min="0.01" step="0.01"></div><div class="frow" style="flex:1"><label class="flabel">Total shares</label><input type="number" id="ipo-shares" placeholder="1000" min="1"></div></div><div class="frow"><label class="flabel">Description</label><textarea id="ipo-desc" rows="2" placeholder="Describe your business..."></textarea></div><button class="btn btn-primary" onclick="submitIPOForm()">Submit</button></div>`;
+  return`<div class="card"><div class="section-title">IPO application${infoBubble('IPO stands for Initial Public Offering — the first time a company sells shares to the public. Once approved, your stock gets listed on the market and anyone can buy or sell shares of it.')}</div><div class="row"><div class="frow" style="flex:1"><label class="flabel">Company name</label><input type="text" id="ipo-name" placeholder="Acme Corp"></div><div class="frow" style="flex:1"><label class="flabel">Ticker (3-4 letters)</label><input type="text" id="ipo-ticker" placeholder="ACM" maxlength="4" style="text-transform:uppercase"></div></div><div class="row"><div class="frow" style="flex:1"><label class="flabel">IPO price ($)</label><input type="number" id="ipo-price" placeholder="25.00" min="0.01" step="0.01"></div><div class="frow" style="flex:1"><label class="flabel">Total shares</label><input type="number" id="ipo-shares" placeholder="1000" min="1"></div></div><div class="frow"><label class="flabel">Description</label><textarea id="ipo-desc" rows="2" placeholder="Describe your business..."></textarea></div><button class="btn btn-primary" onclick="busy(this,&quot;Submitting…&quot;,submitIPOForm)">Submit</button></div>`;
 }
 function renderMyStock(){
   const u=cu();
@@ -6468,7 +6526,7 @@ function convertBaseClassForm(parentTicker){
   const whitelistEl=document.getElementById('conv-whitelist');
   const whitelist=restricted&&whitelistEl?Array.from(whitelistEl.selectedOptions).map(o=>o.value):[];
   const reason=document.getElementById('conv-reason')?.value;
-  convertBaseClass(parentTicker,classType,votes,restricted,whitelist,reason);
+  return convertBaseClass(parentTicker,classType,votes,restricted,whitelist,reason); // returned for busy()
 }
 
 function renderStockOverview(co,u){
@@ -6693,7 +6751,7 @@ function renderClassesTab(co){
       +'<div id="conv-whitelist-wrap" style="display:none"><div class="frow"><label class="flabel">Select allowed students</label>'
       +'<select id="conv-whitelist" multiple style="height:90px">'+studentOptions+'</select></div></div>'
       +'<div class="frow"><label class="flabel">Reason</label><textarea id="conv-reason" rows="2" placeholder="e.g. Converting to Class B for founder control..."></textarea></div>'
-      +'<button class="btn btn-warning" onclick="convertBaseClassForm(&quot;'+co.ticker+'&quot;)">Submit conversion request</button>'
+      +'<button class="btn btn-warning" onclick="busy(this,&quot;Submitting…&quot;,()=>convertBaseClassForm(&quot;'+co.ticker+'&quot;))">Submit conversion request</button>'
       +'</div>';
   } else if(basePendingConversion){
     html+='<div class="ibox ibox-amber">A conversion request for <strong>'+co.ticker+'</strong> is pending Chairman approval.</div>';
@@ -6912,7 +6970,7 @@ function renderDilTab(co){
         +'<div class="frow"><label class="flabel">New shares to issue</label><input type="number" id="dil-shares-'+ticker+'" placeholder="200" min="1" oninput="updateDilPrevFor(&quot;'+ticker+'&quot;)"></div>'
         +'<div id="dil-prev-'+ticker+'"></div>'
         +'<div class="frow" style="margin-top:10px"><label class="flabel">Reason</label><textarea id="dil-reason-'+ticker+'" rows="2" placeholder="e.g. Raising capital for expansion..."></textarea></div>'
-        +'<button class="btn btn-warning" onclick="submitDilutionFor(&quot;'+ticker+'&quot;)">Submit application</button>';
+        +'<button class="btn btn-warning" onclick="busy(this,&quot;Submitting…&quot;,()=>submitDilutionFor(&quot;'+ticker+'&quot;))">Submit application</button>';
     }
     if(history.length){
       html+='<hr class="divider"><div class="section-title" style="font-size:13px;margin-bottom:8px">History</div>'
@@ -6933,7 +6991,7 @@ function updateDilPrevFor(ticker){
 function submitDilutionFor(ticker){
   const newShares=document.getElementById('dil-shares-'+ticker)?.value;
   const reason=document.getElementById('dil-reason-'+ticker)?.value;
-  submitDilution(ticker,newShares,reason);
+  return submitDilution(ticker,newShares,reason); // returned for busy()
 }
 
 // ═══════════════════════════════════════════════
@@ -7417,7 +7475,7 @@ function renderAdminFlags(){
       <div class="frow"><label class="flabel">Reason for flagging</label>
         <textarea id="flag-reason" rows="3" placeholder="e.g. Suspected wash trading — student bought and sold BWV 12 times in 5 minutes to inflate price artificially..."></textarea>
       </div>
-      <button class="btn btn-danger" onclick="submitFlagForm()">🚩 Submit flag</button>
+      <button class="btn btn-danger" onclick="busy(this,&quot;Filing…&quot;,submitFlagForm)">🚩 Submit flag</button>
     </div>`;
   }
 
@@ -7586,7 +7644,7 @@ function submitFlagForm(){
   const reason=document.getElementById('flag-reason')?.value;
   if(!targetEl?.value)return toast('Select a target');
   const [targetId,targetName,targetType]=targetEl.value.split('|');
-  flagAccount(targetId,targetName,targetType,reason);
+  return flagAccount(targetId,targetName,targetType,reason); // returned for busy()
 }
 function updateFlagTargets(){
   const type=document.getElementById('flag-type')?.value;
@@ -8466,6 +8524,9 @@ function render(){
       allT.forEach(t=>{const co=getCo(t);if(co){destroyChart('cp-chart-'+t);buildChart('cp-chart-'+t,co);}});
     }
   },60);
+  // render() rebuilds the DOM wholesale, so any in-progress prose in a
+  // textarea is gone with it. Re-fill from the saved draft afterwards.
+  restoreDrafts();
 }
 function setTab(t){UI.navTab=t;UI.panelTicker=null;destroyCharts();render();}
 
