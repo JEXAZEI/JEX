@@ -1,0 +1,644 @@
+#!/usr/bin/env node
+// Boots the REAL app.js in headless Chromium against tests/browser/stub.js and
+// drives it through every page and several interactions, failing on any
+// uncaught error, unhandled rejection, or console error.
+//
+//   node tests/browser/run.js            run it
+//   node tests/browser/run.js --keep     leave the generated page in place
+//
+// Everything else under tests/ verifies extracted functions in Node. This is
+// the only harness that runs the actual page: real DOM, real render(), real
+// event handlers, real boot path. Static analysis cannot catch a TypeError in
+// a render branch nobody executed.
+//
+// The result comes back over an XHR POST to this script's own static server
+// rather than --dump-dom + --virtual-time-budget. --dump-dom fires on the load
+// event, which is too early for an async driver, and the app's own 3s poll
+// keeps virtual time from ever draining. The stub only patches window.fetch,
+// so XMLHttpRequest is a clean channel the app cannot interfere with.
+const {spawn} = require('child_process');
+const fs = require('fs'), path = require('path'), http = require('http');
+
+const CHROME = ['/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
+                '/opt/pw-browsers/chromium/chrome-linux/chrome']
+  .find(p=>{try{fs.accessSync(p);return true;}catch(e){return false;}});
+if(!CHROME){console.error('No Chromium found under /opt/pw-browsers');process.exit(2);}
+
+const ROOT = path.join(__dirname, '..', '..');
+const PORT = 8731;
+const WALL_TIMEOUT_MS = 150000;
+// The in-page watchdog fires first, so a stall is reported with the name of
+// the step that hung rather than as a bare runner timeout.
+const DRIVER_WATCHDOG_MS = 100000;
+
+// One result slot per browser run; main() re-arms it before each scenario.
+let resolveResult = null;
+function armResult(){ return new Promise(r=>{resolveResult=r;}); }
+
+const MIME={'.html':'text/html','.js':'text/javascript','.css':'text/css','.json':'application/json'};
+const server = http.createServer((req,res)=>{
+  if(req.method==='POST' && req.url==='/__result'){
+    let body='';
+    req.on('data',c=>{body+=c;});
+    req.on('end',()=>{res.writeHead(200);res.end('ok');resolveResult(body);});
+    return;
+  }
+  let p = decodeURIComponent(req.url.split('?')[0]);
+  if(p==='/')p='/tests/browser/harness.html';
+  const f = path.join(ROOT, p);
+  if(!f.startsWith(ROOT)||!fs.existsSync(f)||fs.statSync(f).isDirectory()){res.writeHead(404);return res.end('nope');}
+  res.writeHead(200,{'Content-Type':MIME[path.extname(f)]||'application/octet-stream'});
+  fs.createReadStream(f).pipe(res);
+});
+
+// The scenario script runs INSIDE the page.
+// Shared preamble for every driver: the step runner and DOM readers.
+const PRELUDE = `
+  const out = {steps:[], errors:[], notes:[], consoleErrors:[]};
+  // Exposed so the wrapper can post partial progress if a step hangs -- a
+  // driver that stalls used to report nothing at all, which says only "it
+  // broke somewhere" and costs a bisect to turn into a location.
+  window.__OUT__ = out;
+  out.startedAt = Date.now();
+  const sleep = ms => new Promise(r=>setTimeout(r,ms));
+  const stub = window.__JEX_STUB__;
+  const step = async (name, fn) => {
+    out.inFlight = name;
+    const t0 = Date.now();
+    try { const r = await fn(); out.steps.push({name, ok:true, info:(r===undefined?'':String(r))+' ['+(Date.now()-t0)+'ms]'}); }
+    catch(e){ out.steps.push({name, ok:false, info:(e && e.message)||String(e), stack:e && e.stack}); }
+    out.inFlight = null;
+  };
+  const appText = () => (document.getElementById('app')||{}).textContent || '';
+  const appHtml = () => (document.getElementById('app')||{}).innerHTML || '';
+
+  // ── inline-handler audit ────────────────────────────────
+  // Nearly every control in JEX is an onclick="..." string built by
+  // concatenating HTML, so a handler can be broken in two ways no unit test
+  // and no amount of reading will catch: the attribute can fail to PARSE
+  // (a name with an apostrophe closing the JS string early, a stray quote
+  // from user data), or it can call a function that no longer exists (renamed,
+  // deleted, or never defined). Both are silent -- the button just does
+  // nothing, or throws into the console, when a student presses it.
+  //
+  // This parses every handler attribute in the rendered DOM and resolves the
+  // functions it calls, without firing any of them, so it is safe to run over
+  // every page in every scenario.
+  const HANDLER_ATTRS = ['onclick','oninput','onchange','onsubmit','onkeydown','onkeyup','onblur','onfocus'];
+  const JS_BUILTINS = new Set(['if','for','while','switch','catch','return','typeof','function','new',
+    'String','Number','Boolean','Array','Object','JSON','Math','Date','parseInt','parseFloat','isNaN',
+    'alert','confirm','prompt','setTimeout','setInterval','encodeURIComponent','decodeURIComponent',
+    'Promise','RegExp','Set','Map','Error','console','window','document','event','this']);
+  // window[fn] is NOT the right test: app.js is a classic script, so its
+  // top-level const/let/function names live in the global LEXICAL environment,
+  // which inline handlers resolve against but which never appears as a window
+  // property. get -- declared as "const get=id=>document.getElementById(id)"
+  // -- is reachable from every onclick in the app and invisible on window.
+  // Evaluating "typeof <name>" in global scope consults both records.
+  const _resolved = new Map();
+  const resolvesGlobally = fn => {
+    if(_resolved.has(fn)) return _resolved.get(fn);
+    let ok = false;
+    try{ ok = new Function('return typeof '+fn)() === 'function'; }catch(e){ ok = false; }
+    _resolved.set(fn, ok);
+    return ok;
+  };
+  const HANDLER_SEL = HANDLER_ATTRS.map(a=>'['+a+']').join(',');
+  const _seenHandlers = new Set();   // the same attribute string recurs on
+                                     // every render; analyse each one once
+  const auditHandlers = (where, bad) => {
+    const root = document.getElementById('app'); if(!root) return 0;
+    let checked=0;
+    for(const el of root.querySelectorAll(HANDLER_SEL)){
+      for(const attr of HANDLER_ATTRS){
+        const code = el.getAttribute(attr);
+        if(code===null) continue;
+        const key = attr+'\\u0000'+code;
+        if(_seenHandlers.has(key)) continue;
+        _seenHandlers.add(key);
+        checked++;
+        try{ new Function('event', code); }
+        catch(e){ bad.push(where+' <'+el.tagName.toLowerCase()+' '+attr+'> DOES NOT PARSE: '+
+          ((e&&e.message)||e)+' -- '+code.slice(0,120)); continue; }
+        // Resolve every called identifier that is not a member access
+        // (x.foo()), not a local, and not a builtin.
+        const re = /(^|[^.\\w$'"])([A-Za-z_$][\\w$]*)\\s*\\(/g;
+        let m;
+        while((m = re.exec(code))){
+          const fn = m[2];
+          if(JS_BUILTINS.has(fn)) continue;
+          if(!resolvesGlobally(fn))
+            bad.push(where+' <'+el.tagName.toLowerCase()+' '+attr+'> calls missing '+fn+'() -- '+code.slice(0,120));
+        }
+      }
+    }
+    return checked;
+  };
+`;
+
+// Every page, every tab, every role -- in whatever state the scenario left the
+// exchange in. Used for the variant scenarios (empty exchange, closed session,
+// halted ticker, brand-new student, share classes, ragged nulls), where the
+// question is not "does the feature work" but "does anything throw".
+const SWEEP_DRIVER = `
+(async () => {
+${PRELUDE}
+  await sleep(1800);
+  const NAV = ['market','exchange','portfolio','orders','trades','funds','news',
+               'notifications','leaderboard','settings','mystock','admin'];
+  const PORT = ['holdings','shorts','watchlist','dividends','history','nwchart'];
+  const CPT  = ['overview','trade','news','votes','shareholders','team','financials',
+                'dividends','alerts','trades'];
+  const MST  = ['stock','founders','classes','votes','news','financials','dividends','buyback','dilution'];
+  const ADT  = ['dashboard','session','announcements','registrations','passwords','ipo','dilution',
+                'classes','founder_allocs','balances','users','listed','news','activity','flags',
+                'bug_reports','retention','snapshots','client_errors','trades','cashflow',
+                'dividends_audit','price_adj_log','budget_warnings','minutes','notices',
+                'shareholders','votes_all'];
+
+  const T0 = Date.now();
+  const el = () => (Date.now()-T0)+'ms';
+  await step('boot leaves the splash', ()=>{
+    const t = appText();
+    if(/Connecting to (JEX|exchange)/.test(t)) throw new Error('still on the splash');
+    if(!t.trim()) throw new Error('#app is empty');
+    return el()+' -- '+t.replace(/\\s+/g,' ').trim().slice(0,40);
+  });
+
+  // Each render is tried individually so one throwing page does not hide the
+  // rest -- the point of a sweep is the complete list of what breaks in this
+  // state, not the first thing that breaks.
+  let handlersChecked = 0;
+  const handlerBad = [];
+  const tryRender = (where, bad) => {
+    try{
+      render();
+      if(!document.getElementById('app').innerHTML.trim()) bad.push(where+': #app went blank');
+      handlersChecked += auditHandlers(where, handlerBad);
+    }catch(e){ bad.push(where+': '+((e&&e.message)||e)+(e&&e.stack?'  @ '+String(e.stack).split('\\n')[1].trim():'')); }
+  };
+
+  const users = DB.users.map(u=>u.id);
+  for(const uid of users){
+    const role = (DB.users.find(u=>u.id===uid)||{}).role;
+    await step('sweep every page as '+role+' ('+uid+')', ()=>{
+      UI.userId = uid; UI.companyPage=null; UI.fundPage=null;
+      const bad=[]; let n=0;
+      for(const nav of NAV){
+        UI.navTab = nav;
+        if(nav==='portfolio'){ for(const p of PORT){ UI.portfolioTab=p; tryRender(nav+'/'+p,bad); n++; } UI.portfolioTab='holdings'; }
+        else if(nav==='admin'){ for(const a of ADT){ UI.adminTab=a; tryRender(nav+'/'+a,bad); n++; } UI.adminTab='dashboard'; }
+        else if(nav==='mystock'){ for(const m of MST){ UI.companyTab=m; tryRender(nav+'/'+m,bad); n++; } UI.companyTab='stock'; }
+        else { tryRender(nav,bad); n++; }
+      }
+      UI.navTab='market';
+      if(bad.length) throw new Error(bad.length+'/'+n+' renders failed -- '+bad.slice(0,6).join(' | '));
+      return n+' renders, '+el();
+    });
+  }
+
+  await step('every listed ticker opens, on every tab', ()=>{
+    UI.userId = (DB.users.find(u=>u.role==='student')||DB.users[0]).id;
+    UI.navTab='market';
+    const bad=[]; let n=0;
+    for(const co of DB.companies){
+      for(const t of CPT){ UI.companyPage=co.ticker; UI.companyPageTab=t; tryRender(co.ticker+'/'+t,bad); n++; }
+    }
+    UI.companyPage=null; UI.companyPageTab='overview'; render();
+    if(bad.length) throw new Error(bad.length+'/'+n+' renders failed -- '+bad.slice(0,6).join(' | '));
+    return n+' renders across '+DB.companies.length+' tickers';
+  });
+
+  await step('every fund page opens', ()=>{
+    UI.navTab='funds';
+    for(const f of DB.funds||[]){ UI.fundPage=f.id; render(); }
+    UI.fundPage=null; render();
+    return (DB.funds||[]).length+' funds';
+  });
+
+  await step('signed-out views still render', ()=>{
+    const keep=UI.userId; UI.userId=null;
+    for(const lv of ['select','register','forgot-email','forgot-secq','forgot-newpw','recover-pw']){
+      UI.loginView=lv; render();
+      if(!appText().trim()) throw new Error('blank login view '+lv);
+    }
+    UI.loginView='select'; UI.userId=keep; render();
+  });
+
+  await step('a realtime repaint in this state does not throw', ()=>{
+    renderBackground(); renderBackground();
+  });
+
+  await step('every inline handler parses and resolves', ()=>{
+    const uniq = [...new Set(handlerBad)];
+    if(uniq.length) throw new Error(uniq.length+' broken handler(s) of '+handlersChecked+
+      ' checked -- '+uniq.slice(0,8).join('  ||  '));
+    return handlersChecked+' handlers across every page';
+  });
+
+  await sleep(300);
+  out.errors = stub.errors;
+  out.consoleErrors = stub.consoleErrors;
+  return out;
+})()
+`;
+
+const DRIVER = `
+(async () => {
+${PRELUDE}
+  await sleep(2200);   // boot + the stub's realtime events at t=900ms
+
+  await step('boot leaves the splash', ()=>{
+    const t = appText();
+    if(/Connecting to (JEX|exchange)/.test(t)) throw new Error('still on the splash');
+    if(!t.trim()) throw new Error('#app is empty');
+    return t.replace(/\\s+/g,' ').trim().slice(0,40);
+  });
+  await step('signed in as the seeded student', ()=>{
+    if(UI.userId !== 'u-stu') throw new Error('UI.userId='+UI.userId);
+  });
+  await step('company data loaded', ()=>{
+    if(!DB.companies.length) throw new Error('no companies');
+    return DB.companies.length+' companies';
+  });
+
+  // Every routed page must render without throwing.
+  for(const tab of ['market','exchange','portfolio','orders','trades','funds','news','notifications','leaderboard','settings']){
+    await step('render page: '+tab, ()=>{
+      UI.navTab = tab; UI.companyPage = null; UI.fundPage = null;
+      render();
+      const t = appText();
+      if(!t.trim()) throw new Error('blank page');
+      return t.length+' chars';
+    });
+  }
+
+  // Portfolio sub-tabs.
+  for(const pt of ['holdings','shorts','watchlist','dividends','history','nwchart']){
+    await step('portfolio tab: '+pt, ()=>{
+      UI.navTab='portfolio'; UI.portfolioTab=pt; render();
+      if(!appText().trim()) throw new Error('blank portfolio tab');
+      return appText().length+' chars';
+    });
+  }
+  await step('reset portfolio tab', ()=>{ UI.portfolioTab='holdings'; });
+
+  // A fund's own page.
+  await step('fund page renders', ()=>{
+    UI.navTab='funds'; UI.fundPage='f-1'; render();
+    if(!appText().includes('Test Growth Fund')) throw new Error('fund name missing');
+    UI.fundPage=null;
+  });
+
+  // Every admin tab, signed in as the role that actually owns it.
+  // renderAdmin() silently rewrites UI.adminTab to the role's first tab when
+  // the tab is not in that role's set, so driving them all as the chairman
+  // renders the Dashboard 26 times and proves nothing. Each tab is asserted
+  // to have STAYED selected.
+  const ADMIN_ROLES = {
+    'u-chair': ['dashboard','session','announcements','registrations','passwords','ipo','dilution',
+                'classes','founder_allocs','balances','users','listed','news','activity','flags',
+                'bug_reports','retention','snapshots','client_errors'],
+    'u-pres':  ['dashboard','session','announcements','balances','passwords','news','activity'],
+    'u-treas': ['balances','cashflow','dividends_audit','price_adj_log','budget_warnings','activity','client_errors'],
+    'u-sec':   ['announcements','minutes','notices','shareholders','votes_all','news'],
+    'u-comp':  ['dashboard','balances','trades','activity','listed','news','announcements','flags','client_errors'],
+  };
+  for(const uid of Object.keys(ADMIN_ROLES)){
+    for(const at of ADMIN_ROLES[uid]){
+      await step('admin tab ['+uid+']: '+at, ()=>{
+        UI.userId=uid; UI.navTab='admin'; UI.companyPage=null; UI.adminTab=at; render();
+        if(UI.adminTab!==at) throw new Error('tab was rewritten to '+UI.adminTab+' -- not in this role\\'s set');
+        const t = appText();
+        if(!t.trim()) throw new Error('blank admin tab');
+        if(/Admin access required/.test(t)) throw new Error('role rejected from the admin page');
+        return t.length+' chars';
+      });
+    }
+  }
+  await step('a student cannot render the admin page', ()=>{
+    UI.userId='u-stu'; UI.navTab='admin'; render();
+    if(!/Admin access required/.test(appText())) throw new Error('a student got admin content');
+  });
+  await step('admins see the ordinary pages too', ()=>{
+    UI.userId='u-chair';
+    for(const t of ['market','portfolio','trades','exchange','leaderboard','settings','orders','notifications','funds','news']){
+      UI.navTab=t; render(); if(!appText().trim()) throw new Error('blank '+t+' as chairman');
+    }
+    UI.navTab='market';
+  });
+  await step('back to student', ()=>{ UI.userId='u-stu'; UI.navTab='market'; UI.adminTab='dashboard'; render(); });
+
+  // Company page + every one of its real tabs (UI.companyPageTab -- NOT
+  // UI.companyTab, which belongs to the company-account 'mystock' page).
+  await step('open a company page', ()=>{ UI.navTab='market'; UI.companyPage='ACME'; render();
+    if(!appText().includes('Acme')) throw new Error('company page missing name'); });
+  for(const ct of ['overview','trade','news','votes','shareholders','team','financials','dividends','alerts','trades']){
+    await step('company page tab: '+ct, ()=>{
+      UI.companyPageTab=ct; render();
+      if(!appText().trim()) throw new Error('blank');
+      return appText().length+' chars';
+    });
+  }
+  // The index fund has no owner, no news and no votes -- those tabs must
+  // redirect rather than dereference a null company.
+  for(const ct of ['overview','trade','shareholders','trades','news','votes','team','financials','dividends','alerts']){
+    await step('JXI page tab: '+ct, ()=>{
+      UI.companyPage='JXI'; UI.companyPageTab=ct; render();
+      if(!appText().includes('JXI')) throw new Error('JXI page missing');
+      return appText().length+' chars';
+    });
+  }
+  await step('reset to overview', ()=>{ UI.companyPage=null; UI.companyPageTab='overview'; UI.navTab='market'; render(); });
+
+  // The company account's own management page and every tab on it.
+  await step('company account view', ()=>{
+    UI.userId='u-co'; UI.navTab='mystock'; UI.companyPage=null; render();
+    if(!appText().trim()) throw new Error('blank mystock'); });
+  for(const ct of ['stock','founders','classes','votes','news','financials','dividends','buyback','dilution']){
+    await step('mystock tab: '+ct, ()=>{
+      UI.companyTab=ct; render();
+      if(!appText().trim()) throw new Error('blank');
+      return appText().length+' chars';
+    });
+  }
+  await step('back to student again', ()=>{ UI.userId='u-stu'; UI.navTab='market'; UI.companyPage=null; UI.companyTab='stock'; render(); });
+
+  // XSS: the seeded student name and vote question contain payloads.
+  await step('user-typed payload is not live HTML', ()=>{
+    UI.navTab='leaderboard'; render();
+    const h = appHtml();
+    if(/<script>alert\\(1\\)<\\/script>/.test(h)) throw new Error('unescaped <script> in leaderboard');
+    if(document.querySelector('#app script')) throw new Error('a <script> element was injected');
+    if(!/Bea/.test(appText())) throw new Error('payload user missing from leaderboard entirely');
+    return 'escaped';
+  });
+  await step('vote question payload escaped', ()=>{
+    UI.navTab='market'; UI.companyPage='ACME'; UI.companyTab='votes'; render();
+    if(document.querySelector('#app script')) throw new Error('script element injected via vote');
+    if(document.querySelector('#app b')) throw new Error('<b> from a vote question rendered as live HTML');
+    UI.companyPage=null; UI.companyTab='stock';
+  });
+  await step('company name with quotes and & survives', ()=>{
+    UI.navTab='market'; render();
+    if(!appText().includes('Beta & Sons "Quoted"')) throw new Error('name mangled: '+appText().slice(0,200));
+    return 'intact';
+  });
+
+  // Realtime: the stub pushed a price change + a trade at t=900ms.
+  await step('realtime price update applied', ()=>{
+    const co = DB.companies.find(c=>c.ticker==='ACME');
+    if(co.price !== 13.25) throw new Error('price is '+co.price+', expected 13.25');
+  });
+  await step('realtime trade merged', ()=>{
+    if(!DB.trades.some(t=>String(t.id)==='100')) throw new Error('trade 100 missing');
+  });
+
+  // Typed input must survive a background repaint. This is the regression
+  // that made realtime look dead: the quantity box blocked every render.
+  await step('the trade panel actually has a quantity field', ()=>{
+    UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='trade'; render();
+    const q = document.getElementById('cp-qty');
+    if(!q) throw new Error('no #cp-qty on the trade tab -- inputs: '+
+      Array.prototype.map.call(document.querySelectorAll('#app input'),i=>i.id||i.type).join(','));
+    return 'present';
+  });
+  await step('typed quantity survives a realtime repaint', ()=>{
+    UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='trade'; render();
+    const q = document.getElementById('cp-qty');
+    if(!q) throw new Error('no #cp-qty');
+    q.value = '42';
+    renderBackground();
+    const after = document.getElementById('cp-qty');
+    if(!after) throw new Error('cp-qty gone after repaint');
+    if(after.value !== '42') throw new Error('cp-qty became '+after.value);
+    after.value='';
+    return 'preserved';
+  });
+  await step('a typed quantity does NOT block the repaint', ()=>{
+    UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='trade'; render();
+    const q = document.getElementById('cp-qty'); if(!q) throw new Error('no #cp-qty');
+    q.value = '42';
+    const r = userIsFillingForm();
+    if(r) throw new Error('repaint blocked by an unfocused field: '+r);
+    q.focus();
+    if(!userIsFillingForm()) throw new Error('a FOCUSED field should still defer');
+    q.blur(); q.value='';
+    return 'ok';
+  });
+
+  // Draft persistence. The news tab is used rather than dilution because the
+  // seeded exchange already has a PENDING dilution application, and the app
+  // correctly hides the form while one is outstanding.
+  await step('textarea draft survives a repaint', ()=>{
+    UI.userId='u-co'; UI.navTab='mystock'; UI.companyPage=null; UI.companyTab='news'; render();
+    const ta = document.getElementById('news-body');
+    if(!ta) throw new Error('no #news-body on the news tab -- textareas: '+
+      Array.prototype.map.call(document.querySelectorAll('#app textarea'),t=>t.id||'(none)').join(','));
+    const id = ta.id;
+    ta.value = 'raising capital for expansion';
+    ta.dispatchEvent(new Event('input',{bubbles:true}));
+    render();
+    const again = document.getElementById(id);
+    if(!again) throw new Error('textarea gone');
+    if(again.value !== 'raising capital for expansion') throw new Error('draft lost: '+again.value);
+    again.value=''; again.dispatchEvent(new Event('input',{bubbles:true}));
+    UI.userId='u-stu'; UI.navTab='market'; UI.companyTab='stock';
+    return 'restored ('+id+')';
+  });
+
+  // busy(): a real click must disable then re-enable.
+  await step('busy() disables and restores a button', async ()=>{
+    let done=false;
+    const btn=document.createElement('button'); btn.textContent='Go'; document.body.appendChild(btn);
+    const p = busy(btn,'Working…',()=>new Promise(r=>setTimeout(()=>{done=true;r();},60)));
+    if(btn.disabled!==true) throw new Error('not disabled during the call');
+    await p;
+    if(btn.disabled!==false) throw new Error('not re-enabled afterwards');
+    if(btn.textContent!=='Go') throw new Error('label not restored: '+btn.textContent);
+    if(!done) throw new Error('fn did not run');
+    btn.remove();
+    return 'ok';
+  });
+  await step('busy() re-enables even when the action throws', async ()=>{
+    const btn=document.createElement('button'); btn.textContent='Go'; document.body.appendChild(btn);
+    try{ await busy(btn,'Working…',()=>{ throw new Error('boom'); }); }catch(e){}
+    if(btn.disabled!==false) throw new Error('left disabled after a throw');
+    btn.remove();
+    return 'ok';
+  });
+
+  // A real trade through the real code path.
+  await step('a market buy applies its result', async ()=>{
+    UI.userId='u-stu'; UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='trade'; render();
+    const before = DB.trades.length;
+    await placeBuy('ACME', 3);
+    if(DB.trades.length <= before) throw new Error('no trade recorded');
+    if(!stub.rpcCalls.some(c=>c.fn==='rpc_trade_buy')) throw new Error('rpc_trade_buy never called');
+    return 'ok';
+  });
+
+  await step('charts were constructed, not skipped', ()=>{
+    if(!stub.charts.length) throw new Error('no Chart was ever constructed');
+    const bad = stub.charts.filter(c=>!c.config||!c.config.data);
+    if(bad.length) throw new Error(bad.length+' charts built with no data');
+    return stub.charts.length+' charts';
+  });
+
+  await step('logout renders the login screen', ()=>{
+    UI.companyPage=null; UI.navTab='market';
+    logout();
+    const t = appText();
+    if(!/Sign in|Log in|Login|Register|Create account/i.test(t)) throw new Error('no login UI: '+t.slice(0,80));
+  });
+  // Every signed-out view, including the recovery flows nobody clicks through
+  // until a student is locked out mid-class.
+  for(const lv of ['select','register','forgot-email','forgot-secq','forgot-newpw','recover-pw']){
+    await step('login view: '+lv, ()=>{
+      UI.userId=null; UI.loginView=lv; render();
+      if(!appText().trim()) throw new Error('blank login view');
+      return appText().length+' chars';
+    });
+  }
+  await step('register form: both role tabs', ()=>{
+    UI.userId=null; UI.loginView='register';
+    for(const lt of ['student','company']){ UI.loginTab=lt; render(); if(!appText().trim()) throw new Error('blank '+lt); }
+    UI.loginTab='student';
+  });
+
+  await sleep(300);
+  out.errors = stub.errors;
+  out.consoleErrors = stub.consoleErrors;
+  return out;
+})()
+`;
+
+(async function main(){
+  await new Promise(r=>server.listen(PORT, r));
+  const harness = fs.readFileSync(path.join(__dirname,'harness.html'),'utf8');
+  const keep = process.argv.includes('--keep');
+  const only = (process.argv.find(a=>a.startsWith('--only='))||'').split('=')[1];
+
+  // The full driver exercises the mid-semester exchange end to end. The
+  // variants re-run a whole-app sweep against a deliberately awkward state --
+  // the empty exchange the app is actually in on day one, a closed session, a
+  // halted ticker, a student who has never traded, a company split into share
+  // classes, and rows carrying the nulls the schema permits.
+  const SCENARIOS = [
+    {name:'default',    driver:DRIVER,       args:[]},
+    // The same populated exchange, swept: this is where the inline-handler
+    // audit has the most to look at, because the rich pages are the ones that
+    // build onclick strings out of ids, tickers and student names.
+    {name:'default',    driver:SWEEP_DRIVER, args:[], label:'default-sweep'},
+    {name:'empty',      driver:SWEEP_DRIVER, args:[]},
+    {name:'closed',     driver:SWEEP_DRIVER, args:[]},
+    {name:'halted',     driver:SWEEP_DRIVER, args:[]},
+    {name:'newstudent', driver:SWEEP_DRIVER, args:[]},
+    {name:'classes',    driver:SWEEP_DRIVER, args:[]},
+    {name:'ragged',     driver:SWEEP_DRIVER, args:[]},
+    // Same seeded exchange, phone-sized viewport: renders the mobile bottom
+    // nav branch (_isMobileStudent, window.innerWidth<=640) that the desktop
+    // runs never touch.
+    {name:'default',    driver:DRIVER,       args:['--window-size=380,780'], label:'mobile'},
+  ].filter(sc => !only || (sc.label||sc.name)===only);
+
+  let totalFailed=0, totalSteps=0, failedScenarios=[];
+  for(const sc of SCENARIOS){
+    const label = sc.label || sc.name;
+    console.log('\n\u001b[1m### scenario: '+label+'\u001b[0m');
+    const file = '_driven_'+label+'.html';
+    // A replacer FUNCTION, never a replacement string: String.replace expands
+    // $&, $', $` and $n inside a string replacement, and the driver contains
+    // the character class [^.\\w$'"] -- whose $' spliced the rest of the
+    // document into the middle of a regex literal, so the injected script
+    // failed to PARSE and the page did nothing at all. No steps, no watchdog,
+    // no error: just a runner timeout with no information in it.
+    const driven = harness.replace('</body>', () => '<script>\n' +
+      'function __post(res){\n' +
+      '  // XHR, not fetch: the stub owns window.fetch and the app owns everything else.\n' +
+      '  const x = new XMLHttpRequest();\n' +
+      '  x.open("POST","/__result",true);\n' +
+      '  x.setRequestHeader("Content-Type","text/plain");\n' +
+      '  x.send(JSON.stringify(res));\n}\n' +
+      '(async()=>{\n' +
+      '  let done=false;\n' +
+      '  // Watchdog: if a step hangs, post what has run so far plus the name of\n' +
+      '  // the step still in flight, instead of leaving the runner with nothing.\n' +
+      '  setTimeout(()=>{ if(done) return;\n' +
+      '    const o = window.__OUT__ || {steps:[],errors:[],notes:[]};\n' +
+      '    o.stalled = o.inFlight || "(before the first step)";\n' +
+      '    o.errors = (window.__JEX_STUB__||{}).errors||[];\n' +
+      '    o.consoleErrors = (window.__JEX_STUB__||{}).consoleErrors||[];\n' +
+      '    __post(o); }, ' + DRIVER_WATCHDOG_MS + ');\n' +
+      '  let res;\n' +
+      '  try{ res = await (' + sc.driver + '); }\n' +
+      '  catch(e){ res = window.__OUT__ || {steps:[], errors:[], notes:[]};\n' +
+      '           res.steps.push({name:"DRIVER CRASHED", ok:false, info:(e&&e.message)||String(e), stack:e&&e.stack});\n' +
+      '           res.errors=(window.__JEX_STUB__||{}).errors||[];\n' +
+      '           res.consoleErrors=(window.__JEX_STUB__||{}).consoleErrors||[]; }\n' +
+      '  done=true;\n' +
+      '  __post(res);\n})();\n</script></body>');
+    fs.writeFileSync(path.join(__dirname,file), driven);
+
+    const userDir = fs.mkdtempSync('/tmp/jex-chrome-');
+    const got = armResult();
+    const chrome = spawn(CHROME, ['--headless','--disable-gpu','--no-sandbox','--disable-dev-shm-usage',
+      '--user-data-dir='+userDir, '--no-first-run', '--disable-extensions'].concat(sc.args).concat([
+      'http://127.0.0.1:'+PORT+'/tests/browser/'+file+'?scenario='+sc.name]),
+      {stdio:['ignore','ignore','pipe']});
+    let stderr=''; chrome.stderr.on('data',d=>{stderr+=d;});
+
+    let timer;
+    const raw = await Promise.race([got, new Promise(r=>{timer=setTimeout(()=>r(null), WALL_TIMEOUT_MS);})]);
+    clearTimeout(timer);
+    try{ chrome.kill('SIGKILL'); }catch(e){}
+    try{fs.rmSync(userDir,{recursive:true,force:true});}catch(e){}
+    if(!keep){ try{fs.unlinkSync(path.join(__dirname,file));}catch(e){} }
+
+    if(raw===null){
+      console.error('  the driver never posted a result within '+(WALL_TIMEOUT_MS/1000)+'s.');
+      const interesting = stderr.split('\n').filter(l=>l && !/dbus|DEPRECATED|Fontconfig|GLES|vulkan|sandbox/i.test(l));
+      if(interesting.length) console.error('  chromium stderr:\n  '+interesting.slice(0,15).join('\n  '));
+      totalFailed++; failedScenarios.push(label);
+      continue;
+    }
+
+    const res = JSON.parse(raw);
+    let failed=0;
+    if(res.stalled){
+      failed++;
+      console.log('  STALLED in step: '+res.stalled+'  (after '+res.steps.length+' completed steps)');
+    }
+    for(const s2 of res.steps){
+      if(s2.ok){ console.log('  ok    '+s2.name+(s2.info?'   ('+s2.info+')':'')); }
+      else { failed++; console.log('  FAIL  '+s2.name+'   '+(s2.info||''));
+             if(s2.stack)console.log('        '+String(s2.stack).split('\n').slice(0,3).join('\n        ')); }
+    }
+    for(const n of res.notes||[]) console.log('  note  '+n);
+
+    if((res.errors||[]).length){
+      console.log('  -- uncaught errors / unhandled rejections in the page:');
+      for(const e of res.errors){
+        failed++;
+        console.log('  ERROR ['+e.type+'] '+e.message+(e.source?'  @ '+e.source:''));
+        if(e.stack)console.log('        '+String(e.stack).split('\n').slice(0,4).join('\n        '));
+      }
+    }
+    const ce = (res.consoleErrors||[]).filter(m=>!/Failed to load resource|net::ERR/.test(m));
+    if(ce.length){
+      console.log('  -- console.error() output (not necessarily fatal):');
+      for(const m of ce.slice(0,20)) console.log('        '+m.slice(0,200));
+    }
+
+    totalSteps += res.steps.length;
+    totalFailed += failed;
+    if(failed) failedScenarios.push(label);
+    console.log('  '+(res.steps.length-res.steps.filter(x=>!x.ok).length)+'/'+res.steps.length+' steps passed');
+  }
+
+  server.close();
+  console.log('\n'+(failedScenarios.length
+    ? failedScenarios.length+' scenario(s) failed: '+[...new Set(failedScenarios)].join(', ')
+    : 'all scenarios green')+'  ('+totalSteps+' steps total)');
+  process.exit(totalFailed?1:0);
+})();

@@ -87,5 +87,26 @@ for(const [rx,label] of sinks)check(label+' is escaped at render', rx.test(src),
 check('toast() uses textContent, not innerHTML',
   /function toast\(msg\)\{[^}]*\.textContent=msg/.test(src)&&!/function toast\(msg\)\{[^}]*innerHTML/.test(src));
 
+console.log('\n=== free text must never travel through an inline handler ===');
+// esc() escapes for HTML TEXT. Inside onclick="..." the browser decodes the
+// entities BEFORE the JS parser sees them, so escaping a name for HTML puts
+// the quote back into the JS string literal and breaks it.
+//
+//   removeFounder(&quot;cm-1&quot;,&quot;Quinn &quot;Q&quot; O'Brien&quot;)
+//     -> removeFounder("cm-1","Quinn "Q" O'Brien")   SyntaxError
+//
+// The button then silently does nothing, forever, for that one student.
+// There is no encoding that makes this safe in both layers at once: pass an
+// id and look the text up in the handler. tests/browser/run.js catches this
+// live by parsing every rendered handler; this catches it at the source.
+{
+  const handlers=src.match(/on(?:click|change|input|submit)="[^"]*"/g)||[];
+  const offenders=handlers.filter(h=>/&quot;'\+esc\(/.test(h)||/&quot;\$\{esc\(/.test(h));
+  check('no handler interpolates esc()-ed free text into a JS string argument ('+
+    handlers.length+' handlers scanned)', offenders.length===0, offenders.slice(0,3).join(' | '));
+  check('removeFounder takes only the member id', /async function removeFounder\(memberId\)\{/.test(src));
+  check('and looks the name up itself', /const name=\(getUser\(m\.student_id\)\|\|\{\}\)\.name/.test(src));
+}
+
 console.log(fails?('\n'+fails+' FAILURES'):'\nAll passed');
 process.exit(fails?1:0);

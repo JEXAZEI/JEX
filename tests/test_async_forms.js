@@ -21,7 +21,7 @@ global.get=id=>textareas.find(t=>t.id===id)||null;
 
 eval(extractFn('busy','async ').replace('async function busy','busy=async function'));
 for(const f of ['saveDraft','clearDraft','restoreDrafts']) eval(extractFn(f).replace('function '+f,f+'=function'));
-eval("var DRAFT_PREFIX='jex-draft-',DRAFT_MAX_AGE=24*60*60*1000,_draftsRestored=new Set();");
+eval("var DRAFT_PREFIX='jex-draft-',DRAFT_MAX_AGE=24*60*60*1000;");
 
 const mkBtn=()=>({textContent:'Submit',disabled:false,dataset:{}});
 const ta=(id,value)=>({id,value,tagName:'TEXTAREA'});
@@ -59,48 +59,65 @@ const ta=(id,value)=>({id,value,tagName:'TEXTAREA'});
 
   console.log('\n=== drafts: survive a render ===');
   for(const k of Object.keys(store))delete store[k];
-  _draftsRestored.clear();
   saveDraft('ipo-desc','a long pitch I typed');
   textareas=[ta('ipo-desc','')];               // render() wiped the DOM
   restoreDrafts();
   check('draft restored into the rebuilt empty field', textareas[0].value==='a long pitch I typed');
 
   console.log('\n=== drafts: never clobber real content ===');
-  _draftsRestored.clear();
   saveDraft('fin-summary','stale draft');
   textareas=[ta('fin-summary','existing saved summary')];
   restoreDrafts();
   check('a field rendered WITH content is left alone', textareas[0].value==='existing saved summary');
 
+  // THE REGRESSION. restoreDrafts() used to keep a _draftsRestored Set that
+  // the input listener ALSO wrote to, and treat "in the Set + field empty" as
+  // proof the submit went through. So the first ordinary render after someone
+  // started typing -- a tab click, autoRefresh, another student's trade
+  // arriving over realtime -- rebuilt the textarea empty, hit that branch and
+  // deleted the draft. In a live session a foreground render happens every
+  // few seconds, so the draft essentially never survived to the reload it
+  // was written for. Simulated below exactly as the app runs it.
+  console.log('\n=== drafts: an ordinary render must NOT destroy the draft ===');
+  for(const k of Object.keys(store))delete store[k];
+  const typeInto=(id,v)=>{saveDraft(id,v);};          // the delegated input listener
+  const rerender=id=>{textareas=[ta(id,'')];restoreDrafts();};  // innerHTML rebuild + restoreDrafts
+  typeInto('bug-desc','half a bug report I have not sent yet');
+  rerender('bug-desc');
+  check('still stored after one render', store['jex-draft-bug-desc']!==undefined);
+  check('and put back in the box', textareas[0].value==='half a bug report I have not sent yet');
+  for(let i=0;i<5;i++) rerender('bug-desc');
+  check('survives five more renders (a realtime burst)', textareas[0].value==='half a bug report I have not sent yet');
+  check('and is still in storage for the next page load', store['jex-draft-bug-desc']!==undefined);
+
+  console.log('\n=== drafts: deliberately clearing the box drops the draft ===');
+  typeInto('bug-desc','');                            // user selects all + deletes
+  rerender('bug-desc');
+  check('emptying the field removes the stored draft', store['jex-draft-bug-desc']===undefined);
+  check('and it is not resurrected', textareas[0].value==='');
+
   console.log('\n=== drafts: no resurrection after a successful submit ===');
   for(const k of Object.keys(store))delete store[k];
-  _draftsRestored.clear();
-  saveDraft('bug-desc','my bug report');
-  textareas=[ta('bug-desc','')];
-  restoreDrafts();
-  check('restored once', textareas[0].value==='my bug report');
-  textareas=[ta('bug-desc','')];               // submitted -> re-rendered empty
-  restoreDrafts();
-  check('NOT re-filled after the submit cleared it', textareas[0].value==='');
-  check('stored draft dropped so it cannot come back next session', store['jex-draft-bug-desc']===undefined);
+  typeInto('bug-desc','my bug report');
+  clearDraft('bug-desc');                             // what the submit path now does
+  rerender('bug-desc');
+  check('a submitted draft does not come back', textareas[0].value==='');
+  check('and is gone from storage', store['jex-draft-bug-desc']===undefined);
 
   console.log('\n=== drafts: expiry and clearing ===');
   for(const k of Object.keys(store))delete store[k];
-  _draftsRestored.clear();
   store['jex-draft-news-body']=JSON.stringify({v:'ancient',at:Date.now()-25*60*60*1000});
   textareas=[ta('news-body','')];
   restoreDrafts();
   check('a draft older than 24h is not restored', textareas[0].value==='');
   check('and is purged from storage', store['jex-draft-news-body']===undefined);
 
-  _draftsRestored.clear();
   saveDraft('ann-body','something');
   check('saved', store['jex-draft-ann-body']!==undefined);
   saveDraft('ann-body','   ');
   check('clearing the field removes the draft (whitespace counts as empty)', store['jex-draft-ann-body']===undefined);
 
   for(const k of Object.keys(store))delete store[k];
-  _draftsRestored.clear();
   store['jex-draft-min-body']='{not valid json';
   textareas=[ta('min-body','')];
   restoreDrafts();
@@ -114,6 +131,17 @@ const ta=(id,value)=>({id,value,tagName:'TEXTAREA'});
   // actually validates each wrapped site.
   const wrapped=(src.match(/busy\(this,/g)||[]).length;
   check('submit buttons wrapped in busy() ('+wrapped+')', wrapped>=30, 'only '+wrapped);
+  check('the restored-once Set is gone from the code (the comment may keep the name)',
+    !/^(?!\s*\/\/).*_draftsRestored/m.test(src));
+  // Now that restoreDrafts() no longer guesses when a submit happened, every
+  // textarea needs a real clearDraft() on its own success path or its text
+  // reappears in the blank form after posting.
+  const taIds=[...new Set((src.match(/<textarea[^>]*id="([a-z-]+)"/g)||[])
+    .map(m=>/id="([a-z-]+)"/.exec(m)[1]))];
+  check('found the textarea ids to check ('+taIds.length+')', taIds.length>=10);
+  for(const id of taIds)
+    check("clearDraft('"+id+"') on its submit path", src.includes("clearDraft('"+id+"')"));
+  check("the per-ticker dilution draft is cleared too", src.includes("clearDraft('dil-reason-'+ticker)"));
   for(const f of ['submitIPO(','submitDilution(','convertBaseClass(','flagAccount('])
     check(f.slice(0,-1)+' wrapper returns its promise', src.includes('return '+f));
 

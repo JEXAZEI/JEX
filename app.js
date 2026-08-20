@@ -1634,7 +1634,6 @@ async function busy(el,label,fn){
 // to retype and often pre-filled with defaults a stale draft would fight.
 const DRAFT_PREFIX='jex-draft-';
 const DRAFT_MAX_AGE=24*60*60*1000;
-const _draftsRestored=new Set();
 function saveDraft(id,value){
   try{
     if(!value||!value.trim())localStorage.removeItem(DRAFT_PREFIX+id);
@@ -1642,25 +1641,35 @@ function saveDraft(id,value){
   }catch(e){}
 }
 function clearDraft(id){try{localStorage.removeItem(DRAFT_PREFIX+id);}catch(e){}}
-// Called after every render. A field is restored AT MOST ONCE per session:
-// once it has been restored, a later render finding it empty means the
-// submit succeeded (or the user cleared it deliberately), so the stored
-// draft is dropped rather than resurrected on the next page load.
+// Called after every render, and it restores EVERY time the field comes back
+// empty -- not once per session.
+//
+// It used to keep a _draftsRestored Set and treat "this id is in the Set and
+// the field is empty" as proof the submit went through, dropping the draft.
+// The Set was also filled by the input listener below, so the very first
+// ordinary render after someone started typing -- a tab click, autoRefresh,
+// any other student's trade arriving over realtime -- rebuilt the textarea
+// empty, hit that branch, and deleted the draft it was there to protect.
+// Since a foreground render happens every few seconds in a live session, the
+// draft essentially never survived to the reload it was written for.
+//
+// Deliberate clearing needs no special case: emptying the box fires `input`,
+// and saveDraft() removes the entry for an empty value. Successful submits
+// call clearDraft() themselves.
 function restoreDrafts(){
   document.querySelectorAll('textarea[id]').forEach(t=>{
-    if(_draftsRestored.has(t.id)){if(!t.value)clearDraft(t.id);return;}
     if(t.value)return; // rendered with real content -- never overwrite it
     let d;try{d=JSON.parse(localStorage.getItem(DRAFT_PREFIX+t.id)||'null');}catch(e){return;}
     if(!d||!d.v)return;
     if(Date.now()-(d.at||0)>DRAFT_MAX_AGE){clearDraft(t.id);return;}
-    t.value=d.v;_draftsRestored.add(t.id);
+    t.value=d.v;
   });
 }
 // One delegated listener rather than per-field wiring, so it keeps working
 // across the innerHTML rebuilds render() does.
 document.addEventListener('input',e=>{
   const t=e.target;
-  if(t&&t.tagName==='TEXTAREA'&&t.id){saveDraft(t.id,t.value);_draftsRestored.add(t.id);}
+  if(t&&t.tagName==='TEXTAREA'&&t.id)saveDraft(t.id,t.value);
 });
 
 // ── Background repaints ─────────────────────────────────
@@ -2579,7 +2588,7 @@ async function postNews(ticker,headline,body){
   catch(e){return toast(rpcErrorMessage(e));}
   DB.news.unshift(rec);
   if(document.getElementById('news-notify')?.checked)await pushNotificationToHolders(ticker,'news','📰 '+co.name+': '+headline.trim());
-  toast('News posted');UI.companyTab='news';render();
+  clearDraft('news-body');toast('News posted');UI.companyTab='news';render();
 }
 async function deleteNews(id){
   const n0=DB.news.find(x=>x.id===id);if(!n0)return;
@@ -2629,7 +2638,7 @@ async function postAnnouncement(title,body,level){
   catch(e){return toast(rpcErrorMessage(e));}
   DB.announcements.unshift(rec);
   await logActivity('announcement','Announcement posted: '+title.trim(),{userId:u.id,userName:u.name});
-  toast('Announcement posted');render();
+  clearDraft('ann-body');toast('Announcement posted');render();
 }
 async function deleteAnnouncement(id){
   if(!confirm('Delete this announcement?'))return;
@@ -2830,8 +2839,18 @@ function canManageCompany(co){
 // CO-FOUNDER SYSTEM
 // ═══════════════════════════════════════════════
 
-async function removeFounder(memberId,name){
+// The founder's NAME is deliberately not a parameter. It used to be passed
+// through the onclick attribute, and esc() -- which escapes for HTML text --
+// turned a quote in the name into &quot;, which the HTML parser then decoded
+// back to a bare " INSIDE the JS string literal. A student called
+// Quinn "Q" O'Brien produced removeFounder("cm-1","Quinn "Q" O'Brien"),
+// a syntax error, so the Remove button silently did nothing forever and the
+// company owner had no way to remove that founder. The name is already
+// reachable from the member row, so nothing needs to travel through the
+// attribute but the id.
+async function removeFounder(memberId){
   const m=DB.companyMembers.find(x=>x.id===memberId);if(!m)return;
+  const name=(getUser(m.student_id)||{}).name||'This founder';
   const targetCo=DB.companies.find(c=>c.owner_id===m.company_user_id);
   if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can remove a founder');
   if(!confirm('Remove '+name+' as a founder? They will lose access to manage this company.'))return;
@@ -2903,7 +2922,7 @@ async function flagAccount(targetId,targetName,targetType,reason){
     await pushNotification(a.id,'flag','🚩 Compliance flag: '+targetName+' ('+targetType+') — '+reason.trim(),null);
   }
   await logActivity('flag','🚩 '+u.name+' flagged '+targetName+' ('+targetType+'): '+reason.trim(),{userId:u.id,userName:u.name});
-  toast('🚩 '+targetName+' flagged and Chairman notified');render();
+  clearDraft('flag-reason');toast('🚩 '+targetName+' flagged and Chairman notified');render();
 }
 async function resolveFlag(flagId,action,note){
   const f=DB.flags.find(x=>x.id===flagId);if(!f)return;
@@ -4114,7 +4133,7 @@ async function postFinancials(ticker,period,revenue,profit,summary){
   co.financials=r.financials;
   await pushNotificationToHolders(ticker,'financials','📊 '+co.name+' ('+ticker+') posted financial results for '+r.entry.period+': Revenue '+fmt(revenue)+', Profit '+fmt(profit));
   await logActivity('financials',co.name+' posted financials for '+r.entry.period+' — Rev '+fmt(revenue)+', Profit '+fmt(profit),{ticker,amount:revenue});
-  toast('Financial report posted');render();
+  clearDraft('fin-summary');toast('Financial report posted');render();
 }
 async function updateFundingGoal(ticker,goal,useOfFunds){
   const co=getCo(ticker);if(!co)return;
@@ -4131,7 +4150,7 @@ async function updateFundingGoal(ticker,goal,useOfFunds){
   try{await sb.rpc('rpc_update_funding_goal',{p_ticker:ticker,p_goal:g,p_use_of_funds:uof});}
   catch(e){return toast(rpcErrorMessage(e));}
   co.funding_goal=g;co.use_of_funds=uof;
-  toast('Funding goal updated');render();
+  clearDraft('fund-use');toast('Funding goal updated');render();
 }
 // Buybacks are executed server-side (rpc_buyback) -- besides closing the
 // same client-trusted-write gap as every other rpc_* here, the RPC also
@@ -4249,7 +4268,7 @@ async function submitIPO(name,ticker,price,shares,desc){
   DB.ipoApps.push(app);
   try{await sb.rpc('rpc_set_own_app_status',{p_status:'pending'});}catch(e){}
   const self=cu();if(self)self.app_status='pending';
-  toast('✓ IPO application submitted! Awaiting Chairman approval.');
+  clearDraft('ipo-desc');toast('✓ IPO application submitted! Awaiting Chairman approval.');
   UI.appTab='status';
   render();
 }
@@ -4293,7 +4312,7 @@ async function submitDilution(ticker,newShares,reason){
   try{app=await sb.rpc('rpc_request_dilution',{p_ticker:ticker,p_new_shares:parseInt(newShares),p_reason:reason});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.dilApps.push(app);
-  toast('Dilution application submitted');UI.companyTab='dilution';render();
+  clearDraft('dil-reason-'+ticker);toast('Dilution application submitted');UI.companyTab='dilution';render();
 }
 // Dilution approval runs server-side (rpc_review_dilution): does its own
 // atomic claim (SELECT ... FOR UPDATE, re-checks status='pending') and now
@@ -4802,7 +4821,7 @@ async function submitClassApplication(parentTicker,classType,votesPerShare,share
   catch(e){return toast(rpcErrorMessage(e));}
   DB.classApps.push(app);
   await logActivity('class_app',u.name+' applied for '+co.name+' Class '+classType+' ('+proposedTicker+')',{ticker:parentTicker,userId:u.id,userName:u.name});
-  toast('Class '+classType+' application submitted — awaiting Chairman approval');
+  clearDraft('cls-reason');toast('Class '+classType+' application submitted — awaiting Chairman approval');
   UI.companyTab='classes';render();
 }
 
@@ -5302,7 +5321,7 @@ async function submitBugReport(){
     }
     await logActivity('bug_report','🐛 '+u.name+' reported a bug: '+desc.slice(0,80),{userId:u.id,userName:u.name});
     closeBugReportModal();
-    toast('🐛 Bug report sent to the Chairman and President');
+    clearDraft('bug-desc');toast('🐛 Bug report sent to the Chairman and President');
     render();
   }catch(e){
     toast('Failed to send bug report: '+(e.message||e));
@@ -5423,6 +5442,14 @@ function doRegister(){
 // ═══════════════════════════════════════════════
 // RENDER: CHROME
 // ═══════════════════════════════════════════════
+// Initials for the avatar chip. Guarded because renderTopbar() is on EVERY
+// signed-in page: if it throws, the user has no app at all and no way out of
+// it from the browser. A row whose name is null should cost them an empty
+// avatar, not the whole exchange.
+function userInitials(name){
+  return String(name==null?'':name).trim().split(/\s+/)
+    .map(x=>x[0]||'').join('').slice(0,2).toUpperCase();
+}
 function renderTopbar(){
   const u=cu();
   const unread=myUnreadCount();
@@ -5431,7 +5458,7 @@ function renderTopbar(){
     🔔${unread?`<span style="position:absolute;top:-4px;right:-4px;background:var(--red);color:white;font-size:10px;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:600">${unread}</span>`:''}
   </button>`:'';
   const rtConnected=_realtimeChannels.length>0;
-  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span><span style="font-size:10px;margin-left:8px;color:${rtConnected?'var(--green)':'var(--text3)'}" title="${rtConnected?'Real-time connected':'Polling mode'}">${rtConnected?'●':'○'}</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${esc(u.name.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase())}</div><span>${esc(u.name)}</span>${roleBadge(u.role)}${bellBtn}<button class="logout-btn" onclick="openBugReportModal()" title="Report a bug">🐛</button><button class="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">${isLight?'🌙':'☀️'}</button><button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
+  return `<div class="topbar"><div class="logo"><span class="jex">JEX</span><span class="sep"></span><span class="full">JTED Stock Exchange</span><span style="font-size:10px;margin-left:8px;color:${rtConnected?'var(--green)':'var(--text3)'}" title="${rtConnected?'Real-time connected':'Polling mode'}">${rtConnected?'●':'○'}</span></div><div class="user-pill"><div class="avatar ${avatarClass(u.role)}">${esc(userInitials(u.name))}</div><span>${esc(u.name||'')}</span>${roleBadge(u.role)}${bellBtn}<button class="logout-btn" onclick="openBugReportModal()" title="Report a bug">🐛</button><button class="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">${isLight?'🌙':'☀️'}</button><button class="logout-btn" onclick="logout()">sign out</button></div></div>`;
 }
 function toggleTheme(){
   document.body.classList.toggle('light-mode');
@@ -6658,7 +6685,7 @@ async function convertBaseClass(parentTicker,classType,votesPerShare,restricted,
     p_whitelist:whitelistIds||[],p_reason:reason||'',p_convert:true});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.classApps.push(app);
-  toast('Conversion request submitted — awaiting Chairman approval');
+  clearDraft('conv-reason');toast('Conversion request submitted — awaiting Chairman approval');
   UI.companyTab='classes';render();
 }
 function convertBaseClassForm(parentTicker){
@@ -6787,8 +6814,8 @@ function renderFoundersTab(co,u){
     const s=getUser(m.student_id);
     html+='<div class="app-row"><div class="app-info">'
       +'<div class="app-name">'+esc((s?.name||'?'))+' <span class="badge b-blue">Founder</span></div>'
-      +'<div class="app-meta">'+(s?.email||'')+'</div></div>'
-      +'<button class="btn btn-sm btn-danger" onclick="removeFounder(&quot;'+m.id+'&quot;,&quot;'+esc((s?.name||'?'))+'&quot;)">Remove</button>'
+      +'<div class="app-meta">'+esc(s?.email||'')+'</div></div>'
+      +'<button class="btn btn-sm btn-danger" onclick="removeFounder(&quot;'+m.id+'&quot;)">Remove</button>'
       +'</div>';
   });
   pending.forEach(m=>{
@@ -7205,6 +7232,10 @@ function renderAdmin(){
   :UI.adminTab==='announcements'?renderAdminAnnouncements()
   :UI.adminTab==='classes'?renderAdminClasses()
   :UI.adminTab==='activity'?renderActivityLog()
+  // complianceTabs offers ['trades','All trades'], but there was no branch
+  // for it -- it fell off the end of this chain into renderAdminListed(), so
+  // a compliance officer clicking "All trades" got the Listed panel instead.
+  :UI.adminTab==='trades'?renderTrades(true)
   :renderAdminListed()}`;
 }
 
@@ -8247,7 +8278,7 @@ async function postMinutes(title,body){
   DB.minutes.unshift(rec);
   await logActivity('minutes','Meeting minutes posted: '+title.trim(),{userId:u.id,userName:u.name});
   await pushNotificationToAll('minutes','📋 New meeting minutes posted: '+title.trim());
-  toast('Meeting minutes posted');render();
+  clearDraft('min-body');toast('Meeting minutes posted');render();
 }
 async function deleteMinutes(id){
   if(!confirm('Delete these minutes?'))return;
@@ -8269,7 +8300,7 @@ async function postOfficialNotice(title,body){
   try{rec=await sb.rpc('rpc_post_official_notice',{p_title:title,p_body:body});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.announcements.unshift(rec);
-  toast('Official notice posted');render();
+  clearDraft('notice-body');clearDraft('min-body');toast('Official notice posted');render();
 }
 function renderAdminMinutes(){
   const u=cu();
