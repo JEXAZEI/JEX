@@ -1543,6 +1543,118 @@ ${PRELUDE}
     return UI.loginError;
   });
 
+  await step('resolving a login identity hands back no secrets', async ()=>{
+    // This RPC takes a USERNAME ONLY and is callable by anyone, before any
+    // password has been checked -- so whatever it returns is readable by an
+    // unauthenticated stranger for any account they can name.
+    //
+    // Anything hash-shaped in that response would be crackable OFFLINE, where
+    // no server-side throttle can reach it. That makes this a stricter
+    // boundary than the bulk read, not a looser one, even though this returns
+    // a single row the caller is about to log in as.
+    //
+    // email is expected and required: loginByForm needs it to call
+    // supaAuth.signInWithPassword for migrated accounts.
+    const row=await sb.rpc('rpc_resolve_login_identity',{p_identifier:'ariel',p_pool:'student'});
+    if(!row) throw new Error('a known username did not resolve');
+    for(const f of ['password','sec_a','legacy_password']){
+      if(row[f]!==undefined) throw new Error('rpc_resolve_login_identity returned '+f+
+        ' -- an unauthenticated caller can harvest that for any username and crack it offline');
+    }
+    if(!row.email) throw new Error('email is missing, so migrated sign-in cannot work');
+    return 'email only, no hashes';
+  });
+
+  // ── password recovery: the takeover chain ─────────────────
+  //
+  // Driven end to end rather than reasoned about, because this is the one
+  // path in JEX that needs no cleverness to abuse: the security question is
+  // one of eight canned ones and sec_q ships in the bulk user list, so an
+  // attacker knows WHICH question before they start guessing. Guess the
+  // answer, then reset_migrated_password writes a new password into the auth
+  // store, and the account is theirs.
+  //
+  // "u-stu" is the target here, and the attacker is nobody -- these calls run
+  // signed out, exactly as they would from a console on the login screen.
+  await step('a wrong security answer is refused', async ()=>{
+    UI.userId=null;
+    stub.recoveryAttempts.clear();
+    UI.forgotUserId='u-stu';
+    await forgotStep2('not-the-answer');
+    if(UI.loginView==='forgot-newpw') throw new Error('a wrong answer advanced to the reset screen');
+    return 'refused';
+  });
+
+  await step('the right security answer advances, and is case-insensitive', async ()=>{
+    stub.recoveryAttempts.clear();
+    UI.userId=null; UI.forgotUserId='u-stu'; UI.loginView='forgot-secq';
+    await forgotStep2('  REX  ');           // stored as 'rex'
+    if(UI.loginView!=='forgot-newpw') throw new Error('the correct answer did not advance');
+    return 'advanced';
+  });
+
+  await step('guessing the security answer is throttled after 8 attempts', async ()=>{
+    stub.recoveryAttempts.clear();
+    UI.userId=null; UI.forgotUserId='u-stu'; UI.loginView='forgot-secq';
+    const sent = () => stub.rpcCalls.filter(c=>c.fn==='verify_legacy_security_answer').length;
+    const before = sent();
+    // Eight wrong guesses: all reach the server, all refused on the merits.
+    for(let i=0;i<8;i++) await forgotStep2('guess-'+i);
+    if(sent() !== before+8) throw new Error('only '+(sent()-before)+' of 8 guesses reached the server');
+    if(UI.loginView==='forgot-newpw') throw new Error('a wrong guess advanced');
+    // The ninth is refused by the throttle, and must SAY so -- the failure
+    // this guards against is the catch turning a lockout into "Incorrect
+    // answer -- try again", which tells a student who is answering correctly
+    // to keep trying forever.
+    await forgotStep2('guess-9');
+    const t = lastToast();
+    if(!/Too many attempts/i.test(t))
+      throw new Error('the 9th attempt was not reported as throttled -- toast: '+t);
+    return '8 through, 9th throttled';
+  });
+
+  await step('the throttle still refuses even the CORRECT answer once tripped', async ()=>{
+    // The point of the counter: an attacker who guesses right on attempt 20
+    // still gets nothing. If a correct answer bypassed the throttle, the
+    // throttle would only be slowing a brute force down, not stopping it.
+    stub.recoveryAttempts.clear();
+    UI.userId=null; UI.forgotUserId='u-stu'; UI.loginView='forgot-secq';
+    for(let i=0;i<9;i++) await forgotStep2('guess-'+i);
+    await forgotStep2('rex');
+    if(UI.loginView==='forgot-newpw')
+      throw new Error('the correct answer got through AFTER the account was throttled');
+    if(!/Too many attempts/i.test(lastToast()))
+      throw new Error('expected a throttle message, got: '+lastToast());
+    return 'still refused';
+  });
+
+  await step('the password reset itself is throttled, not just the oracle', async ()=>{
+    // reset_migrated_password reads sec_a directly instead of calling the
+    // verify function, so it needs its OWN guard. Without that, skipping
+    // step 2 and brute-forcing step 3 directly would be completely uncounted
+    // -- and step 3 is the one that actually takes the account over.
+    stub.recoveryAttempts.clear();
+    UI.userId=null; UI.forgotUserId='u-stu'; UI.forgotAnswer='wrong-answer';
+    const sent = () => stub.rpcCalls.filter(c=>c.fn==='reset_migrated_password').length;
+    const before = sent();
+    for(let i=0;i<8;i++) await forgotStep3('newpassword1','newpassword1');
+    if(sent() !== before+8) throw new Error('only '+(sent()-before)+' of 8 resets reached the server');
+    await forgotStep3('newpassword1','newpassword1');
+    if(!/Too many attempts/i.test(lastToast()))
+      throw new Error('the 9th reset attempt was not throttled -- toast: '+lastToast());
+    return '8 through, 9th throttled';
+  });
+
+  await step('a throttled account is not left with a changed password', async ()=>{
+    // The whole point. After all that guessing, the real credential must be
+    // untouched -- verified by actually signing in with it.
+    stub.recoveryAttempts.clear();
+    UI.userId=null; UI.forgotUserId=null; UI.forgotAnswer=null;
+    await loginAs('student','ariel','correcthorse');
+    if(!UI.userId) throw new Error('the original password no longer works -- the account WAS taken over');
+    return 'original password still works';
+  });
+
   await step('a fresh load drops every cached email', async ()=>{
     // loginByForm caches the caller's own row, email included. A reload
     // rebuilds DB.users from the bulk endpoint, which carries no emails at

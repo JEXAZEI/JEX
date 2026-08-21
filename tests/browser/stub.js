@@ -20,8 +20,12 @@ const DATA = {
      holdings:{}, shorts:{}, watchlist:[], fund_units:{}, created_at:now},
     // Already migrated to a real Supabase Auth identity: signs in through
     // signInWithPassword.
+    // sec_q/sec_a drive the forgot-password path. The answer is stored the way
+    // production stores it -- normalised lower/trimmed -- so the throttle and
+    // the answer check can both be exercised for real.
     {id:'u-stu', name:'Ariel Ramirez-Angulo', username:'ariel', role:'student', status:'approved',
      email:'ariel@example.com', auth_uid:'auth-seed-stu',
+     sec_q:'What is the name of your first pet?', sec_a:'rex',
      cash:8500, holdings:{ACME:20, JXI:5}, shorts:{BETA:{qty:10, avgPrice:12, collateral:180}},
      watchlist:['ACME'], fund_units:{'f-1':{units:10, costBasis:10}}, classroom_id:'c-1', created_at:now},
     {id:'u-stu2', name:'Bea <script>alert(1)</script>', username:'bea', role:'student', status:'approved',
@@ -194,7 +198,41 @@ const priceImpact = (co, qty) => Math.min((qty/(co.shares*0.05))*0.015, 0.12);
 // Rejections come back the way PostgREST reports a RAISE EXCEPTION: a non-2xx
 // with a JSON body carrying `message`, which is exactly what rpcErrorMessage()
 // unwraps. Returning a plain object here would silently look like success.
-function reject(message){ const e = new Error(message); e.__rpcReject = message; throw e; }
+// `code` mirrors the SQLSTATE PostgREST puts in its error body. Most rejections
+// are plain raise-exceptions (P0001); the recovery throttle uses a private
+// JEX01 so the client can tell "locked out" apart from "wrong answer", which
+// is the whole reason it is distinguishable at all.
+function reject(message, code){ const e = new Error(message); e.__rpcReject = message; e.__rpcCode = code||'P0001'; throw e; }
+// ── recovery throttle ───────────────────────────────────────
+// Mirrors jex_recovery_throttle: at most RECOVERY_MAX attempts per ACCOUNT per
+// RECOVERY_WINDOW, counting every call whatever its outcome.
+//
+// The server version relies on a Postgres detail worth restating, because it
+// is what makes the design work: the guard RAISES, and a raise aborts the
+// whole PostgREST transaction -- including the increment that call just made.
+// So the refusing attempt can never write its own count. That is why this is a
+// rolling window rather than a locked_until timestamp: a lockout column would
+// be written by the refusing call and rolled straight back out again. Here the
+// count simply pins at the maximum and every later attempt is refused, which
+// is the same observable behaviour without needing a transaction to model it.
+const RECOVERY_MAX = 8;
+const RECOVERY_WINDOW_MS = 15*60*1000;
+const RECOVERY_ATTEMPTS = new Map();   // user_id -> {windowStart, attempts}
+window.__JEX_STUB__.recoveryAttempts = RECOVERY_ATTEMPTS;
+function recoveryThrottle(userId){
+  if(userId==null) return;             // cannot identify an account, nothing to charge
+  const now = Date.now();
+  let rec = RECOVERY_ATTEMPTS.get(userId);
+  if(!rec || now - rec.windowStart >= RECOVERY_WINDOW_MS) rec = {windowStart:now, attempts:0};
+  rec.attempts++;
+  if(rec.attempts > RECOVERY_MAX){
+    // The count is NOT persisted for the refusing attempt -- same as the
+    // server, where the raise rolls the increment back.
+    reject('Too many password recovery attempts for this account. Wait 15 minutes, '+
+           'or ask your instructor to reset it.', 'JEX01');
+  }
+  RECOVERY_ATTEMPTS.set(userId, rec);
+}
 function requireOpenSession(ticker){
   const sess = DATA.jex_session[0];
   if(sess.status !== 'open') reject('Trading is '+(sess.status||'closed')+'. Wait for the session to open.');
@@ -263,11 +301,68 @@ const RPC = {
     const u=DATA.jex_users.find(x=>inPool(x)&&(
       String(x.username||'').toLowerCase()===id ||
       String(x.email||'').toLowerCase()===id));
-    return u||null;
+    if(!u) return null;
+    // Secrets are stripped from what this hands back, and that matters more
+    // here than on the bulk read. This RPC is called with a USERNAME ONLY,
+    // before any password has been checked, by anyone -- so whatever it
+    // returns is readable by an unauthenticated caller for any account they
+    // can name. A password or sec_a hash handed out here would be crackable
+    // offline, which no server-side throttle can do anything about.
+    //
+    // email IS returned, and has to be: loginByForm needs it to call
+    // supaAuth.signInWithPassword for migrated accounts. loginByForm then
+    // caches this row into DB.users, which is why the stripping happens on
+    // the response rather than being left to the caller.
+    const c=Object.assign({},u);
+    delete c.password; delete c.sec_a; delete c.legacy_password;
+    return c;
   },
   verify_legacy_password: (p)=>{
     const u=DATA.jex_users.find(x=>x.id===p.p_user_id);
     return !!(u&&u.legacy_password&&u.legacy_password===p.p_password);
+  },
+
+  // ── password recovery, throttled ──────────────────────────
+  //
+  // Mirrors jex_recovery_throttle (recovery_throttle_migration.sql): at most
+  // 8 attempts per ACCOUNT per 15 minutes, counting every call whatever its
+  // outcome. Without it, verify_legacy_security_answer is an unlimited
+  // unauthenticated oracle against an answer to one of eight canned questions
+  // -- and reset_migrated_password then writes a new password on a hit, which
+  // is a complete account takeover needing no cleverness at all.
+  //
+  // The guard sits on the two functions that actually CHECK an answer.
+  // rpc_reset_legacy_password is deliberately not guarded directly: it calls
+  // verify_legacy_security_answer, so it is already counted through that, and
+  // guarding both would charge two attempts for one click.
+  verify_legacy_security_answer: (p)=>{
+    recoveryThrottle(p.p_user_id);
+    const u=DATA.jex_users.find(x=>x.id===p.p_user_id);
+    return !!(u&&u.sec_a&&String(u.sec_a).trim().toLowerCase()===String(p.p_answer||'').trim().toLowerCase());
+  },
+  reset_migrated_password: (p)=>{
+    // Reads sec_a itself rather than calling the verify function, which is
+    // why it needs its own guard rather than inheriting one.
+    recoveryThrottle(p.p_user_id);
+    if(!p.p_new_password||String(p.p_new_password).length<4) return false;
+    const u=DATA.jex_users.find(x=>x.id===p.p_user_id);
+    if(!u||!u.sec_a) return false;
+    if(String(u.sec_a).trim().toLowerCase()!==String(p.p_answer||'').trim().toLowerCase()) return false;
+    if(!u.auth_uid) return false;
+    // AUTH.accounts is keyed by email, so the new password is written through
+    // the account's email -- this is the step that makes the whole chain an
+    // account takeover rather than just an information leak.
+    const acct=AUTH.accounts.get(String(u.email||'').trim().toLowerCase());
+    if(acct)acct.password=p.p_new_password;
+    return true;
+  },
+  rpc_reset_legacy_password: (p)=>{
+    if(!p.p_new_pw||String(p.p_new_pw).length<4) reject('Min 4 characters');
+    if(!RPC.verify_legacy_security_answer({p_user_id:p.p_user_id,p_answer:p.p_answer}))
+      reject('Could not reset password');
+    const u=DATA.jex_users.find(x=>x.id===p.p_user_id);
+    if(u)u.legacy_password=p.p_new_pw;
+    return true;
   },
   rpc_register_pending: (p)=>{
     const name=String(p.p_name||'').trim();
@@ -791,7 +886,7 @@ window.fetch = async function(url, opts){
       try{ body = h(params); }
       catch(e){
         if(e && e.__rpcReject)
-          return new Response(JSON.stringify({message:e.__rpcReject, code:'P0001'}),
+          return new Response(JSON.stringify({message:e.__rpcReject, code:e.__rpcCode||'P0001'}),
             {status:400, headers:{'Content-Type':'application/json'}});
         throw e;
       }
