@@ -62,8 +62,40 @@ const PRELUDE = `
   out.startedAt = Date.now();
   const sleep = ms => new Promise(r=>setTimeout(r,ms));
   const stub = window.__JEX_STUB__;
+  // ── the rate limiter, between steps ──────────────────────
+  //
+  // checkRateLimit guards nine different actions now -- buys, sells, shorts,
+  // covers, limit orders, buybacks, fund deposits and withdrawals, dividends
+  // -- and they all share ONE budget of order_rate_limit (10) per minute.
+  // That is right for a student and wrong for a driver: a scenario that
+  // exercises all nine would spend most of its runtime asleep, and would then
+  // fail on the budget rather than on anything about the app.
+  //
+  // So each step starts with the limiter's memory wiped. Within a step it is
+  // fully live -- which is what makes 'back-to-back orders are rate limited'
+  // below a real test, since both of its orders happen inside one step.
+  // The limiter's own three layers are covered exhaustively, against a fake
+  // clock, in tests/test_rate_limit.js.
+  //
+  // Reached through new Function because _orderTimestamps and _lastOrderTime
+  // are top-level const in a classic script, and top-level const/let are NOT
+  // window properties. That trap has cost this harness two debugging rounds
+  // already, so this asserts it actually got the objects instead of quietly
+  // resetting nothing and leaving the sleeps to carry the run.
+  let __limiter = null;
+  try { __limiter = new Function('return {ts:_orderTimestamps, last:_lastOrderTime}')(); }
+  catch(e){ out.errors.push('cannot reach the rate limiter state: '+((e&&e.message)||e)); }
+  if(__limiter && (!__limiter.ts || !__limiter.last))
+    out.errors.push('rate limiter state resolved to something unexpected');
+  const resetLimiter = () => {
+    if(!__limiter) return;
+    for(const k of Object.keys(__limiter.ts)) delete __limiter.ts[k];
+    for(const k of Object.keys(__limiter.last)) delete __limiter.last[k];
+  };
+
   const step = async (name, fn) => {
     out.inFlight = name;
+    resetLimiter();
     const t0 = Date.now();
     try { const r = await fn(); out.steps.push({name, ok:true, info:(r===undefined?'':String(r))+' ['+(Date.now()-t0)+'ms]'}); }
     catch(e){ out.steps.push({name, ok:false, info:(e && e.message)||String(e), stack:e && e.stack}); }
@@ -496,12 +528,18 @@ ${PRELUDE}
   // tolerance here would let a REFUSED order pass as a successful one.
   const near = (a,b,tol) => Math.abs(a-b) <= (tol===undefined?0.005:tol);
   const impact = (co,qty) => Math.min((qty/(co.shares*0.05))*0.015, 0.12);
-  // placeBuy/placeSell go through checkRateLimit(), which enforces THREE
-  // limits: a 0.8s minimum gap, at most 3 orders in any 5s window, and at
-  // most order_rate_limit (10) per minute. Firing orders back to back is
-  // exactly what that is there to stop, so the driver paces itself rather
-  // than fighting it -- 1.8s keeps a steady stream under the burst rule.
-  // Shorts, covers, watchlist toggles and votes are not rate limited.
+  // checkRateLimit() enforces THREE limits: a 0.8s minimum gap, at most 3
+  // actions in any 5s window, and at most order_rate_limit (10) per minute.
+  // It now covers every money-moving action -- buys, sells, shorts, covers,
+  // limit orders, buybacks, fund deposits and withdrawals, dividends -- all
+  // sharing one budget. (It used to guard only buys and sells, which meant
+  // alternating buy/short walked straight around the cap.)
+  //
+  // Firing actions back to back is exactly what it is there to stop, so where
+  // a step performs two in a row the driver paces itself rather than fighting
+  // it -- 1.8s keeps a steady stream under the burst rule. ACROSS steps the
+  // limiter is reset instead of slept through; see resetLimiter in PRELUDE for
+  // why. Watchlist toggles and votes are still not rate limited.
   const paceOrders = () => sleep(1800);
   const clearBurstWindow = () => sleep(5200);
   // Whatever the app last told the user. Included in failures so a refused
@@ -884,6 +922,12 @@ ${PRELUDE}
     if(nav1<=pos.costBasis) throw new Error('NAV did not rise: '+nav1+' vs '+pos.costBasis);
     const mgr=DB.users.find(u=>u.id===FUND().manager_id);
     const mgrCash0=mgr.cash, cash0=DB.users.find(u=>u.id==='u-stu2').cash;
+    // Fund deposits and withdrawals share the trade rate limiter now, and this
+    // step does one of each. Without the pace the withdrawal is refused by the
+    // 0.8s floor, the position stays open, and the failure surfaces as "fee 0"
+    // -- and then again in the NEXT step as a unit count carrying this step's
+    // leftover position.
+    await paceOrders();
     await withdrawFromFund('f-1', pos.units);
     const m=DB.users.find(u=>u.id==='u-stu2');
     const mgrNow=DB.users.find(u=>u.id===FUND().manager_id);
@@ -930,6 +974,7 @@ ${PRELUDE}
       throw new Error('minted '+pos.units+' units for 130 -- expected 10 at NAV 13; '+
         'a higher number means deposits are still priced without short collateral');
 
+    await paceOrders();   // same shared limiter as the deposit above
     await withdrawFromFund('f-1', pos.units);
     const back=Math.round((DB.users.find(u=>u.id==='u-stu2').cash-cash0)*100)/100;
     if(back>0.02)

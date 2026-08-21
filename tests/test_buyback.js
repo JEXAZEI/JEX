@@ -26,6 +26,10 @@ global.toast=m=>toasts.push(m);
 global.render=()=>{};
 global.fmt=n=>'$'+n;
 global.requireOpen=()=>true;
+// Always-allow. This suite is about the buyback's money math, not pacing;
+// the limiter itself is covered by test_rate_limit.js, including the static
+// assertion that doBuyback still calls it.
+global.checkRateLimit=()=>true;
 global.rpcErrorMessage=e=>e.message;
 global.sb={rpc:async(fn,p)=>{rpcCalls.push({fn,p});return rpcImpl(p);}};
 
