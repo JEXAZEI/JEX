@@ -2698,9 +2698,24 @@ async function forgotStep1(email){
   }
   UI.forgotUserId=u.id;UI.loginView='forgot-secq';render();
 }
+// The security-answer path is throttled server-side: 8 attempts per account
+// per 15 minutes (jex_recovery_throttle, see recovery_throttle_migration.sql).
+// Without that, anyone -- signed out, from the console -- could guess a
+// classmate's answer without limit and then reset their password, and the
+// questions are eight canned ones with the chosen one published in the user
+// list, so the answers are guessable rather than secret.
+//
+// The throttle raises with SQLSTATE JEX01, which has to be told apart from a
+// wrong answer HERE, because the catch below otherwise turns being locked out
+// into "Incorrect answer -- try again" forever, for a student who is in fact
+// answering correctly.
+const RECOVERY_THROTTLED=e=>/JEX01|Too many password recovery attempts/i.test(String((e&&e.message)||e||''));
+const THROTTLE_MSG='⏳ Too many attempts — wait 15 minutes, or ask your instructor to reset your password.';
 async function forgotStep2(answer){const u=getUser(UI.forgotUserId);if(!u)return;
-  let okAns=false;
-  try{okAns=await sb.rpc('verify_legacy_security_answer',{p_user_id:u.id,p_answer:answer});}catch(e){okAns=false;}
+  let okAns=false,throttled=false;
+  try{okAns=await sb.rpc('verify_legacy_security_answer',{p_user_id:u.id,p_answer:answer});}
+  catch(e){throttled=RECOVERY_THROTTLED(e);okAns=false;}
+  if(throttled)return toast(THROTTLE_MSG);
   if(!okAns)return toast('Incorrect answer — try again');
   UI.forgotAnswer=answer;
   UI.loginView='forgot-newpw';render();}
@@ -2720,8 +2735,10 @@ async function forgotStep3(pw,conf){
     // answer itself (never trusts that forgotStep2's check alone is enough,
     // since this RPC is reachable directly) and writes the new password to
     // auth.users on success.
-    let ok=false;
-    try{ok=await sb.rpc('reset_migrated_password',{p_user_id:u.id,p_answer:UI.forgotAnswer,p_new_password:pw});}catch(e){ok=false;}
+    let ok=false,throttled=false;
+    try{ok=await sb.rpc('reset_migrated_password',{p_user_id:u.id,p_answer:UI.forgotAnswer,p_new_password:pw});}
+    catch(e){throttled=RECOVERY_THROTTLED(e);ok=false;}
+    if(throttled)return toast(THROTTLE_MSG);
     if(!ok)return toast('Could not reset password — start over from Forgot Password');
     toast('Password reset');UI.loginView='select';UI.forgotUserId=null;UI.forgotAnswer=null;render();
     return;
@@ -2732,8 +2749,12 @@ async function forgotStep3(pw,conf){
   // forgotStep2's check already happened. The previous raw PATCH here had
   // NO server-side check of any kind, making it callable with any
   // UI.forgotUserId to reset ANY account's password outright.
-  let ok=false;
-  try{ok=await sb.rpc('rpc_reset_legacy_password',{p_user_id:u.id,p_answer:UI.forgotAnswer,p_new_pw:pw});}catch(e){ok=false;}
+  let ok=false,throttled=false;
+  // Counted through its own internal verify_legacy_security_answer call, which
+  // carries the guard -- so this path is throttled once, not twice.
+  try{ok=await sb.rpc('rpc_reset_legacy_password',{p_user_id:u.id,p_answer:UI.forgotAnswer,p_new_pw:pw});}
+  catch(e){throttled=RECOVERY_THROTTLED(e);ok=false;}
+  if(throttled)return toast(THROTTLE_MSG);
   if(!ok)return toast('Could not reset password — start over from Forgot Password');
   toast('Password reset');UI.loginView='select';UI.forgotUserId=null;UI.forgotAnswer=null;render();
 }
