@@ -943,16 +943,33 @@ const isSecTre=u=>(u?.role==='secretary'||u?.role==='treasurer');
 const isOpen=()=>DB.session.status==='open';
 const isPractice=()=>!!DB.session.practice_mode;
 // ── Client-side rate limiting ────────────────────────────
+//
+// This is pacing, not security. It lives in memory in one tab, so a refresh
+// clears it and a direct RPC call never sees it -- the RPCs remain the only
+// real enforcement of funds, ownership, session state and the price band.
+// What it IS for is the classroom failure mode: a student holding down Buy
+// and walking a price 12% per click, or a laggy connection turning one
+// impatient double-click into two real orders.
+//
+// It covers every action that moves money, not just market buys and sells.
+// Shorts, covers, limit orders and buybacks all apply the same price impact
+// a market order does, so leaving them uncounted meant the cap could be
+// walked straight around by alternating buy/short. Fund deposits and
+// withdrawals don't move a price but do mint and burn units against a live
+// NAV, which is worth pacing for the same reason.
 const _orderTimestamps={};
 const _lastOrderTime={};
 const MIN_ORDER_GAP_MS=800; // min 0.8s between any two orders
-function checkRateLimit(userId){
+// `label` only shapes the message -- every action shares ONE budget on
+// purpose. Per-action budgets would just be a bigger total.
+function checkRateLimit(userId,label){
+  label=label||'orders';
   const limit=DB.session.order_rate_limit||10;
   const now=Date.now();
   // Layer 1: minimum gap between consecutive orders (stops button mashing)
   const last=_lastOrderTime[userId]||0;
   if(now-last<MIN_ORDER_GAP_MS){
-    toast('⏳ Wait a moment between orders');
+    toast('⏳ Wait a moment between '+label);
     return false;
   }
   // Layer 2: burst check — max 3 in 5 seconds
@@ -960,13 +977,13 @@ function checkRateLimit(userId){
   _orderTimestamps[userId]=_orderTimestamps[userId].filter(t=>now-t<60000);
   const burst=_orderTimestamps[userId].filter(t=>now-t<5000);
   if(burst.length>=3){
-    toast('⚠️ Too many orders too fast — wait a few seconds');
+    toast('⚠️ Too many '+label+' too fast — wait a few seconds');
     return false;
   }
   // Layer 3: per-minute cap
   if(_orderTimestamps[userId].length>=limit){
     const waitSec=Math.ceil((60000-(now-_orderTimestamps[userId][0]))/1000);
-    toast('🚫 Max '+limit+' orders/min — wait '+waitSec+'s');
+    toast('🚫 Max '+limit+' '+label+'/min — wait '+waitSec+'s');
     return false;
   }
   _lastOrderTime[userId]=now;
@@ -3901,6 +3918,11 @@ async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
   const orderType=(orderTypeEl?.value||'gtc').toLowerCase();
   const icebergQtyEl=document.getElementById('limit-iceberg-qty');
   const icebergQty=orderType==='iceberg'&&icebergQtyEl?Math.max(1,parseInt(icebergQtyEl.value)||Math.ceil(qty/4)):null;
+  // Counted against the ACTING user, not the fund -- a manager placing fund
+  // orders is still one person clicking, and a marketable limit order fills
+  // against the book and moves the price exactly like a market order does.
+  const actor=cu();
+  if(actor&&!checkRateLimit(actor.id))return;
   let r;
   try{r=await sb.rpc('rpc_place_limit_order',{p_ticker:ticker,p_side:side,p_qty:qty,p_limit_price:limitPrice,p_order_type:orderType,p_iceberg_visible:icebergQty,p_fund_id:fundId||null});}
   catch(e){return toast(rpcErrorMessage(e));}
@@ -4035,7 +4057,6 @@ function applyTradeResult(ticker,r){
 async function placeBuy(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   if(!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
-  if(!checkRateLimit(u.id))return;
   if(u.role==='company'&&co.owner_id===u.id)return toast("You can't buy your own company's stock — use Buyback instead.");
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   // JXI mints on demand -- shares_avail tracks units outstanding for it (see
@@ -4043,6 +4064,11 @@ async function placeBuy(ticker,qty){
   // fast local check doesn't apply. The server enforces the real limits
   // (funds, session status, halts) either way.
   if(!co.is_index_fund&&co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
+  // Counted LAST, after every local check has passed. It used to run first,
+  // which meant a rejected order -- a typo'd quantity, a restricted ticker --
+  // still burned a slot and its 0.8s cooldown, so correcting the typo was met
+  // with "wait a moment between orders" for something that never happened.
+  if(!checkRateLimit(u.id))return;
   let r;
   try{r=await sb.rpc('rpc_trade_buy',{p_ticker:ticker,p_qty:qty});}
   catch(e){return toast(rpcErrorMessage(e));}
@@ -4054,9 +4080,9 @@ async function placeBuy(ticker,qty){
 }
 async function placeSell(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
-  if(!checkRateLimit(u.id))return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const held=(holdings(u)[ticker])||0;if(held<qty)return toast('You only hold '+held+' shares');
+  if(!checkRateLimit(u.id))return;
   let r;
   try{r=await sb.rpc('rpc_trade_sell',{p_ticker:ticker,p_qty:qty});}
   catch(e){return toast(rpcErrorMessage(e));}
@@ -4072,6 +4098,7 @@ async function placeShort(ticker,qty){
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const coll=Math.round(co.price*qty*1.5*100)/100;
   if(u.cash<coll)return toast('Need '+fmt(coll)+' collateral');
+  if(!checkRateLimit(u.id))return;
   let r;
   try{r=await sb.rpc('rpc_trade_short',{p_ticker:ticker,p_qty:qty});}
   catch(e){return toast(rpcErrorMessage(e));}
@@ -4082,6 +4109,7 @@ async function coverShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const short=(shorts(u))[ticker];if(!short||short.qty<qty)return toast('You only have '+(short?.qty||0)+' shorted');
+  if(!checkRateLimit(u.id))return;
   let r;
   try{r=await sb.rpc('rpc_trade_cover_short',{p_ticker:ticker,p_qty:qty});}
   catch(e){return toast(rpcErrorMessage(e));}
@@ -4158,6 +4186,7 @@ async function depositToFund(fundId,amount){
   amount=parseFloat(amount);
   if(isNaN(amount)||amount<=0)return toast('Enter a valid amount');
   if(u.cash<amount)return toast('Insufficient funds');
+  if(!checkRateLimit(u.id,'fund transactions'))return;
   let r;
   try{r=await sb.rpc('rpc_fund_deposit',{p_fund_id:fundId,p_amount:amount});}
   catch(e){return toast(rpcErrorMessage(e));}
@@ -4174,6 +4203,7 @@ async function withdrawFromFund(fundId,unitsStr){
   const units=parseFloat(unitsStr);
   if(isNaN(units)||units<=0)return toast('Enter a valid number of units');
   if(units>held+0.0001)return toast('You only hold '+held+' units');
+  if(!checkRateLimit(u.id,'fund transactions'))return;
   let r;
   try{r=await sb.rpc('rpc_fund_withdraw',{p_fund_id:fundId,p_units:units});}
   catch(e){return toast(rpcErrorMessage(e));}
@@ -4324,6 +4354,7 @@ async function doBuyback(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter valid quantity');
   const sold=co.shares-co.shares_avail;if(qty>sold)return toast('Only '+sold+' shares in circulation');
+  if(!checkRateLimit(u.id,'buybacks'))return;
   let r;
   try{r=await sb.rpc('rpc_buyback',{p_ticker:ticker,p_qty:qty});}
   catch(e){return toast(rpcErrorMessage(e));}
@@ -4379,6 +4410,11 @@ async function issueDividend(ticker,perShare,note){
   }
   const sharesAcrossClasses=s=>allT.reduce((sum,t)=>sum+((s.holdings&&s.holdings[t])||0),0);
   if(!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(sharesAcrossClasses(s)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
+  // After the confirm(), so cancelling costs nothing. rpc_pay_dividend is the
+  // single heaviest call in the app -- it locks the company and then every
+  // shareholder row -- so a double-click here is the most expensive one a
+  // student can produce.
+  if(!checkRateLimit(owner.id,'payouts'))return;
   let r;
   try{r=await sb.rpc('rpc_pay_dividend',{p_ticker:ticker,p_per_share:perShare,p_note:note.trim()});}
   catch(e){return toast(rpcErrorMessage(e));}
