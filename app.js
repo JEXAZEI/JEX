@@ -1674,8 +1674,20 @@ async function startTimer(mins){clearInterval(sessionTimer);sessionTimer=null;co
 // rpc_session_tick() (see sessionAutoTick below), so a display that's
 // briefly stale for up to one 15s poll is the accepted trade-off for not
 // trusting this 500ms client timer to decide anything real anymore.
+// Restarting the countdown always CLEARS the old interval first. Three call
+// sites used to assign sessionTimer straight over the top of a live one --
+// and in sessionAutoTick two of them ran two lines apart, so a scheduled open
+// reliably orphaned an interval that nothing then held a handle to. Orphans
+// survive clearInterval(sessionTimer) forever (it only ever knows the newest)
+// and accumulate one per open/close cycle. tickTimer is cheap and idempotent,
+// so this was wasted cycles rather than wrong behaviour -- but on a room full
+// of Chromebooks, wasted cycles are the whole battery budget.
+function startSessionTimer(){
+  clearInterval(sessionTimer);
+  sessionTimer=setInterval(tickTimer,500);
+}
 function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0)return;const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
-async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});sessionTimer=setInterval(tickTimer,500);toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
+async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});startSessionTimer();toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
 async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();}
 // ── Weekly recurring schedule (different hours per day of week, repeats every week) ──
 const WEEKDAY_KEYS=['sun','mon','tue','wed','thu','fri','sat'];
@@ -1718,13 +1730,21 @@ async function sessionAutoTick(){
   if(!UI.userId)return;
   const wasOpen=DB.session.status==='open';
   let r;
-  try{r=await sb.rpc('rpc_session_tick',{});}catch(e){return;}
-  if(r.changed){
+  try{r=await sb.rpc('rpc_session_tick',{});}catch(e){r=null;}
+  // The catch used to cover only the CALL, so a null result threw on the
+  // r.changed below -- outside the try, and inside a function nothing awaits.
+  // The whole second half of this tick then never ran: no fresh companies, no
+  // fresh halts, no detection of a manual open or close, and every connected
+  // screen quietly stopped updating with nothing on screen to say why. This
+  // codebase has already been bitten once by an RPC returning null where a row
+  // was expected, so the shape is not hypothetical. A missing result just means
+  // "the scheduler changed nothing", which is the ordinary case anyway.
+  if(r&&r.changed){
     Object.assign(DB.session,r.session);
     if(checkDevModeLockout())return;
     const nowOpen=DB.session.status==='open';
     if(nowOpen&&!wasOpen){
-      sessionTimer=setInterval(tickTimer,500);
+      startSessionTimer();
       toast(DB.session.label.includes('weekly')?'🟢 Trading session opened (weekly schedule)':'Trading session is now open!');
       // The scheduler opening the market is just as much "today's open" as a
       // manual Chairman/President click -- without this, a classroom that
@@ -1756,17 +1776,23 @@ async function sessionAutoTick(){
       sb.get('jex_companies','order=created_at.asc'),
       sb.get('jex_halts','order=created_at.asc'),
     ]);
-    const nowOpen=freshSession[0]&&freshSession[0].status==='open';
-    if(freshSession[0])Object.assign(DB.session,freshSession[0]);
+    // No session row means the read told us nothing, NOT that the market
+    // closed. Treating those the same made an empty response announce
+    // "Trading session has closed" to every student and kill the countdown,
+    // for a session that was still open -- a false close is far more
+    // disruptive mid-class than a tick that quietly does nothing.
+    const gotSession=!!freshSession[0];
+    const nowOpen=gotSession&&freshSession[0].status==='open';
+    if(gotSession)Object.assign(DB.session,freshSession[0]);
     if(checkDevModeLockout())return;
     DB.companies=freshCompanies;
     DB.halts=freshHalts;
-    if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
-    if(nowOpen&&!wasOpen){
-      sessionTimer=setInterval(tickTimer,500);
+    if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)startSessionTimer();
+    if(gotSession&&nowOpen&&!wasOpen){
+      startSessionTimer();
       toast('🟢 Trading session is now open!');
       recordSessionOpenPrices();
-    } else if(!nowOpen&&wasOpen){
+    } else if(gotSession&&!nowOpen&&wasOpen){
       clearInterval(sessionTimer);sessionTimer=null;
       toast('🔴 Trading session has closed.');
     }

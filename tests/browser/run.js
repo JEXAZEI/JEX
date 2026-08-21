@@ -1686,6 +1686,36 @@ ${PRELUDE}
     return rec.name+' pending';
   });
 
+  await step('a company registration files a pending request too', async ()=>{
+    // registerCompany was one of only three server-touching functions in
+    // app.js that nothing in either harness reached. It is a near-copy of
+    // registerStudent, and a line-by-line diff of the two turned up no
+    // asymmetry -- but "I read it and it looked the same" is exactly the
+    // claim this harness exists to stop anyone making.
+    UI.userId=null; UI.loginView='register'; UI.loginTab='company'; render();
+    const pending0=stub.data.jex_pending.length, users0=DB.users.length;
+    await registerCompany('Newco Industries','newco','newco@example.com',
+      'goodpassword','We make excellent widgets','pet','Rex',true);
+    if(DB.users.length!==users0) throw new Error('company registration created a live account directly');
+    if(stub.data.jex_pending.length!==pending0+1) throw new Error('no pending request was filed');
+    const rec=stub.data.jex_pending[stub.data.jex_pending.length-1];
+    if(rec.role!=='company') throw new Error('role came out as '+rec.role);
+    // The description is the one field a company signup carries that a
+    // student's does not -- and the one the approval screen shows.
+    if(!rec.description||!/widgets/.test(rec.description))
+      throw new Error('the description did not reach the pending row: '+rec.description);
+    return rec.name+' pending';
+  });
+
+  await step('a company registration without a description is refused', async ()=>{
+    const before=stub.data.jex_pending.length;
+    await registerCompany('Nodesc Corp','nodesc','nodesc@example.com',
+      'goodpassword','','pet','Rex',true);
+    if(stub.data.jex_pending.length!==before)
+      throw new Error('a company with no description was filed anyway');
+    return 'refused';
+  });
+
   await step('a registration cannot choose its own role', ()=>{
     // The RPC pins the role; the raw POST it replaced let a signup claim
     // chairman and get approved through a screen that showed nothing odd.
