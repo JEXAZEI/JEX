@@ -642,6 +642,157 @@ ${PRELUDE}
   // The rate limiter is the thing standing between one enthusiastic student
   // and a hundred orders, so it gets its own check rather than only being
   // worked around above.
+  // ── the price band ────────────────────────────────────────
+  //
+  // The band was enforced on every path that pushes a price UP and no path
+  // that pushes one DOWN. These drive a price into the floor for real rather
+  // than asserting the rule is present somewhere.
+  //
+  // Severity, stated accurately: the circuit breaker (symmetric, 20%) already
+  // halted a stock that had moved too far, and trips before the 30% band
+  // would -- so the downside was never unbounded. The band is PREVENTIVE
+  // where the breaker is REACTIVE, and it was the preventive half that a
+  // single large sell could overshoot straight through.
+  const bandOf = t => {
+    const s=stub.data.jex_session[0], open=s.session_open_prices[t];
+    return {lower:Math.round(open*(1-s.price_band_pct/100)*100)/100,
+            upper:Math.round(open*(1+s.price_band_pct/100)*100)/100, open};
+  };
+
+  // The circuit breaker has to be out of the way for any of this. It halts at
+  // 20% from session open and the band sits at 30%, so parking a price ON the
+  // floor is by definition past the breaker -- the first run of these steps
+  // halted ACME and then cascaded into six later, unrelated failures.
+  //
+  // That is the breaker behaving exactly right, and it is worth stating what
+  // it means: in normal operation a stock reaches the band's floor only when
+  // the breaker is disabled or set wider than the band. The band is the
+  // backstop, not the first line.
+  const withoutBreaker = async fn => {
+    const s=stub.data.jex_session[0], saved=s.circuit_breaker_pct;
+    s.circuit_breaker_pct=null; DB.session.circuit_breaker_pct=null;
+    try{ return await fn(); }
+    finally{
+      s.circuit_breaker_pct=saved; DB.session.circuit_breaker_pct=saved;
+      stub.data.jex_halts.length=0; DB.halts.length=0;
+    }
+  };
+  // Everything these steps touch, put back afterwards, so a later step never
+  // inherits a price parked at the floor or a hollowed-out holding.
+  let bandSaved=null;
+  const saveBandState = () => {
+    const acme=stub.data.jex_companies.find(c=>c.ticker==='ACME');
+    const beta=stub.data.jex_companies.find(c=>c.ticker==='BETA');
+    const u=stub.data.jex_users.find(x=>x.id==='u-stu');
+    bandSaved={acme:acme.price, beta:beta.price, avail:acme.shares_avail,
+               holdings:Object.assign({},u.holdings), shorts:JSON.parse(JSON.stringify(u.shorts||{})),
+               cash:u.cash};
+  };
+  const restoreBandState = () => {
+    if(!bandSaved)return;
+    const acme=stub.data.jex_companies.find(c=>c.ticker==='ACME');
+    const beta=stub.data.jex_companies.find(c=>c.ticker==='BETA');
+    const u=stub.data.jex_users.find(x=>x.id==='u-stu');
+    acme.price=bandSaved.acme; beta.price=bandSaved.beta; acme.shares_avail=bandSaved.avail;
+    u.holdings=bandSaved.holdings; u.shorts=bandSaved.shorts; u.cash=bandSaved.cash;
+    stub.data.jex_halts.length=0; DB.halts.length=0;
+    DB.companies=JSON.parse(JSON.stringify(stub.data.jex_companies));
+    DB.users=DB.users.map(x=>x.id==='u-stu'?Object.assign({},x,{holdings:u.holdings,shorts:u.shorts,cash:u.cash}):x);
+  };
+
+  await step('a sell cannot push a price below the band floor', async ()=>{
+    saveBandState();
+    return withoutBreaker(async ()=>{
+      const b=bandOf('ACME');
+      // Park the price just above the floor and hand the seller enough stock
+      // that one order's impact would clear it comfortably.
+      const sco=stub.data.jex_companies.find(c=>c.ticker==='ACME');
+      sco.price=b.lower+0.05;
+      const su=stub.data.jex_users.find(u=>u.id==='u-stu');
+      su.holdings=Object.assign({}, su.holdings, {ACME:400});
+      DB.companies=JSON.parse(JSON.stringify(stub.data.jex_companies));
+      DB.users=DB.users.map(x=>x.id==='u-stu'?Object.assign({},x,{holdings:su.holdings}):x);
+      await placeSell('ACME', 300);
+      const after=CO().price;
+      if(after < b.lower-0.001)
+        throw new Error('price fell to '+after+', through the floor of '+b.lower);
+      return 'held at '+after+' (floor '+b.lower+')';
+    });
+  });
+
+  await step('the sell still EXECUTES at the floor -- the holder is not trapped', async ()=>{
+    // The whole reason for clamping instead of rejecting. A student holding a
+    // stock at the floor must still be able to get out; rejecting would refuse
+    // every sell at any size, since every sell pushes the price lower.
+    return withoutBreaker(async ()=>{
+      const before=(ME().holdings.ACME||0), cash0=ME().cash;
+      await placeSell('ACME', 50);
+      const sold=before-(ME().holdings.ACME||0);
+      if(sold!==50) throw new Error('the sell did not go through: '+sold+' of 50 -- toast: '+lastToast());
+      if(ME().cash<=cash0) throw new Error('the seller received nothing');
+      return 'sold 50 at the floor, +'+Math.round((ME().cash-cash0)*100)/100;
+    });
+  });
+
+  await step('shorting cannot push a price below the floor either', async ()=>{
+    return withoutBreaker(async ()=>{
+      const b=bandOf('ACME');
+      await placeShort('ACME', 200);
+      const after=CO().price;
+      if(after < b.lower-0.001) throw new Error('a short drove the price to '+after);
+      return 'held at '+after;
+    });
+  });
+
+  await step('a buy is REFUSED at the ceiling, not clamped', async ()=>{
+    // Deliberately different from the sell side. Refusing a buy costs a
+    // student an opportunity; refusing a sell would cost them the exit.
+    return withoutBreaker(async ()=>{
+      const b=bandOf('BETA');
+      const sbeta=stub.data.jex_companies.find(c=>c.ticker==='BETA');
+      sbeta.price=b.upper-0.02;
+      // The client refuses locally when shares_avail is short, which would
+      // stop the order before it ever reached the band and make this step
+      // pass for entirely the wrong reason -- it did, on the first run.
+      sbeta.shares_avail=Math.max(sbeta.shares_avail, 2000);
+      DB.companies=JSON.parse(JSON.stringify(stub.data.jex_companies));
+      const sent=()=>stub.rpcCalls.filter(c=>c.fn==='rpc_trade_buy').length;
+      const before=sent(), price0=sbeta.price;
+      await placeBuy('BETA', 400);
+      if(sent()===before) throw new Error('the order never reached the server, so this proves nothing');
+      const now=DB.companies.find(c=>c.ticker==='BETA').price;
+      if(now > b.upper+0.001) throw new Error('a buy broke through the ceiling to '+now);
+      if(now !== price0) throw new Error('the buy was clamped rather than refused -- price moved to '+now);
+      return 'refused: '+lastToast();
+    });
+  });
+
+  await step('a disabled band stops banding', async ()=>{
+    // coalesce(v_band_pct,30) meant clearing the setting silently restored it
+    // to 30% while the admin panel said "disabled". Same bug the circuit
+    // breaker had client-side.
+    return withoutBreaker(async ()=>{
+      const sess=stub.data.jex_session[0], saved=sess.price_band_pct;
+      sess.price_band_pct=null; DB.session.price_band_pct=null;
+      try{
+        const sco=stub.data.jex_companies.find(c=>c.ticker==='ACME');
+        const b={lower:Math.round(sess.session_open_prices.ACME*0.7*100)/100};
+        // Start AT the floor: with the band on, a sell here cannot move the
+        // price at all. Any movement proves the band really is off.
+        sco.price=b.lower;
+        const su=stub.data.jex_users.find(u=>u.id==='u-stu');
+        su.holdings=Object.assign({}, su.holdings, {ACME:400});
+        DB.companies=JSON.parse(JSON.stringify(stub.data.jex_companies));
+        DB.users=DB.users.map(x=>x.id==='u-stu'?Object.assign({},x,{holdings:su.holdings}):x);
+        await placeSell('ACME', 300);
+        const after=CO().price;
+        if(after >= b.lower) throw new Error('the price did not move below the floor ('+after+
+          '), so a disabled band was still being enforced');
+        return 'unbanded, fell through '+b.lower+' to '+after;
+      } finally { sess.price_band_pct=saved; DB.session.price_band_pct=saved; restoreBandState(); }
+    });
+  });
+
   await step('back-to-back orders are rate limited', async ()=>{
     await clearBurstWindow();   // the 3-in-5s rule must not pre-empt this
     const co=CO(), held0=(ME().holdings.ACME||0);

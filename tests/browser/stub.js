@@ -195,6 +195,48 @@ const caller = () => {
 };
 const findCo = t => DATA.jex_companies.find(c=>c.ticker===t);
 const priceImpact = (co, qty) => Math.min((qty/(co.shares*0.05))*0.015, 0.12);
+
+// ── the price band ────────────────────────────────────────
+// Mirrors the server-side rule. Two things about it are deliberate and easy
+// to get wrong, so they are stated here rather than left to be inferred:
+//
+// 1. A NULL price_band_pct means the instructor pressed Disable, and must
+//    turn the band OFF. The deployed SQL wrote coalesce(v_band_pct,30),
+//    which quietly restored a disabled band to 30% while the admin panel
+//    said it was off. Reproducing that here would hide the bug rather than
+//    catch it, so this checks for null explicitly.
+//
+// 2. The band never moves a price back INTO range. If a stock is already
+//    outside it -- which is possible for any stock that traded before the
+//    sell side was covered -- a trade holds it where it is instead of
+//    snapping it back. A sell order that RAISED a price would be a stranger
+//    bug than the one being fixed.
+function bandFor(co){
+  const sess=DATA.jex_session[0];
+  const pct=sess.price_band_pct;
+  if(pct==null) return null;                       // Disable means disabled
+  const open=(sess.session_open_prices||{})[co.ticker];
+  if(open==null) return null;                      // no baseline, no band
+  return {upper:r2(open*(1+pct/100)), lower:r2(open*(1-pct/100)), open, pct};
+}
+// Sell side: clamp. The order always executes; the price stops at the edge.
+const clampToBand = (co, price) => {
+  const b=bandFor(co);
+  if(!b) return price;
+  return Math.min(Math.max(price, Math.min(b.lower, co.price)),
+                  Math.max(b.upper, co.price));
+};
+// Buy side: refuse, which is what the deployed rpc_trade_buy already does.
+// Kept different from the sell side ON PURPOSE -- refusing a buy costs a
+// student an opportunity, while refusing a sell would trap them holding a
+// stock they cannot exit at any size.
+function requireInBand(co, price){
+  const b=bandFor(co);
+  if(!b) return;
+  if(price > b.upper || price < b.lower)
+    reject('Order rejected — outside price band. Allowed range: '+b.lower+' – '+b.upper+
+           ' (±'+b.pct+'% from session open '+b.open+')');
+}
 // Rejections come back the way PostgREST reports a RAISE EXCEPTION: a non-2xx
 // with a JSON body carrying `message`, which is exactly what rpcErrorMessage()
 // unwraps. Returning a plain object here would silently look like success.
@@ -397,6 +439,7 @@ const RPC = {
     requireOpenSession(p.p_ticker);
     const old=co.price;
     const price=Math.max(0.01, r2(co.price*(1+priceImpact(co,p.p_qty))));
+    requireInBand(co, price);
     const cost=r2(price*p.p_qty);
     if(u.cash < cost) reject('Not enough cash (need '+cost+')');
     if(!co.is_index_fund && co.shares_avail < p.p_qty) reject('Only '+co.shares_avail+' shares available');
@@ -418,7 +461,7 @@ const RPC = {
     const held=(u.holdings||{})[p.p_ticker]||0;
     if(held < p.p_qty) reject('You only hold '+held+' shares');
     const old=co.price;
-    const price=Math.max(0.01, r2(co.price*(1-priceImpact(co,p.p_qty))));
+    const price=clampToBand(co, Math.max(0.01, r2(co.price*(1-priceImpact(co,p.p_qty)))));
     u.cash=r2(u.cash + r2(price*p.p_qty));
     u.holdings=Object.assign({}, u.holdings);
     u.holdings[p.p_ticker]=held-p.p_qty;
@@ -434,8 +477,10 @@ const RPC = {
     if(!co) reject('Company not found');
     requireOpenSession(p.p_ticker);
     const old=co.price;
-    const price=Math.max(0.01, r2(co.price*(1-priceImpact(co,p.p_qty))));
-    // 150% of entry value, matching jxi_short_migration.sql.
+    const price=clampToBand(co, Math.max(0.01, r2(co.price*(1-priceImpact(co,p.p_qty)))));
+    // 150% of entry value, matching jxi_short_migration.sql. Derived from the
+    // CLAMPED price, exactly as the SQL does -- collateral computed off an
+    // unclamped price would lock up more cash than the position is worth.
     const collateral=r2(price*p.p_qty*1.5);
     if(u.cash < collateral) reject('Need '+collateral+' collateral');
     u.cash=r2(u.cash-collateral);
@@ -461,7 +506,10 @@ const RPC = {
     const sh=(u.shorts||{})[p.p_ticker];
     if(!sh || sh.qty < p.p_qty) reject('You only have '+((sh&&sh.qty)||0)+' shorted');
     const old=co.price;
-    const price=Math.max(0.01, r2(co.price*(1+priceImpact(co,p.p_qty))));
+    // Covering pushes the price UP, so this is the one sell-side function the
+    // CEILING can bite. Clamped rather than refused for the same reason as the
+    // rest: a refused cover traps a short position open.
+    const price=clampToBand(co, Math.max(0.01, r2(co.price*(1+priceImpact(co,p.p_qty)))));
     const released=r2(sh.collateral * (p.p_qty/sh.qty));
     const pnl=r2((sh.avgPrice - price) * p.p_qty);
     u.cash=r2(u.cash + released + pnl);
