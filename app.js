@@ -3574,7 +3574,14 @@ async function checkPriceAlerts(){
 // ═══════════════════════════════════════════════
 async function checkCircuitBreakers(){
   if(!isOpen())return;
-  const threshold=DB.session.circuit_breaker_pct||20;
+  // A null threshold means the instructor pressed "Disable" in the admin
+  // panel. This used to read `circuit_breaker_pct||20`, which turned that
+  // null straight back into 20 -- so the panel said "Circuit breakers
+  // disabled" while the breaker went right on halting every ticker that moved
+  // 20% from open. A control that reports itself off while still firing is
+  // worse than no control, because it gets trusted.
+  const threshold=DB.session.circuit_breaker_pct;
+  if(!threshold)return;
   const openPrices=DB.session.session_open_prices||{};
   // Once a circuit-breaker halt on a ticker is resumed, that ticker gets a
   // real cooldown window (set by rpc_admin_resume_stock) before the breaker
