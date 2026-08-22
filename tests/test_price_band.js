@@ -82,17 +82,17 @@ check('  ...and is not snapped back up to the floor either',
 check('a stock above the ceiling is HELD at its current price, not pushed higher',
       near(bandClamp('ACME', 15.50, 15.00), 15.00));
 
-// The consequence, recorded deliberately rather than discovered later: a stock
-// outside the band is FROZEN for the rest of the session. Sells cannot move it
-// (above) and buys are refused server-side, because the deployed reject reads
-// `v_new_price < v_lower` with no check that the order actually made things
-// worse. It unfreezes at the next session open, when recordSessionOpenPrices
-// recentres the baseline on the current price.
+// The clamp holding a below-floor stock still means SELLS cannot move it --
+// that half is correct and deliberate. What used to make the ticker
+// completely frozen was the other half: buys were refused too, because the
+// reject asked "is the result outside the band" rather than "does this order
+// make things worse". A buy from below the floor lifts the price back TOWARD
+// the band and was refused for it, so nothing anyone did could shift the
+// price at all until the next session open recentred the baseline.
 //
-// Reachable only via an admin price adjustment or a pre-existing out-of-band
-// price now that both trading sides are covered -- but real, and this is the
-// test that will fail first if the reject condition is ever tightened.
-check('a frozen stock stays frozen within the session (documented, not desired)',
+// Fixed in unfreeze_band_migration.sql; the buy-side half is asserted below
+// through the preview, which mirrors the server's condition.
+check('a below-floor stock still cannot be pushed lower by selling',
       near(bandClamp('ACME', 5.00, 6.00), 6.00) && near(bandClamp('ACME', 5.99, 6.00), 6.00));
 
 // Disable must mean disabled. The SQL used to coalesce a null band back to
@@ -145,6 +145,22 @@ check('a buy past the ceiling warns it will be refused', /will be refused/.test(
 const okHtml=impactPreview({ticker:'ACME', price:10.00, shares:1000, is_index_fund:false}, 10, 'buy');
 check('an ordinary order carries no band note',
       !/Limit down|will be refused/.test(okHtml));
+
+// ── the freeze, from the buy side ──
+// ACME below its 7.00 floor. A buy lifts the price back toward the band, so
+// it must NOT be warned about -- telling a student the order will be refused
+// when it succeeds is worse than saying nothing.
+const lowHtml=impactPreview({ticker:'ACME', price:6.00, shares:1000, is_index_fund:false}, 50, 'buy');
+check('a buy on a below-floor stock is not warned as refused',
+      !/will be refused/.test(lowHtml), lowHtml.slice(0,240));
+check('  ...and says why buying is allowed there',
+      /below the .* band floor/.test(lowHtml) && /moves the price back toward/.test(lowHtml),
+      lowHtml.slice(0,240));
+
+// A buy that pushes a stock FURTHER above the ceiling is still refused.
+const aboveHtml=impactPreview({ticker:'ACME', price:15.00, shares:1000, is_index_fund:false}, 400, 'buy');
+check('a buy pushing further above the ceiling is still warned',
+      /will be refused/.test(aboveHtml), aboveHtml.slice(0,240));
 
 console.log(fails?('\n'+fails+' FAILURE(S)'):'\nAll price-band checks passed.');
 process.exit(fails?1:0);

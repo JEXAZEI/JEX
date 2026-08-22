@@ -230,10 +230,18 @@ const clampToBand = (co, price) => {
 // Kept different from the sell side ON PURPOSE -- refusing a buy costs a
 // student an opportunity, while refusing a sell would trap them holding a
 // stock they cannot exit at any size.
+// Refused only when the order moves the price FURTHER outside the band, not
+// merely when the result is outside it. Those are different questions for a
+// stock already out of range, and the difference used to freeze the ticker
+// solid: a buy on a stock below the floor lifts the price back TOWARD the
+// band and was refused for it, while sells could not move it either (the
+// clamp correctly holds it). Nothing any student did could shift the price
+// until the next session open recentred the baseline.
 function requireInBand(co, price){
   const b=bandFor(co);
   if(!b) return;
-  if(price > b.upper || price < b.lower)
+  const worse=(price > b.upper && price > co.price) || (price < b.lower && price < co.price);
+  if(worse)
     reject('Order rejected — outside price band. Allowed range: '+b.lower+' – '+b.upper+
            ' (±'+b.pct+'% from session open '+b.open+')');
 }

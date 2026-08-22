@@ -793,6 +793,54 @@ ${PRELUDE}
     });
   });
 
+  await step('a stock below the floor is not frozen -- a buy can lift it back', async ()=>{
+    // The freeze. Sells cannot move a below-floor stock (the clamp holds it,
+    // correctly), so if buys are refused too then NOTHING anyone does can
+    // shift the price until the next session open. The old reject asked "is
+    // the result outside the band" instead of "does this order make things
+    // worse", and a buy from below the floor is still below the floor.
+    saveBandState();
+    return withoutBreaker(async ()=>{
+      try{
+        const b=bandOf('ACME');
+        const sco=stub.data.jex_companies.find(c=>c.ticker==='ACME');
+        sco.price=Math.round((b.lower-1.00)*100)/100;      // stranded below the floor
+        sco.shares_avail=Math.max(sco.shares_avail, 2000);
+        DB.companies=JSON.parse(JSON.stringify(stub.data.jex_companies));
+        const before=CO().price;
+        const sent=()=>stub.rpcCalls.filter(c=>c.fn==='rpc_trade_buy').length;
+        const n0=sent();
+        await placeBuy('ACME', 50);
+        if(sent()===n0) throw new Error('the buy never reached the server, so this proves nothing');
+        const after=CO().price;
+        if(after<=before)
+          throw new Error('the price did not rise ('+before+' -> '+after+'): the stock is still frozen');
+        if(after>b.lower)
+          throw new Error('one buy jumped it past the floor to '+after+', which is not the intent');
+        return before+' -> '+after+', lifted back toward the '+b.lower+' floor';
+      } finally { restoreBandState(); }
+    });
+  });
+
+  await step('...but a buy pushing further above the ceiling is still refused', async ()=>{
+    saveBandState();
+    return withoutBreaker(async ()=>{
+      try{
+        const b=bandOf('BETA');
+        const sbeta=stub.data.jex_companies.find(c=>c.ticker==='BETA');
+        sbeta.price=Math.round((b.upper+1.00)*100)/100;    // already above the ceiling
+        sbeta.shares_avail=Math.max(sbeta.shares_avail, 2000);
+        DB.companies=JSON.parse(JSON.stringify(stub.data.jex_companies));
+        const before=DB.companies.find(c=>c.ticker==='BETA').price;
+        await placeBuy('BETA', 400);
+        const after=DB.companies.find(c=>c.ticker==='BETA').price;
+        if(after!==before)
+          throw new Error('a buy moved an already-over-ceiling stock further up: '+before+' -> '+after);
+        return 'refused at '+before+' (ceiling '+b.upper+')';
+      } finally { restoreBandState(); }
+    });
+  });
+
   await step('back-to-back orders are rate limited', async ()=>{
     await clearBurstWindow();   // the 3-in-5s rule must not pre-empt this
     const co=CO(), held0=(ME().holdings.ACME||0);
