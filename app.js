@@ -4995,8 +4995,14 @@ function impactPreview(co,qty,dir){
   if(b){
     if(dir==='buy'){
       const raw=Math.max(0.01,Math.round(co.price*(1+Math.min((qty/(co.shares*0.05))*0.015,0.12))*100)/100);
-      if(raw>b.upper)
+      // Mirrors the server's reject test: refused only if the order moves the
+      // price FURTHER outside the band. A buy on a stock sitting below the
+      // floor lifts it back toward the band and is allowed -- warning about
+      // that one would be telling a student their order fails when it works.
+      if(raw>b.upper&&raw>co.price)
         note=`<div style="margin-top:4px;color:var(--warn,#E0A800)">⚠ Above the price band ceiling of ${fmt(b.upper)} — this order will be refused. Try a smaller quantity.</div>`;
+      else if(co.price<b.lower)
+        note=`<div style="margin-top:4px;color:var(--text2)">${co.ticker} is below the ${fmt(b.lower)} band floor. Buying is allowed — it moves the price back toward the band.</div>`;
     } else if(np<=b.lower&&co.price>b.lower){
       note=`<div style="margin-top:4px;color:var(--text2)">Limit down — held at the ${fmt(b.lower)} floor (±${b.pct}% from the ${fmt(b.open)} open). The sale still goes through.</div>`;
     }
