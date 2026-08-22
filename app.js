@@ -1054,7 +1054,35 @@ const divTotal=(ticker,ps)=>{
   const indirect=Object.entries(map).filter(([k])=>k.startsWith('fund_')||k.startsWith('index_')).reduce((s,[,sh])=>s+Math.round(((sh.shares[ticker])||0)*ps*100)/100,0);
   return Math.round((direct+indirect)*100)/100;
 };
-const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);return Math.max(0.01,Math.round((dir==='buy'?co.price*(1+impact):co.price*(1-impact))*100)/100);};
+// ── the price band, client side ─────────────────────────────
+// Mirrors jex_band_clamp() (price_band_migration.sql). This is preview only --
+// the server applies the real rule and is the only thing that decides a fill.
+// It exists so the number a student reads before clicking is the number they
+// get, which stopped being true the moment the server started clamping.
+//
+// A null price_band_pct means the instructor pressed Disable and there is no
+// band. The SQL used to write coalesce(v_band_pct,30), which silently turned
+// a disabled band back into 30%; reproducing that here would hide it again.
+function bandLimits(ticker){
+  const pct=DB.session.price_band_pct;
+  if(pct==null)return null;
+  const open=(DB.session.session_open_prices||{})[ticker];
+  if(open==null)return null;
+  return {upper:Math.round(open*(1+pct/100)*100)/100,
+          lower:Math.round(open*(1-pct/100)*100)/100, open, pct};
+}
+// Never moves a price back INTO the band -- a stock already outside it is held
+// where it is, not snapped back. Same rule, same reason, as the SQL.
+function bandClamp(ticker,price,current){
+  const b=bandLimits(ticker);
+  if(!b)return price;
+  return Math.min(Math.max(price,Math.min(b.lower,current)),Math.max(b.upper,current));
+}
+// Sells, shorts and covers are CLAMPED server-side, so the preview clamps too.
+// Buys are REJECTED, so their preview keeps showing the raw impact price --
+// that really is what the order would attempt; impactPreview says separately
+// that it would be refused.
+const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);const raw=Math.max(0.01,Math.round((dir==='buy'?co.price*(1+impact):co.price*(1-impact))*100)/100);return dir==='buy'?raw:bandClamp(co.ticker,raw,co.price);};
 // Largest quantity actually affordable at the IMPACTED fill price, not at
 // the quoted price. A market buy never fills at co.price -- impactPrice()
 // pushes it up by (qty/liq)*0.015 -- so floor(cash/co.price) always
@@ -4952,7 +4980,28 @@ function impactPreview(co,qty,dir){
     return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">Fill: <strong>${fmt(co.price)}</strong> <span style="color:var(--text2)">live index price, no price impact</span> &nbsp;|&nbsp; Total: <strong>${fmt(total)}</strong></div>`;
   }
   const np=impactPrice(co,qty,dir),delta=np-co.price,pct=((delta/co.price)*100).toFixed(2),cls=dir==='buy'?'price-up':'price-down';
-  return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">Fill: <strong>${fmt(np)}</strong> <span class="${cls}">${delta>=0?'+':''}${fmt(delta)} (${delta>=0?'+':''}${pct}%)</span> &nbsp;|&nbsp; Total: <strong>${fmt(np*qty)}</strong></div>`;
+  // The band note. Two different situations, because the server treats the two
+  // sides differently on purpose:
+  //
+  //   sell/short/cover  the fill is CLAMPED at the band edge, so the price
+  //                     above is already the real one and just needs
+  //                     explaining -- otherwise a quantity that stops moving
+  //                     the estimate looks like the app has frozen.
+  //   buy               the order is REJECTED, so the price above is what it
+  //                     would attempt, not what it would get. Better to say so
+  //                     here than to let a student click and be refused.
+  const b=bandLimits(co.ticker);
+  let note='';
+  if(b){
+    if(dir==='buy'){
+      const raw=Math.max(0.01,Math.round(co.price*(1+Math.min((qty/(co.shares*0.05))*0.015,0.12))*100)/100);
+      if(raw>b.upper)
+        note=`<div style="margin-top:4px;color:var(--warn,#E0A800)">⚠ Above the price band ceiling of ${fmt(b.upper)} — this order will be refused. Try a smaller quantity.</div>`;
+    } else if(np<=b.lower&&co.price>b.lower){
+      note=`<div style="margin-top:4px;color:var(--text2)">Limit down — held at the ${fmt(b.lower)} floor (±${b.pct}% from the ${fmt(b.open)} open). The sale still goes through.</div>`;
+    }
+  }
+  return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">Fill: <strong>${fmt(np)}</strong> <span class="${cls}">${delta>=0?'+':''}${fmt(delta)} (${delta>=0?'+':''}${pct}%)</span> &nbsp;|&nbsp; Total: <strong>${fmt(np*qty)}</strong>${note}</div>`;
 }
 function shortPrev(co,qty){if(!qty||qty<=0)return'';const c=Math.round(co.price*qty*1.5*100)/100;return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:rgba(83,74,183,0.1);border-radius:var(--radius);color:#AFA9EC">Short ${qty} @ ${fmt(co.price)} | Collateral: <strong>${fmt(c)}</strong></div>`;}
 // ── Quick-quantity buttons (1/5/10/Max·All) shared by both trade panels
