@@ -990,33 +990,11 @@ function checkRateLimit(userId,label){
   _orderTimestamps[userId].push(now);
   return true;
 }
-// Superseded by busy(), which holds a button for the REAL duration of its
-// action instead of a fixed 1500ms guess -- that both unlocked too early on
-// a slow request and sat needlessly disabled after a fast one. Kept only so
-// any external/bookmarked caller does not break; no onclick uses it now.
-function disableTradeBtn(btn,ms=1500){
-  if(!btn)return;
-  btn.disabled=true;btn.style.opacity='0.5';
-  setTimeout(()=>{btn.disabled=false;btn.style.opacity='';},ms);
-}
 const requireOpen=(ticker=null)=>{
   if(!isOpen()){toast('Trading is '+DB.session.status+'. Wait for the session to open.');return false;}
   if(ticker&&isHalted(ticker)){toast(ticker+' trading is currently halted.');return false;}
   return true;
 };
-function checkPriceBand(ticker,orderPrice){
-  const bandPct=DB.session.price_band_pct||30;
-  const openPrices=DB.session.session_open_prices||{};
-  const openPrice=openPrices[ticker];
-  if(!openPrice)return true; // no band if no session-open price recorded
-  const upperBand=Math.round(openPrice*(1+bandPct/100)*100)/100;
-  const lowerBand=Math.round(openPrice*(1-bandPct/100)*100)/100;
-  if(orderPrice>upperBand||orderPrice<lowerBand){
-    toast('Order rejected — outside price band. Allowed range: '+fmt(lowerBand)+' – '+fmt(upperBand)+' (±'+bandPct+'% from session open '+fmt(openPrice)+')');
-    return false;
-  }
-  return true;
-}
 function getPreMarketPrice(ticker){
   // Estimate price from queued after-hours orders
   const ahOrders=DB.limitOrders.filter(o=>o.status==='after_hours'&&o.ticker===ticker);
@@ -6401,22 +6379,6 @@ function renderMarketInPlace(){
   const rows=document.getElementById('market-rows');
   if(rows)rows.innerHTML=renderMarketRows(u,getMarketListed(u));
   setTimeout(()=>buildSparklines(),60);
-}
-function setupCoSwipe(){
-  const el=document.getElementById('co-page-wrap');
-  if(!el||el._sw)return;el._sw=true;
-  let sx=0,sy=0;
-  el.addEventListener('touchstart',e=>{sx=e.touches[0].clientX;sy=e.touches[0].clientY;},{passive:true});
-  el.addEventListener('touchend',e=>{
-    const dx=e.changedTouches[0].clientX-sx,dy=e.changedTouches[0].clientY-sy;
-    if(Math.abs(dx)<Math.abs(dy)||Math.abs(dx)<50)return;
-    const tabs=['overview','trade','shareholders','news','votes','dividends','buyback','dilution'];
-    const cur=tabs.indexOf(UI.companyPageTab);
-    if(dx<0&&cur<tabs.length-1)UI.companyPageTab=tabs[cur+1];
-    else if(dx>0&&cur>0)UI.companyPageTab=tabs[cur-1];
-    else return;
-    render();setTimeout(setupCoSwipe,120);
-  },{passive:true});
 }
 function closeCompanyPage(){
   UI.companyPage=null;destroyCharts();render();
