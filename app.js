@@ -2501,8 +2501,15 @@ async function loginByForm(){
     return render();
   }
   if(!u){UI.loginError='Invalid username or password';return render();}
+  // MERGED onto the cached row, not substituted for it. The bulk row already
+  // loaded here carries cash/holdings/shorts/fund_units; this response is an
+  // identity lookup and is free to carry fewer fields than that. Replacing
+  // wholesale means a narrower response silently blanks the balances until
+  // loadPrivateData() finishes, so one render goes out with an undefined cash.
+  // Merging also stops an identity lookup from being able to OVERWRITE a
+  // balance, which is not its job.
   const idx=DB.users.findIndex(x=>x.id===u.id);
-  if(idx>=0)DB.users[idx]=u;else DB.users.push(u);
+  if(idx>=0)DB.users[idx]=Object.assign({},DB.users[idx],u);else DB.users.push(u);
   // Secretary/Treasurer/Compliance Officer sign in with a username only — their
   // email exists purely as the backing Supabase Auth credential, not something
   // they're meant to use or see day-to-day, unlike Chairman/President. Only
@@ -2712,8 +2719,9 @@ async function forgotStep1(email){
   let u;
   try{u=await sb.rpc('rpc_resolve_login_identity',{p_identifier:email,p_pool:'any'});}catch(e){u=null;}
   if(!u)return toast('No account found with that email');
+  // Merged, not substituted -- same reasoning as loginByForm above.
   const idx=DB.users.findIndex(x=>x.id===u.id);
-  if(idx>=0)DB.users[idx]=u;else DB.users.push(u);
+  if(idx>=0)DB.users[idx]=Object.assign({},DB.users[idx],u);else DB.users.push(u);
   if(u.auth_provider==='google'&&supaAuth){
     // Google-linked accounts have a real, Google-verified email, so the built-in
     // email reset is meaningful for them. Migrated-local accounts (auth_uid set,
