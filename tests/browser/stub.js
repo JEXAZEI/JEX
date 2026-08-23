@@ -680,6 +680,25 @@ const RPC = {
     const buyer=DATA.jex_users.find(u=>u.id===bid.user_id);
     const seller=DATA.jex_users.find(u=>u.id===ask.user_id);
     const cost=r2(price*qty);
+    // Re-checked HERE, at match time, not merely when the order was placed.
+    // A resting order is a promise about a future the student can invalidate:
+    // own 10, place a sell limit for 10, market-sell the 10, and this match
+    // would settle against shares that no longer exist. A randomised run found
+    // exactly that -- a seller's holding went to -4 -- because this function
+    // subtracted without asking.
+    //
+    // An order that cannot settle is CANCELLED rather than left resting, so it
+    // does not sit at the top of the book blocking every match behind it and
+    // failing again on every poll.
+    const sellerHeld=(seller.holdings||{})[p.p_ticker]||0;
+    if(sellerHeld < qty){
+      ask.status='cancelled';
+      return {matched:false, reason:'seller no longer holds the shares', cancelled_order_id:ask.id};
+    }
+    if(buyer.cash < cost){
+      bid.status='cancelled';
+      return {matched:false, reason:'buyer can no longer afford the fill', cancelled_order_id:bid.id};
+    }
     buyer.cash=r2(buyer.cash-cost);
     buyer.holdings=Object.assign({},buyer.holdings);
     buyer.holdings[p.p_ticker]=(buyer.holdings[p.p_ticker]||0)+qty;

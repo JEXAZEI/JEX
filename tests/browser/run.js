@@ -1742,6 +1742,251 @@ ${PRELUDE}
     return UI.loginError;
   });
 
+  // An unbacked sell limit order, found by the randomised run below and pinned
+  // here so it stays fixed. Two separate things have to hold, and only the
+  // second one actually protects the exchange.
+  await step('a sell limit order must be backed by shares', async ()=>{
+    const before=DB.limitOrders.length;
+    const me=ME();
+    const held=(me.holdings||{}).BETA||0;
+    await placeLimitOrder('BETA','sell',held+500,1.00,null);
+    if(DB.limitOrders.length!==before)
+      throw new Error('an unbacked sell limit order was accepted onto the book');
+    return 'refused at placement';
+  });
+
+  await step('a limit order that can no longer settle is cancelled, not filled', async ()=>{
+    // The case a placement-time check CANNOT catch: the order was legitimate
+    // when placed and stopped being so afterwards. Own some, promise them to
+    // the book, then sell them out from under the promise.
+    saveBandState();
+    return withoutBreaker(async ()=>{
+      try{
+        const sco=stub.data.jex_companies.find(c=>c.ticker==='ACME');
+        const seller=stub.data.jex_users.find(u=>u.id==='u-stu2');
+        const buyer =stub.data.jex_users.find(u=>u.id==='u-stu');
+        stub.data.jex_limit_orders.length=0;
+        seller.holdings=Object.assign({},seller.holdings,{ACME:5});
+        buyer.cash=Math.max(buyer.cash, 10000);
+        // A matching pair that WOULD cross.
+        stub.data.jex_limit_orders.push(
+          {id:'lo-ask', user_id:'u-stu2', ticker:'ACME', side:'sell', qty:5,
+           limit_price:1.00, status:'open', created_at:new Date(Date.now()-1000).toISOString()},
+          {id:'lo-bid', user_id:'u-stu',  ticker:'ACME', side:'buy',  qty:5,
+           limit_price:sco.price+50, status:'open', created_at:new Date().toISOString()});
+        // ...and now the seller no longer has them.
+        seller.holdings=Object.assign({},seller.holdings); delete seller.holdings.ACME;
+        const r=await sb.rpc('rpc_match_limit_order_book',{p_ticker:'ACME'});
+        if(r&&r.matched)
+          throw new Error('the book matched against shares the seller no longer held');
+        const after=(stub.data.jex_users.find(u=>u.id==='u-stu2').holdings||{}).ACME||0;
+        if(after<0) throw new Error('the seller went to '+after+' shares');
+        const ask=stub.data.jex_limit_orders.find(o=>o.id==='lo-ask');
+        if(ask.status==='open')
+          throw new Error('the unsettleable order is still resting on the book, where it will '+
+            'block every match behind it and fail again on every poll');
+        return 'not matched, order '+ask.status;
+      } finally { stub.data.jex_limit_orders.length=0; restoreBandState(); }
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // Randomised conservation run
+  // ══════════════════════════════════════════════════════════
+  //
+  // Every other step in this file checks a situation someone thought of. The
+  // bugs that actually hurt are the ones nobody thought of -- the fund NAV
+  // gap, the buy-side-only price band, the frozen ticker. So this one does not
+  // pick situations at all: it fires hundreds of arbitrary operations at the
+  // exchange and, after EVERY ONE, checks that the books still balance.
+  //
+  // It cannot find a bug in your Postgres functions -- it drives the stub,
+  // which is my model of them. What it CAN do is prove the model is
+  // internally consistent under pressure, and an invariant that breaks here is
+  // worth going and checking against the real SQL, because the two are meant
+  // to implement the same arithmetic.
+  //
+  // Seeded, so a failure is reproducible rather than "it went red once on
+  // Tuesday". The seed and the operation number are in the message.
+  //
+  // The invariants are deliberately the ones that are TRUE BY CONSTRUCTION for
+  // a correct exchange, not approximations:
+  //
+  //   shares       every share exists in exactly one place. sum(all holdings)
+  //                + shares_avail never changes for a company, no matter what
+  //                trades happen. Only issuance and buybacks may move it, and
+  //                those are excluded from the operation mix for that reason.
+  //   fund units   units_outstanding equals the sum of what unit-holders hold.
+  //                A deposit that mints the wrong number of units breaks this
+  //                -- which is exactly the class of bug the NAV gap was.
+  //   floors       no negative cash, no negative holding, no negative unit
+  //                count. Postgres has CHECK constraints for the first two;
+  //                this catches the client and the model disagreeing before
+  //                the database has to.
+  //   collateral   every open short holds exactly 150% of its entry value.
+  //   numbers      nothing is NaN. A single NaN silently poisons net worth,
+  //                the leaderboard and every statistic derived from it.
+  const mulberry32 = a => () => {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  // Several seeds, because one seed explores exactly one path through the
+  // engine and proves nothing about the others. Each is cheap (~1.3s) and
+  // deterministic, so a failure names the seed and can be replayed exactly.
+  for(const SEED of [20260823, 7, 991117]){
+  await step('randomised trading keeps the books balanced (seed '+SEED+')', async ()=>{
+    const OPS = 250;
+    const rnd = mulberry32(SEED);
+    const pick = arr => arr[Math.floor(rnd()*arr.length)];
+
+    // Full snapshot; this run mutates everything and must leave no trace.
+    const savedStub = JSON.parse(JSON.stringify(stub.data));
+    const savedDB   = JSON.parse(JSON.stringify({users:DB.users, companies:DB.companies,
+                                                 funds:DB.funds, session:DB.session}));
+    const savedUser = UI.userId;
+
+    return withoutBreaker(async ()=>{
+      try{
+        // Tradeable, non-index tickers only. JXI mints on demand, so its
+        // shares_avail is units outstanding rather than a fixed float and the
+        // conservation identity below does not apply to it.
+        const tickers = stub.data.jex_companies
+          .filter(c=>!c.is_index_fund && c.status!=='delisted').map(c=>c.ticker);
+        const students = stub.data.jex_users.filter(u=>u.role==='student').map(u=>u.id);
+        const fundIds  = (stub.data.jex_funds||[]).map(f=>f.id);
+        if(!tickers.length || !students.length) throw new Error('nothing to fuzz with');
+
+        // Baseline the conserved quantities rather than assuming the seed is
+        // already balanced -- what matters is that they do not CHANGE.
+        const sharesOf = t => stub.data.jex_users.reduce((n,u)=>n+((u.holdings||{})[t]||0), 0)
+                            + (stub.data.jex_companies.find(c=>c.ticker===t).shares_avail||0);
+        const unitsOf  = f => stub.data.jex_users.reduce((n,u)=>{
+                                const p=(u.fund_units||{})[f]; return n+(p&&p.units||0); }, 0);
+        const priceOf  = t => (stub.data.jex_companies.find(c=>c.ticker===t)||{}).price || 1;
+        const baseShares = {}; tickers.forEach(t=>baseShares[t]=sharesOf(t));
+        // The GAP between the fund's own unit count and what holders actually
+        // hold -- baselined, not assumed zero. Earlier steps deliberately park
+        // a fund at units_outstanding=100 with a single 10-unit holder to test
+        // NAV, so demanding equality here fails before the fuzz even starts.
+        // What must not change is the gap: a deposit that mints the wrong
+        // number of units moves it, which is exactly the NAV-gap bug's shape.
+        const gapOf = f => Math.round(((stub.data.jex_funds.find(x=>x.id===f)||{}).units_outstanding||0)
+                                      - unitsOf(f)) ;
+        const baseGap = {}; fundIds.forEach(f=>baseGap[f]=gapOf(f));
+
+        const bad = (i, op, msg) =>
+          new Error('seed '+SEED+', op #'+i+' ('+op+'): '+msg);
+
+        let attempted=0, succeeded=0;
+        for(let i=0;i<OPS;i++){
+          resetLimiter();                      // pacing is not what this tests
+          UI.userId = pick(students);
+          const t = pick(tickers);
+          const qty = 1 + Math.floor(rnd()*40);
+          const op = pick(['buy','buy','sell','sell','short','cover','limit',
+                           'fundIn','fundOut']);
+          attempted++;
+          const before = JSON.stringify(stub.data.jex_users.map(u=>u.cash));
+          try{
+            if(op==='buy')        await placeBuy(t, qty);
+            else if(op==='sell')  await placeSell(t, qty);
+            else if(op==='short') await placeShort(t, qty);
+            else if(op==='cover') await coverShort(t, qty);
+            else if(op==='limit') await placeLimitOrder(t, rnd()<0.5?'buy':'sell', qty,
+                                     Math.round(priceOf(t)*(0.8+rnd()*0.4)*100)/100, null);
+            else if(op==='fundIn'  && fundIds.length)
+              await depositToFund(pick(fundIds), Math.round(rnd()*500*100)/100);
+            else if(op==='fundOut' && fundIds.length)
+              await withdrawFromFund(pick(fundIds), Math.round(rnd()*5*100)/100);
+          }catch(e){ /* a refused order is a legitimate outcome, not a failure */ }
+          if(JSON.stringify(stub.data.jex_users.map(u=>u.cash))!==before) succeeded++;
+
+          // ── the books, after every single operation ──
+          for(const u of stub.data.jex_users){
+            if(!(u.cash >= -0.005)) throw bad(i, op, u.id+' has negative cash: '+u.cash);
+            if(Number.isNaN(u.cash)) throw bad(i, op, u.id+' cash is NaN');
+            for(const [tk,n] of Object.entries(u.holdings||{})){
+              if(!(n >= 0)) throw bad(i, op, u.id+' holds '+n+' of '+tk);
+              if(Number.isNaN(n)) throw bad(i, op, u.id+' holding of '+tk+' is NaN');
+            }
+            for(const [tk,sh] of Object.entries(u.shorts||{})){
+              if(!sh) continue;
+              if(!(sh.qty >= 0)) throw bad(i, op, u.id+' short qty '+sh.qty+' on '+tk);
+              // RELATIVE tolerance, and the reason matters more than the number.
+              //
+              // collateral accumulates the cash actually deducted on each
+              // short, every instalment rounded to a cent. avgPrice is a
+              // rounded weighted average. Two independently rounded numbers
+              // cannot stay exactly consistent: short 10 at 12.34 then 7 at
+              // 13.01 and collateral is 321.71 while 1.5 x 12.62 x 17 is
+              // 321.81.
+              //
+              // The drift is in avgPrice, which is DERIVED, not in the money.
+              // Cover releases collateral * (qty/sh.qty), so exactly what was
+              // locked comes back. Recomputing collateral from avgPrice to
+              // make this exact would make the locked cash differ from the
+              // cash deducted, which really would create or destroy money.
+              //
+              // So this is not the check being loosened to go green. An actual
+              // formula error -- dropping the 1.5, using the current price
+              // instead of the entry price -- is wrong by tens of percent and
+              // still caught. Rounding drift is a fraction of one percent.
+              const want = Math.round(sh.avgPrice*sh.qty*1.5*100)/100;
+              if(Math.abs((sh.collateral||0) - want) > Math.max(0.05, want*0.01))
+                throw bad(i, op, u.id+' short on '+tk+' holds '+sh.collateral+
+                  ' collateral, 150% of entry is '+want+' -- off by '+
+                  (Math.round(Math.abs(sh.collateral-want)/want*10000)/100)+'%, too much for rounding');
+              if(sh.collateral < 0) throw bad(i, op, u.id+' short collateral is negative');
+            }
+            for(const [fid,pos] of Object.entries(u.fund_units||{})){
+              if(pos && !(pos.units >= 0)) throw bad(i, op, u.id+' holds '+pos.units+' units of '+fid);
+            }
+          }
+          for(const tk of tickers){
+            const now = sharesOf(tk);
+            if(now !== baseShares[tk])
+              throw bad(i, op, tk+': shares went from '+baseShares[tk]+' to '+now+
+                ' -- stock was created or destroyed by trading');
+          }
+          for(const fid of fundIds){
+            const f = stub.data.jex_funds.find(x=>x.id===fid);
+            if(Math.abs(gapOf(fid) - baseGap[fid]) > 0.5)
+              throw bad(i, op, fid+': units_outstanding minus holders went from '+
+                baseGap[fid]+' to '+gapOf(fid)+' -- a deposit or withdrawal minted the wrong number');
+            if(Number.isNaN(f.cash)) throw bad(i, op, fid+' fund cash is NaN');
+            if(!(f.cash >= -0.005)) throw bad(i, op, fid+' fund cash went negative: '+f.cash);
+          }
+          for(const c of stub.data.jex_companies){
+            if(Number.isNaN(c.price)) throw bad(i, op, c.ticker+' price is NaN');
+            if(!(c.price > 0)) throw bad(i, op, c.ticker+' price fell to '+c.price);
+          }
+        }
+        return OPS+' ops, '+succeeded+' changed money, books balanced throughout';
+      } finally {
+        // Restored IN PLACE. stub.data is the very object the stub's own
+        // handlers close over -- reassigning it hands the tests a fresh copy
+        // while the engine goes on writing to the original, and the two
+        // silently diverge. That is exactly what happened on the first run:
+        // registration afterwards wrote to the old object and the assertions
+        // read the new one, so a passing feature looked broken.
+        for(const k of Object.keys(savedStub)){
+          if(Array.isArray(stub.data[k])){
+            stub.data[k].length = 0;
+            JSON.parse(JSON.stringify(savedStub[k])).forEach(r=>stub.data[k].push(r));
+          }
+        }
+        DB.users=savedDB.users; DB.companies=savedDB.companies;
+        DB.funds=savedDB.funds; Object.assign(DB.session, savedDB.session);
+        UI.userId=savedUser;
+        stub.data.jex_halts.length=0; DB.halts.length=0;
+      }
+    });
+  });
+  }
+
   await step('resolving a login identity hands back no secrets', async ()=>{
     // This RPC takes a USERNAME ONLY and is callable by anyone, before any
     // password has been checked -- so whatever it returns is readable by an
