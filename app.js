@@ -3986,6 +3986,28 @@ async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
   const orderType=(orderTypeEl?.value||'gtc').toLowerCase();
   const icebergQtyEl=document.getElementById('limit-iceberg-qty');
   const icebergQty=orderType==='iceberg'&&icebergQtyEl?Math.max(1,parseInt(icebergQtyEl.value)||Math.ceil(qty/4)):null;
+  // Fast local feedback that the order is backed by something. A randomised
+  // run placed a sell limit from an account holding none of the stock, it
+  // matched against a resting bid, and the seller's holding went to -4.
+  //
+  // This is NOT the fix -- it cannot be. A student can own 10, place a sell
+  // limit for all 10, market-sell the 10, and the limit still fills later
+  // against shares that no longer exist. Only the FILL can settle that, which
+  // is why rpc_match_limit_order_book has to re-check at match time and this
+  // is just the message that saves an obviously doomed order from ever
+  // resting on the book.
+  if(!fundId){
+    const actorU=cu();
+    if(actorU){
+      if(side==='sell'){
+        const held=(holdings(actorU)[ticker])||0;
+        if(held<qty)return toast('You only hold '+held+' '+ticker+' — a sell limit order still has to be backed by shares.');
+      }else{
+        const need=Math.round(qty*limitPrice*100)/100;
+        if(actorU.cash<need)return toast('That would cost '+fmt(need)+' if it fills, and you have '+fmt(actorU.cash)+'.');
+      }
+    }
+  }
   // Counted against the ACTING user, not the fund -- a manager placing fund
   // orders is still one person clicking, and a marketable limit order fills
   // against the book and moves the price exactly like a market order does.
