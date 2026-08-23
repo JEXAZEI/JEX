@@ -161,6 +161,56 @@ holder tier. `sb.rpc()` retries that one error (see `test_deadlock_retry`),
 which is safe only because Postgres guarantees a deadlock victim rolled back
 completely.
 
+## The price band (server-side invariant)
+
+Also not enforced from here — same reason — and also recorded because it was
+wrong for a long time in a way nothing surfaced.
+
+**Two rules, and the asymmetry between them is deliberate.**
+
+1. **Sell side clamps.** `rpc_trade_sell`, `rpc_trade_short`,
+   `rpc_trade_cover_short`, `rpc_fund_sell`, and *both* fund functions'
+   constituent loops call `jex_band_clamp(ticker, proposed, current)`. The order
+   always executes; the price stops at the band edge.
+2. **Buy side rejects.** `rpc_trade_buy`, `rpc_buyback`,
+   `rpc_place_limit_order`, `rpc_fill_limit_vs_pool`, `rpc_fund_buy` raise.
+
+They differ because refusing a buy costs a student an opportunity, while
+refusing a sell costs them the exit — a holder of a stock sitting at the floor
+would find every sell refused at every size, since every sell pushes it lower.
+
+Three things that are easy to get wrong, all of which were:
+
+- **The band was buy-side only.** Every upward path checked it; no downward one
+  did. Severity was smaller than it sounds — the circuit breaker is symmetric
+  (`Math.abs`, default 20%) and trips *before* the 30% band — but the breaker is
+  reactive and the band preventive, so a single large sell could overshoot the
+  breaker threshold and the overshoot stood.
+- **The fund functions' CONSTITUENT loops were missed on both sides.** A fund
+  purchase or redemption moves every underlying holding's price too.
+  `rpc_fund_buy` looked covered because it bands its own ticker.
+- **Reject asked the wrong question.** `if p > v_upper or p < v_lower` asks "is
+  the result outside the band", not "does this order make things worse". A buy
+  on a stock already below the floor moves it *toward* the band and was refused
+  for it — and since the clamp correctly holds a below-floor stock rather than
+  pushing it lower, nothing anyone did could move the price. The ticker froze
+  until the next session open recentred the baseline. Now:
+  `if (p > v_upper and p > cur) or (p < v_lower and p < cur)`.
+
+`jex_band_clamp` never moves a price back *into* the band: the floor for any
+trade is `least(band_floor, current_price)`. A sell order that RAISED a price
+would be a stranger bug than the one being fixed.
+
+**A null `price_band_pct` means the instructor pressed Disable and there is no
+band.** The SQL used to write `coalesce(v_band_pct,30)` and the client
+`circuit_breaker_pct||20`, so both Disable buttons changed a label and nothing
+else. `test_disable_controls` covers the client half; the SQL half is the
+absence of any `coalesce(v_band_pct,`.
+
+`bandClamp`/`bandLimits` in `app.js` mirror `jex_band_clamp` for the trade
+preview only — `test_price_band` pins them together. If they drift, the preview
+quotes a price the server will not fill at.
+
 ## What these do NOT cover
 
 Worth being blunt about, because the gaps are where bugs will come from:
