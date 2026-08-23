@@ -363,9 +363,16 @@ const RPC = {
     // supaAuth.signInWithPassword for migrated accounts. loginByForm then
     // caches this row into DB.users, which is why the stripping happens on
     // the response rather than being left to the caller.
-    const c=Object.assign({},u);
-    delete c.password; delete c.sec_a; delete c.legacy_password;
-    return c;
+    // An explicit allowlist, mirroring jex_user_login_jsonb. A denylist here
+    // (copy the row, delete the secrets) is what production had, and it hands
+    // back every field nobody remembered to delete -- which is how a personal
+    // notification_email and a student's cash balance ended up readable by an
+    // unauthenticated caller who could guess a username.
+    return {
+      id:u.id, name:u.name, username:u.username, email:u.email,
+      role:u.role, status:u.status,
+      auth_provider:u.auth_provider, auth_uid:u.auth_uid, sec_q:u.sec_q,
+    };
   },
   verify_legacy_password: (p)=>{
     const u=DATA.jex_users.find(x=>x.id===p.p_user_id);

@@ -1760,8 +1760,20 @@ ${PRELUDE}
       if(row[f]!==undefined) throw new Error('rpc_resolve_login_identity returned '+f+
         ' -- an unauthenticated caller can harvest that for any username and crack it offline');
     }
+    // Nor anything else that is none of a stranger's business. These are not
+    // secrets in the hash sense -- every signed-in student already sees the
+    // balances through the bulk read -- but this lookup happens BEFORE any
+    // password is checked, so whatever it returns is public to anyone who can
+    // guess a username. notification_email is the sharpest of them: a personal
+    // address the student chose to enter, that login has no use for at all.
+    for(const f of ['notification_email','cash','holdings','shorts','fund_units','watchlist']){
+      if(row[f]!==undefined) throw new Error('rpc_resolve_login_identity returned '+f+
+        ' -- readable by anyone who can guess a username, before any password check');
+    }
+    // email must survive: supaAuth.signInWithPassword needs the real address,
+    // so there is no version of this that keeps it from the client.
     if(!row.email) throw new Error('email is missing, so migrated sign-in cannot work');
-    return 'email only, no hashes';
+    return 'login fields only';
   });
 
   // ── password recovery: the takeover chain ─────────────────
