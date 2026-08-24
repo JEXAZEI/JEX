@@ -693,11 +693,11 @@ const RPC = {
     const sellerHeld=(seller.holdings||{})[p.p_ticker]||0;
     if(sellerHeld < qty){
       ask.status='cancelled';
-      return {matched:false, reason:'seller no longer holds the shares', cancelled_order_id:ask.id};
+      return {matched:false, reason:'seller_insufficient_shares', cancelled_order_id:ask.id};
     }
     if(buyer.cash < cost){
       bid.status='cancelled';
-      return {matched:false, reason:'buyer can no longer afford the fill', cancelled_order_id:bid.id};
+      return {matched:false, reason:'buyer_insufficient_funds', cancelled_order_id:bid.id};
     }
     buyer.cash=r2(buyer.cash-cost);
     buyer.holdings=Object.assign({},buyer.holdings);

@@ -3953,6 +3953,27 @@ async function settleLimitOrder(order,cancelIfUnfilled){
     let r;
     try{r=await sb.rpc('rpc_match_limit_order_book',{p_ticker:order.ticker});}
     catch(e){break;}
+    // An order the server could not settle is now cancelled off the book
+    // rather than left to fail again (see unwedge_order_book_migration.sql):
+    // the settlement checks live outside the matching loops, so a resting
+    // order that crosses on price but cannot settle would otherwise be picked
+    // first on every single poll and block every pair behind it.
+    //
+    // Reflected locally so the order does not just silently vanish from the
+    // Orders page on the next refresh, and the loop continues -- the whole
+    // point is that the book can now get past it.
+    if(r&&r.cancelled_order_id){
+      const dead=DB.limitOrders.find(o=>o.id===r.cancelled_order_id);
+      if(dead)dead.status='cancelled';
+      if(r.cancelled_order_id===order.id){
+        toast(r.reason==='seller_insufficient_shares'
+          ?'Limit order cancelled — you no longer hold enough '+order.ticker+' to cover it.'
+          :'Limit order cancelled — not enough cash to cover the fill.');
+        render();
+        break;
+      }
+      continue;
+    }
     if(!r||!r.matched)break;
     applyLimitMatchResult(r);
     if(r.bid_order_id===order.id||r.ask_order_id===order.id)filled+=r.fill_qty;
