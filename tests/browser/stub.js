@@ -549,7 +549,12 @@ const RPC = {
     requireOpenSession(p.p_ticker);
     const order={id:'lo-'+(_tradeSeq++), user_id:u.id, ticker:p.p_ticker, side:p.p_side,
       qty:p.p_qty, limit_price:p.p_limit_price, status:'open', order_type:p.p_order_type||'gtc',
-      fund_id:p.p_fund_id||null, created_at:nowIso()};
+      // ts is what the Orders page prints in its "Placed" column. The
+      // deployed rpc_place_limit_order stamps it on insert
+      // (to_char(now() at time zone 'America/Phoenix', ...)); omitting it here
+      // meant the model produced orders the real server never produces, and
+      // the page rendered the literal word "undefined".
+      fund_id:p.p_fund_id||null, ts:TS, created_at:nowIso()};
     DATA.jex_limit_orders.push(order);
     return {order};
   },

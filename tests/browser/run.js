@@ -1856,6 +1856,15 @@ ${PRELUDE}
                                                  funds:DB.funds, session:DB.session}));
     const savedUser = UI.userId;
 
+    // confirm() is auto-answered for the whole run. issueDividend asks for
+    // confirmation before paying, and in headless Chromium an unanswered
+    // confirm never returns -- the driver simply stopped posting a result and
+    // the harness reported "never posted within 150s", which reads like a hang
+    // in the app rather than a dialog waiting for a click. The existing
+    // dividend steps already do this; the fuzz has to as well now that it
+    // fires dividends.
+    const realConfirm = window.confirm;
+    window.confirm = () => true;
     return withoutBreaker(async ()=>{
       try{
         // Tradeable, non-index tickers only. JXI mints on demand, so its
@@ -1865,6 +1874,11 @@ ${PRELUDE}
           .filter(c=>!c.is_index_fund && c.status!=='delisted').map(c=>c.ticker);
         const students = stub.data.jex_users.filter(u=>u.role==='student').map(u=>u.id);
         const fundIds  = (stub.data.jex_funds||[]).map(f=>f.id);
+        // Tickers with a real owner account, for the dividend and buyback ops.
+        const companyTickers = stub.data.jex_companies
+          .filter(c=>!c.is_index_fund && c.owner_id
+                     && stub.data.jex_users.some(u=>u.id===c.owner_id))
+          .map(c=>c.ticker);
         if(!tickers.length || !students.length) throw new Error('nothing to fuzz with');
 
         // Baseline the conserved quantities rather than assuming the seed is
@@ -1894,8 +1908,12 @@ ${PRELUDE}
           UI.userId = pick(students);
           const t = pick(tickers);
           const qty = 1 + Math.floor(rnd()*40);
+          // Dividends and buybacks are in the mix now. They are the heaviest
+          // money movers in the app -- a dividend touches every shareholder in
+          // one transaction -- and leaving them out meant the conservation
+          // checks never saw a multi-user write at all.
           const op = pick(['buy','buy','sell','sell','short','cover','limit',
-                           'fundIn','fundOut']);
+                           'fundIn','fundOut','dividend','buyback']);
           attempted++;
           const before = JSON.stringify(stub.data.jex_users.map(u=>u.cash));
           try{
@@ -1909,8 +1927,64 @@ ${PRELUDE}
               await depositToFund(pick(fundIds), Math.round(rnd()*500*100)/100);
             else if(op==='fundOut' && fundIds.length)
               await withdrawFromFund(pick(fundIds), Math.round(rnd()*5*100)/100);
+            else if(op==='dividend' && companyTickers.length){
+              // Paid BY the company that owns the ticker, so the actor has to
+              // switch -- issueDividend derives the payer from cu().
+              const ct = pick(companyTickers);
+              const co = stub.data.jex_companies.find(c=>c.ticker===ct);
+              if(co && co.owner_id){
+                UI.userId = co.owner_id;
+                await issueDividend(ct, Math.round(rnd()*0.5*100)/100, 'fuzz dividend');
+              }
+            }
+            else if(op==='buyback' && companyTickers.length){
+              const ct = pick(companyTickers);
+              const co = stub.data.jex_companies.find(c=>c.ticker===ct);
+              if(co && co.owner_id){
+                UI.userId = co.owner_id;
+                await doBuyback(ct, 1 + Math.floor(rnd()*10));
+              }
+            }
           }catch(e){ /* a refused order is a legitimate outcome, not a failure */ }
           if(JSON.stringify(stub.data.jex_users.map(u=>u.cash))!==before) succeeded++;
+
+          // ── does the app still DRAW? ──
+          //
+          // Balanced books and a working page are different properties. The
+          // worst bug found in this codebase was a render crash on a null
+          // name: the numbers were all correct and the student was locked out
+          // of the app entirely, with no way back in. Every 10th op, on a
+          // rotating page, because rendering is the expensive part.
+          if(i % 10 === 0){
+            const pages = ['market','portfolio','orders','funds','leaderboard','news'];
+            UI.navTab = pages[(i/10) % pages.length];
+            UI.companyPage = (i % 20 === 0) ? t : null;
+            try{ render(); }
+            catch(e){ throw bad(i, op, 'render() threw on the '+UI.navTab+
+              ' page: '+((e&&e.message)||e)); }
+            const drawn = (document.getElementById('app')||{}).textContent||'';
+            if(!drawn.trim()) throw bad(i, op, 'the '+UI.navTab+' page rendered EMPTY');
+            // indexOf, NOT a regex, and that is not a style preference.
+            // Written as a regex literal this lived inside the driver's
+            // template literal, which ate the backslashes: /[object Object]/
+            // stopped being a literal string and became a character CLASS
+            // matching any one of o, b, j, e, c, t, space or O. It therefore
+            // matched every page on the first render and reported a bug on
+            // all three seeds that did not exist. The harness's own
+            // eaten-escape lint is what caught it.
+            //
+            // Reported WITH surrounding text, because "the page shows NaN" is
+            // not actionable while "Cash: NaN | Net worth" points at the line.
+            const markers = ['NaN', 'undefined', '[object Object]'];
+            let junkAt = -1, junkWhat = '';
+            for(const m of markers){
+              const at = drawn.indexOf(m);
+              if(at >= 0 && (junkAt < 0 || at < junkAt)){ junkAt = at; junkWhat = m; }
+            }
+            if(junkAt >= 0)
+              throw bad(i, op, 'the '+UI.navTab+' page shows "'+junkWhat+'" to the student, in: ...'+
+                drawn.slice(Math.max(0, junkAt-70), junkAt+70)+'...');
+          }
 
           // ── the books, after every single operation ──
           for(const u of stub.data.jex_users){
@@ -1990,6 +2064,7 @@ ${PRELUDE}
         DB.funds=savedDB.funds; Object.assign(DB.session, savedDB.session);
         UI.userId=savedUser;
         stub.data.jex_halts.length=0; DB.halts.length=0;
+        window.confirm = realConfirm;
       }
     });
   });

@@ -8342,7 +8342,7 @@ function renderStudentOrders(){
   const ahSection=afterHours.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">After-hours orders <span class="badge b-amber">${afterHours.length} queued</span></div>
     <div class="ibox ibox-amber">These orders activate automatically when the next session opens.</div>
     <table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>Limit price</th><th>Placed</th><th></th></tr></thead>
-    <tbody>${afterHours.map(o=>`<tr><td><span class="badge b-gray" style="font-family:var(--mono)">${o.ticker}</span></td><td><span class="badge ${o.side==='buy'?'b-teal':'b-red'}">${o.side}</span></td><td>${o.qty}</td><td style="font-family:var(--mono);font-weight:500">${fmt(o.limit_price)}</td><td style="color:var(--text2)">${o.ts}</td><td><button class="btn btn-sm btn-danger" onclick="cancelLimitOrder('${o.id}')">Cancel</button></td></tr>`).join('')}</tbody></table></div>`:'';
+    <tbody>${afterHours.map(o=>`<tr><td><span class="badge b-gray" style="font-family:var(--mono)">${o.ticker}</span></td><td><span class="badge ${o.side==='buy'?'b-teal':'b-red'}">${o.side}</span></td><td>${o.qty}</td><td style="font-family:var(--mono);font-weight:500">${fmt(o.limit_price)}</td><td style="color:var(--text2)">${o.ts||'—'}</td><td><button class="btn btn-sm btn-danger" onclick="cancelLimitOrder('${o.id}')">Cancel</button></td></tr>`).join('')}</tbody></table></div>`:'';
   // Active stop-loss orders
   const myStopLoss=DB.stopLossOrders.filter(s=>s.user_id===u.id&&s.status==='active');
   const slSection=myStopLoss.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Stop-loss orders <span class="badge b-red">${myStopLoss.length} active</span></div>
@@ -8365,7 +8365,7 @@ function renderStudentOrders(){
       <td>${o.qty}</td>
       <td style="font-family:var(--mono);font-weight:500">${fmt(o.limit_price)}</td>
       <td style="font-family:var(--mono)">${co?fmt(co.price):'—'}</td>
-      <td style="color:var(--text2)">${o.ts}</td>
+      <td style="color:var(--text2)">${o.ts||'—'}</td>
       <td><button class="btn btn-sm btn-danger" onclick="cancelLimitOrder('${o.id}')">Cancel</button></td>
     </tr>`;}).join('')}</tbody></table>`:'<div class="empty">No open limit orders</div>'}
   </div>
@@ -8378,7 +8378,7 @@ function renderStudentOrders(){
       <td style="font-family:var(--mono)">${fmt(o.limit_price)}</td>
       <td style="font-family:var(--mono)">${o.filled_price?fmt(o.filled_price):'—'}</td>
       <td><span class="badge ${o.status==='filled'?'b-green':'b-gray'}">${o.status}</span></td>
-      <td style="color:var(--text2)">${o.ts}</td>
+      <td style="color:var(--text2)">${o.ts||'—'}</td>
     </tr>`).join('')}</tbody></table></div>`:''}`;
 }
 
