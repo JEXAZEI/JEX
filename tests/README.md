@@ -211,6 +211,45 @@ absence of any `coalesce(v_band_pct,`.
 preview only — `test_price_band` pins them together. If they drift, the preview
 quotes a price the server will not fill at.
 
+## The order book (server-side invariant)
+
+**A limit order that cannot settle must come OFF the book, not be left to fail
+again.**
+
+`rpc_match_limit_order_book` walks bids descending and asks ascending, but its
+settlement checks (`buyer_insufficient_funds`, `seller_insufficient_shares`)
+sit *outside* those loops. So the loops find the first pair that crosses **on
+price**, exit with it, and only then test whether it can settle. A pair that
+cannot returns `matched:false` and stops — and the next poll rebuilds the same
+book, picks the same pair, and fails identically, forever. Every crossing pair
+behind it is never reached, so limit orders silently stop working for that
+ticker with nothing on screen to explain it.
+
+No misbehaviour is needed to cause it:
+
+    own 10 ACME  ->  place a sell limit for 10  ->  change your mind, market-sell
+
+All three legitimate; the resting order is now unbacked, and one crossing bid
+wedges the book. The fix cancels the unsettleable side (`unwedge_order_book_migration.sql`)
+so the next poll reaches the pair behind it.
+
+Two things follow for anyone editing this:
+
+1. If you ever move the settlement checks *inside* the loops so an unsettleable
+   pair is skipped rather than cancelled, that is strictly better — but until
+   then, do not remove the cancel, or the book wedges again.
+2. The response carries `cancelled_order_id` and a `reason`.
+   `settleLimitOrder` keys off both: it marks the order locally so it does not
+   vanish silently from the Orders page, tells the student which of the two
+   reasons it was, and **continues** the loop rather than breaking. Getting
+   past the dead order is the entire point of the change.
+
+Found by `tests/browser/run.js`'s randomised conservation run, not by reading:
+three seeds × 250 arbitrary operations with the books checked after every one.
+Worth knowing that it first reported a *different* bug — a negative holding —
+which turned out to be wrong about production and right about the model. The
+real defect only came out of reading the deployed function.
+
 ## What these do NOT cover
 
 Worth being blunt about, because the gaps are where bugs will come from:
