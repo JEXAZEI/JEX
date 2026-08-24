@@ -1785,7 +1785,15 @@ ${PRELUDE}
         if(ask.status==='open')
           throw new Error('the unsettleable order is still resting on the book, where it will '+
             'block every match behind it and fail again on every poll');
-        return 'not matched, order '+ask.status;
+        // The reason code has to match what the server actually sends, or
+        // settleLimitOrder cannot tell the student WHY their order went. The
+        // deployed function returns seller_insufficient_shares /
+        // buyer_insufficient_funds, so the stub says the same words.
+        if(r.reason!=='seller_insufficient_shares')
+          throw new Error('reason was "'+r.reason+'" but the deployed function sends seller_insufficient_shares');
+        if(r.cancelled_order_id!=='lo-ask')
+          throw new Error('cancelled_order_id was '+r.cancelled_order_id+', not the ask');
+        return 'not matched, order '+ask.status+', reason '+r.reason;
       } finally { stub.data.jex_limit_orders.length=0; restoreBandState(); }
     });
   });
