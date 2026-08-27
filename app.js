@@ -4159,9 +4159,33 @@ setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();await
 // (requireOpen, canAccessTicker, funds/qty sanity, etc.) are just fast
 // local feedback; the RPC re-derives and re-checks everything itself and
 // is the only thing that actually writes the trade.
-function rpcErrorMessage(e){
-  try{const parsed=JSON.parse(e.message);if(parsed&&parsed.message)return parsed.message;}catch(err){}
-  return (e&&e.message)||String(e);
+// Server errors come in two kinds and they must not be treated alike.
+//
+// A deliberate `raise exception` is written FOR the student -- "You only hold
+// 3 shares", "Order rejected -- outside price band" -- and should be shown
+// exactly as the server phrased it.
+//
+// A plpgsql fault is not. `record "v_fund" is not assigned yet` is a real
+// message a student saw on the trade panel while trying to place a limit sell:
+// it names an internal variable, tells them nothing about what to do, and
+// leaks how the server is built. Those get a plain message and are filed to
+// the admin Errors tab through the channel that already exists for uncaught
+// client errors, so the raw text is not lost -- it moves to where it is
+// useful.
+//
+// The list below is Postgres' own vocabulary for "the function is wrong",
+// not for "your order is invalid". Anything not matching falls through and is
+// shown verbatim, so a new deliberate message never needs registering here.
+const INTERNAL_DB_ERROR=/is not assigned yet|division by zero|violates (not-null|check|foreign key|unique) constraint|invalid input syntax|cannot be matched|column .* does not exist|function .* does not exist|query returned no rows|query string argument of EXECUTE|stack depth limit|out of range|malformed array literal|operator does not exist/i;
+function rpcErrorMessage(e,context){
+  let msg=null;
+  try{const parsed=JSON.parse(e.message);if(parsed&&parsed.message)msg=parsed.message;}catch(err){}
+  if(msg==null)msg=(e&&e.message)||String(e);
+  if(INTERNAL_DB_ERROR.test(msg)){
+    reportClientError(msg,(e&&e.stack)||'',context||'rpc');
+    return 'Something went wrong on the exchange and your order was not placed. Nothing was charged. This has been reported to your instructor.';
+  }
+  return msg;
 }
 // Shared by every path that can produce a jex_trades row -- plain student
 // trades, fund trades, limit-order book matches, pool fills, and stop-loss
