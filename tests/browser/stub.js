@@ -196,6 +196,80 @@ const caller = () => {
 const findCo = t => DATA.jex_companies.find(c=>c.ticker===t);
 const priceImpact = (co, qty) => Math.min((qty/(co.shares*0.05))*0.015, 0.12);
 
+// ── the index, as the server models it ───────────────────
+//
+// Mirrors index_constituent_tickers() / index_live_value() and the
+// basket-backed branches of rpc_trade_buy/sell. Student index trades used to
+// be synthetic here and in production -- units minted against nothing, the
+// underlying untouched -- while the FUND path bought the real basket. They are
+// the same mechanism now, so the stub has to be too, or the harness is
+// checking behaviour production no longer has.
+//
+// Two rules this encodes, both of which the trade paths depend on:
+//   * an index with no listed constituents has NO value. avg() over zero rows
+//     is null server-side; returning null here rather than a 1000 placeholder
+//     is what makes an empty-basket trade refusable at all.
+//   * an index is priced off ITS OWN classroom's companies, never the whole
+//     exchange -- that distinction is invisible while JXI is the only index
+//     and wrong the moment a classroom index exists.
+const indexConstituents = idx => DATA.jex_companies.filter(c=>
+  c.status==='listed' && !c.is_index_fund
+  && (idx.index_classroom_id==null
+      || (DATA.jex_users.find(u=>u.id===c.owner_id)||{}).classroom_id===idx.index_classroom_id));
+const indexLiveValue = idx => {
+  const cs=indexConstituents(idx);
+  if(!cs.length) return null;             // no basket, no price. Not 1000.
+  const ratios=cs.map(c=>{
+    const base=((c.price_history&&c.price_history[0]&&c.price_history[0].p)||c.price)
+      *(c.index_base_adjust==null?1:c.index_base_adjust);
+    return base>0 ? c.price/base : 1;
+  });
+  return r2((ratios.reduce((s,x)=>s+x,0)/ratios.length)*1000);
+};
+const indexNav = idx => { const v=indexLiveValue(idx); return v==null?null:r2(v/10); };
+const requireBasket = idx => {
+  const nav=indexNav(idx);
+  if(nav==null) reject(idx.ticker+' has no listed companies right now, so there is nothing to price a unit against.');
+  return nav;
+};
+// Buys the basket with the cash a purchase takes, into the index row's shared
+// fund_holdings pool -- the same pool a redemption draws from, which is what
+// stops student minting from diluting a fund's redemption ratio.
+const buyBasket = (idx, cost) => {
+  const cs=indexConstituents(idx), out=[];
+  if(!cs.length) return out;
+  const pool=Object.assign({}, idx.fund_holdings||{});
+  const perDollar=cost/cs.length;
+  cs.slice().sort((a,b)=>a.ticker<b.ticker?-1:1).forEach(c=>{
+    if(c.price<=0) return;
+    const qty=Math.round(perDollar/c.price);
+    if(qty<=0) return;
+    const price=clampToBand(c, Math.max(0.01, r2(c.price*(1+priceImpact(c,qty)))));
+    c.shares_avail=Math.max(0, c.shares_avail-qty);
+    pushPrice(c, price);
+    pool[c.ticker]=(pool[c.ticker]||0)+qty;
+    out.push({ticker:c.ticker, price:c.price, shares_avail:c.shares_avail, price_history:c.price_history});
+  });
+  idx.fund_holdings=pool;
+  return out;
+};
+const sellBasket = (idx, qty) => {
+  const out=[], pool=Object.assign({}, idx.fund_holdings||{});
+  const ratio = idx.shares>0 ? qty/idx.shares : 0;
+  Object.keys(pool).sort().forEach(t=>{
+    const held=pool[t]||0; if(held<=0) return;
+    const c=findCo(t); if(!c) return;
+    const n=Math.min(held, Math.round(held*ratio)); if(n<=0) return;
+    const price=clampToBand(c, Math.max(0.01, r2(c.price*(1-priceImpact(c,n)))));
+    c.shares_avail=Math.min(c.shares, c.shares_avail+n);
+    pushPrice(c, price);
+    pool[t]=held-n;
+    out.push({ticker:c.ticker, price:c.price, shares_avail:c.shares_avail, price_history:c.price_history});
+  });
+  idx.fund_holdings=pool;
+  return out;
+};
+
 // ── the price band ────────────────────────────────────────
 // Mirrors the server-side rule. Two things about it are deliberate and easy
 // to get wrong, so they are stated here rather than left to be inferred:
@@ -453,18 +527,35 @@ const RPC = {
     if(!co) reject('Company not found');
     requireOpenSession(p.p_ticker);
     const old=co.price;
+    if(co.is_index_fund){
+      // Basket-backed, mirroring rpc_trade_buy. Units are still minted on
+      // demand -- there is no fixed float to run out of -- but the cash now
+      // buys the underlying, and the fill is the post-impact NAV rather than
+      // a price-impact curve keyed off units outstanding.
+      const nav=requireBasket(co);
+      const cost=r2(nav*p.p_qty);
+      if(u.cash < cost) reject('Not enough cash (need '+cost+')');
+      const constituents=buyBasket(co, cost);
+      const fill=indexNav(co)==null?nav:indexNav(co);
+      const finalCost=r2(fill*p.p_qty);
+      if(u.cash < finalCost) reject('Not enough cash after price impact (need '+finalCost+')');
+      u.cash=r2(u.cash-finalCost);
+      u.holdings=Object.assign({}, u.holdings); u.holdings[p.p_ticker]=(u.holdings[p.p_ticker]||0)+p.p_qty;
+      co.shares+=p.p_qty; co.shares_avail+=p.p_qty;
+      pushPrice(co, fill);
+      const t=recordTrade({ticker:p.p_ticker, qty:p.p_qty, price:fill, buyer_id:u.id, seller_id:'exchange', type:'market'});
+      return {cash:u.cash, holdings:u.holdings, price:fill, shares_avail:co.shares_avail,
+              price_history:co.price_history, old_price:old, trade:t, constituents};
+    }
     const price=Math.max(0.01, r2(co.price*(1+priceImpact(co,p.p_qty))));
     requireInBand(co, price);
     const cost=r2(price*p.p_qty);
     if(u.cash < cost) reject('Not enough cash (need '+cost+')');
-    if(!co.is_index_fund && co.shares_avail < p.p_qty) reject('Only '+co.shares_avail+' shares available');
+    if(co.shares_avail < p.p_qty) reject('Only '+co.shares_avail+' shares available');
     u.cash=r2(u.cash-cost);
     u.holdings=Object.assign({}, u.holdings); u.holdings[p.p_ticker]=(u.holdings[p.p_ticker]||0)+p.p_qty;
     pushPrice(co, price);
-    // JXI mints on demand: units outstanding go UP, they are not drawn from a
-    // fixed float. Same branch the real rpc_trade_buy takes.
-    co.shares_avail = co.is_index_fund ? co.shares_avail+p.p_qty : co.shares_avail-p.p_qty;
-    if(co.is_index_fund) co.shares = Math.max(co.shares, co.shares_avail);
+    co.shares_avail-=p.p_qty;
     const trade=recordTrade({ticker:p.p_ticker, qty:p.p_qty, price, buyer_id:u.id, seller_id:'exchange', type:'market'});
     return {cash:u.cash, holdings:u.holdings, price, shares_avail:co.shares_avail,
             price_history:co.price_history, old_price:old, trade};
@@ -476,13 +567,33 @@ const RPC = {
     const held=(u.holdings||{})[p.p_ticker]||0;
     if(held < p.p_qty) reject('You only hold '+held+' shares');
     const old=co.price;
+    if(co.is_index_fund){
+      // The mirror of the buy: redeem this holder's share of the basket back
+      // into the market, then pay out at the post-redemption NAV. Falls back
+      // to the last stored price, never to a placeholder -- a holder whose
+      // basket emptied must still be able to get out at what the units were
+      // last actually worth.
+      const constituents=sellBasket(co, p.p_qty);
+      const nav=indexNav(co);
+      const fill=nav==null?co.price:nav;
+      u.cash=r2(u.cash + r2(fill*p.p_qty));
+      u.holdings=Object.assign({}, u.holdings);
+      u.holdings[p.p_ticker]=held-p.p_qty;
+      if(!u.holdings[p.p_ticker]) delete u.holdings[p.p_ticker];
+      co.shares=Math.max(0, co.shares-p.p_qty);
+      co.shares_avail=Math.max(0, co.shares_avail-p.p_qty);
+      pushPrice(co, fill);
+      const t=recordTrade({ticker:p.p_ticker, qty:p.p_qty, price:fill, buyer_id:'exchange', seller_id:u.id, type:'market'});
+      return {cash:u.cash, holdings:u.holdings, price:fill, shares_avail:co.shares_avail,
+              price_history:co.price_history, old_price:old, trade:t, constituents};
+    }
     const price=clampToBand(co, Math.max(0.01, r2(co.price*(1-priceImpact(co,p.p_qty)))));
     u.cash=r2(u.cash + r2(price*p.p_qty));
     u.holdings=Object.assign({}, u.holdings);
     u.holdings[p.p_ticker]=held-p.p_qty;
     if(!u.holdings[p.p_ticker]) delete u.holdings[p.p_ticker];
     pushPrice(co, price);
-    co.shares_avail = co.is_index_fund ? co.shares_avail-p.p_qty : co.shares_avail+p.p_qty;
+    co.shares_avail+=p.p_qty;
     const trade=recordTrade({ticker:p.p_ticker, qty:p.p_qty, price, buyer_id:'exchange', seller_id:u.id, type:'market'});
     return {cash:u.cash, holdings:u.holdings, price, shares_avail:co.shares_avail,
             price_history:co.price_history, old_price:old, trade};

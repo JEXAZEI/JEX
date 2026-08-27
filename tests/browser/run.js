@@ -595,6 +595,81 @@ ${PRELUDE}
     return 'received '+Math.round((m.cash-cash0)*100)/100;
   });
 
+  // ── the index, basket-backed ──
+  //
+  // A student index buy used to mint synthetic units and touch nothing, while
+  // a FUND buying the same exposure bought the real constituents. Thirty
+  // students piling into JXI moved the underlying market not at all; one fund
+  // manager moved it properly. They are the same mechanism now, and these
+  // steps are what says so -- the whole suite passed both before and after the
+  // change, because nothing was checking.
+  await step('buying the index buys its constituents', async ()=>{
+    UI.userId='u-stu'; UI.navTab='market'; UI.companyPage='JXI'; UI.companyPageTab='trade'; render();
+    const idx=stub.data.jex_companies.find(c=>c.ticker==='JXI');
+    const pool0=Object.assign({}, idx.fund_holdings||{});
+    const acme0=stub.data.jex_companies.find(c=>c.ticker==='ACME');
+    const avail0=acme0.shares_avail, price0=acme0.price, cash0=ME().cash;
+    await paceOrders();
+    await placeBuy('JXI', 4);
+    const acme=stub.data.jex_companies.find(c=>c.ticker==='ACME');
+    const pool=stub.data.jex_companies.find(c=>c.ticker==='JXI').fund_holdings||{};
+    if((pool.ACME||0) <= (pool0.ACME||0))
+      throw new Error('the basket pool did not grow: '+JSON.stringify(pool0)+' -> '+JSON.stringify(pool));
+    if(acme.shares_avail >= avail0)
+      throw new Error('constituent float did not shrink: '+avail0+' -> '+acme.shares_avail);
+    if(acme.price <= price0)
+      throw new Error('buying the index did not push its constituents up: '+price0+' -> '+acme.price);
+    if(ME().cash >= cash0) throw new Error('the buy took no cash');
+    return 'pool '+(pool0.ACME||0)+' -> '+(pool.ACME||0)+', ACME '+price0+' -> '+acme.price;
+  });
+
+  await step('...and the fill is the NAV, not a price-impact curve', async ()=>{
+    // The old code ran impactPrice() against units outstanding, which for an
+    // index is not a liquidity pool at all -- it read as a maxed-out 12%
+    // regardless of size. The fill is the basket's own value now.
+    const idx=stub.data.jex_companies.find(c=>c.ticker==='JXI');
+    const trades=stub.data.jex_trades.filter(t=>t.ticker==='JXI');
+    const last=trades[trades.length-1];
+    if(!last) throw new Error('no JXI trade was recorded');
+    if(!near(last.price, idx.price))
+      throw new Error('fill '+last.price+' does not match the index price '+idx.price);
+    return 'filled at '+last.price;
+  });
+
+  await step('selling the index redeems the basket back into the market', async ()=>{
+    const idx0=stub.data.jex_companies.find(c=>c.ticker==='JXI');
+    const pool0=Object.assign({}, idx0.fund_holdings||{});
+    const acme0=stub.data.jex_companies.find(c=>c.ticker==='ACME');
+    const avail0=acme0.shares_avail;
+    const held0=(ME().holdings||{}).JXI||0;
+    if(held0 < 2) throw new Error('nothing to sell -- the buy step did not leave units');
+    await paceOrders();
+    await placeSell('JXI', 2);
+    const acme=stub.data.jex_companies.find(c=>c.ticker==='ACME');
+    const pool=stub.data.jex_companies.find(c=>c.ticker==='JXI').fund_holdings||{};
+    if((pool.ACME||0) >= (pool0.ACME||0))
+      throw new Error('redemption did not draw the pool down: '+JSON.stringify(pool0)+' -> '+JSON.stringify(pool));
+    if(acme.shares_avail <= avail0)
+      throw new Error('redeemed shares did not go back into the float: '+avail0+' -> '+acme.shares_avail);
+    return 'pool '+(pool0.ACME||0)+' -> '+(pool.ACME||0)+', float '+avail0+' -> '+acme.shares_avail;
+  });
+
+  await step('an index with no listed companies refuses a buy at the server too', async ()=>{
+    // The client guard is tested in tests/test_empty_index.js. This is the
+    // other half: the server must refuse even if the client somehow asks,
+    // because the price of an empty basket is undefined, not 1000.
+    const saved=stub.data.jex_companies.map(c=>({c, status:c.status}));
+    stub.data.jex_companies.forEach(c=>{ if(!c.is_index_fund) c.status='delisted'; });
+    let threw=null;
+    try{ await sb.rpc('rpc_trade_buy', {p_ticker:'JXI', p_qty:1}); }
+    catch(e){ threw=String(e && e.message || e); }
+    saved.forEach(s=>{ s.c.status=s.status; });
+    if(!threw) throw new Error('the server minted units of an index with no companies');
+    if(threw.indexOf('no listed companies') === -1)
+      throw new Error('refused, but not for the right reason: '+threw);
+    return 'refused: '+threw.slice(0, 60);
+  });
+
   await step('shorting locks 150% collateral', async ()=>{
     const co=CO(), me=ME();
     const cash0=me.cash, p0=co.price;

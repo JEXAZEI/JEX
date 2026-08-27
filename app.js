@@ -874,6 +874,33 @@ function computeIndex(classroomId){
   return{value,change,constituents};
 }
 function computeJXI(){return computeIndex(null);}
+// An index with no listed constituents has no defined price. An average over
+// zero companies does not exist, so computeIndex() hands back a base-1000
+// placeholder (its `!listed.length` early return above) and snapshotJXI()
+// stops refreshing co.price altogether -- the number on screen is a seed or a
+// stale quote, not a valuation.
+//
+// Opening a position against that turns real cash into units backed by
+// nothing: the whole point of the basket-backed design is that a buy purchases
+// the underlying constituents, and there are none to purchase. Worse, the
+// first company to list reprices those units to wherever ITS ratio happens to
+// sit, handing the holder a gain or loss that came from which company IPO'd
+// next rather than from anything moving.
+//
+// Every constituents.length check that existed before this one was cosmetic --
+// the market card, the chart, the snapshot. The trade panel stayed live.
+//
+// Closing stays allowed on purpose. A student holding units when the last
+// constituent delisted has to be able to get out; trapping them until someone
+// else IPOs is worse than letting them exit at the last computed value. Same
+// asymmetry the price band already uses: buys reject, sells clamp.
+function indexHasNoBasket(co){
+  return !!(co&&co.is_index_fund)&&!computeIndex(co.index_classroom_id||null).constituents.length;
+}
+function emptyIndexMsg(co){
+  return co.ticker+' has no listed companies right now, so there is nothing to price a unit against. '
+    +'It reopens as soon as a company in its basket is listed.';
+}
 async function snapshotJXI(){
   const idx=computeJXI();
   if(!idx.constituents.length)return;
@@ -1693,7 +1720,15 @@ function startSessionTimer(){
   sessionTimer=setInterval(tickTimer,500);
 }
 function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-Date.now();if(rem<=0)return;const el=get('timer-el');if(el){const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+(s<10?'0':'')+s;}const al=get('admin-timer-txt');if(al)al.textContent=Math.max(0,Math.round(rem/1000))+'s';}
-async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em}});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em}});startSessionTimer();toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
+// weekly_active means "the session currently open belongs to the weekly
+// schedule", and rpc_session_tick closes any open session carrying that flag
+// the moment the clock leaves the weekly window. Every other way of opening
+// the market clears it -- setSession and startTimer both pass
+// weekly_active:false -- but this one did not, so a one-off window scheduled
+// outside the weekly hours inherited a stale flag and the next 15s tick shut
+// it down. Both branches clear it now, including the "opens later today" one:
+// the tick that eventually opens that window does not touch the flag either.
+async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em},weekly_active:false});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em},weekly_active:false});startSessionTimer();toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
 async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();}
 // ── Weekly recurring schedule (different hours per day of week, repeats every week) ──
 const WEEKDAY_KEYS=['sun','mon','tue','wed','thu','fri','sat'];
@@ -4169,6 +4204,7 @@ async function placeBuy(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   if(!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
   if(u.role==='company'&&co.owner_id===u.id)return toast("You can't buy your own company's stock — use Buyback instead.");
+  if(indexHasNoBasket(co))return toast(emptyIndexMsg(co));
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   // JXI mints on demand -- shares_avail tracks units outstanding for it (see
   // the is_index_fund branch server-side), not a real liquidity cap, so this
@@ -4206,6 +4242,7 @@ async function placeSell(ticker,qty){
 async function placeShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   if(!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
+  if(indexHasNoBasket(co))return toast(emptyIndexMsg(co));
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const coll=Math.round(co.price*qty*1.5*100)/100;
   if(u.cash<coll)return toast('Need '+fmt(coll)+' collateral');
@@ -4354,6 +4391,7 @@ async function fundBuy(fundId,ticker,qty){
   if(f.status!=='active')return toast('This fund is closed');
   if(co.owner_id===f.manager_id)return toast('A fund cannot trade its own manager\'s company stock — conflict of interest');
   if(!canAccessTicker(ticker,f.manager_id))return toast('This share class is restricted — the fund manager is not on the whitelist.');
+  if(indexHasNoBasket(co))return toast(emptyIndexMsg(co));
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   // JXI/classroom indexes mint units on demand rather than trading against
   // a fixed float, so shares_avail isn't a real liquidity cap for them --
@@ -4398,6 +4436,7 @@ async function fundShort(fundId,ticker,qty){
   if(f.status!=='active')return toast('This fund is closed');
   if(co.owner_id===f.manager_id)return toast('A fund cannot trade its own manager\'s company stock — conflict of interest');
   if(!canAccessTicker(ticker,f.manager_id))return toast('This share class is restricted — the fund manager is not on the whitelist.');
+  if(indexHasNoBasket(co))return toast(emptyIndexMsg(co));
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const coll=Math.round(co.price*qty*1.5*100)/100;
   if(f.cash<coll)return toast('Fund needs '+fmt(coll)+' collateral');
@@ -6127,6 +6166,13 @@ function renderCompanyPage(parentTicker){
       // same shape as any other stock, just priced off jxi_live_value()
       // instead of price-impact.
       const idxFund=!!co.is_index_fund;
+      // An index with an empty basket is closed for OPENING trades -- there is
+      // no defined price to open one against (see indexHasNoBasket). Closing
+      // stays available so nobody is trapped in units they bought while the
+      // basket still had companies in it. Showing the reason here rather than
+      // only toasting on click: the price on the page looks perfectly normal,
+      // so a disabled-looking button with no explanation reads as a glitch.
+      const noBasket=indexHasNoBasket(co);
       const effMode=mode;
       html+='<div class="card"><div class="ot-toggle">'
         +'<button class="ot-btn '+(effMode==='buy'?'ot-buy':'')+'" onclick="UI.panelMode=&quot;buy&quot;;render()">Buy</button>'
@@ -6134,7 +6180,10 @@ function renderCompanyPage(parentTicker){
         +'<button class="ot-btn '+(effMode==='short'?'ot-short':'')+'" onclick="UI.panelMode=&quot;short&quot;;render()">Short</button>'
         +(short?'<button class="ot-btn '+(effMode==='cover'?'ot-cover':'')+'" onclick="UI.panelMode=&quot;cover&quot;;render()">Cover</button>':'')
         +'</div>';
-      if(effMode==='buy'){
+      if(noBasket&&(effMode==='buy'||effMode==='short')){
+        html+='<div class="ibox ibox-amber" style="font-size:12px">'+esc(emptyIndexMsg(co))
+          +(held>0?' You can still sell the units you already hold.':'')+'</div>';
+      } else if(effMode==='buy'){
         html+=(idxFund?'<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Buys mint new units at the live index price — there\'s no fixed supply to run out of.</p>':
           '<p style="font-size:12px;color:var(--text2);margin-bottom:8px">Available: <strong>'+co.shares_avail+'</strong> of '+co.shares.toLocaleString()+'</p>')
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="cp-qty" value="1" min="1"'+(idxFund?'':' max="'+co.shares_avail+'"')+'></div>'
@@ -6516,6 +6565,9 @@ function openPanel(ticker){
   // tab -- limit orders still aren't wired up for JXI (hidden here too),
   // but shorting is (rpc_trade_short/cover_short's is_index_fund branch).
   const idxFund=!!c.is_index_fund;
+  // Same rule as the company page: an index with no listed constituents is
+  // closed for opening trades and open for closing ones.
+  const noBasket=indexHasNoBasket(c);
   const effMode=mode;
   panel.innerHTML=`<div class="card" style="border-color:var(--blue)">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
@@ -6535,7 +6587,8 @@ function openPanel(ticker){
       <button class="ot-btn ${effMode==='short'?'ot-short':''}" onclick="UI.panelMode='short';openPanel('${ticker}')">Short</button>
       ${short?`<button class="ot-btn ${effMode==='cover'?'ot-cover':''}" onclick="UI.panelMode='cover';openPanel('${ticker}')">Cover</button>`:''}
     </div>
-    ${effMode==='buy'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?`Buys mint new units at the live index price — there's no fixed supply to run out of.`:`Buy pushes price up. Available: <strong>${c.shares_avail}</strong> of ${c.shares.toLocaleString()}.`}</p>
+    ${noBasket&&(effMode==='buy'||effMode==='short')?`<div class="ibox ibox-amber" style="font-size:12px">${esc(emptyIndexMsg(c))}${held>0?' You can still sell the units you already hold.':''}</div>`
+    :effMode==='buy'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?`Buys mint new units at the live index price — there's no fixed supply to run out of.`:`Buy pushes price up. Available: <strong>${c.shares_avail}</strong> of ${c.shares.toLocaleString()}.`}</p>
     <div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1"${idxFund?'':` max="${c.shares_avail}"`}></div><div style="padding-bottom:12px"><button class="btn btn-success" onclick="busy(this,&quot;Buying…&quot;,()=>placeBuy('${ticker}',get('t-qty')?.value))">Buy now</button></div></div>
     ${quickQtyButtonsHTML(ticker,'buy','t-qty','t-preview')}
     <div id="t-preview">${impactPreview(c,1,'buy')}</div>
