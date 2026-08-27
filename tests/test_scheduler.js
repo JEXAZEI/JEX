@@ -152,6 +152,8 @@ if(process.env.JEX_TZ_CHILD){
           !!saved && saved.status==='closed' && saved.scheduled_open
             && saved.scheduled_open.h===a.h && saved.scheduled_open.m===a.m,
           saved && JSON.stringify(saved));
+    check('['+TZ+'] ...and it clears weekly_active so the tick will not shut it',
+          !!saved && saved.weekly_active===false, saved && JSON.stringify(saved));
   }
 
   if(nowMin > 90 && nowMin < 22*60){        // a window already underway
@@ -161,6 +163,13 @@ if(process.env.JEX_TZ_CHILD){
     check('['+TZ+'] a window already underway opens immediately',
           !!saved && saved.status==='open' && saved.ends_at>Date.now(),
           saved && JSON.stringify(saved));
+    // The stranded-flag bug. rpc_session_tick closes any open session whose
+    // weekly_active is true as soon as the clock leaves the weekly window --
+    // and its timer-expiry close path leaves that flag set. So a one-off
+    // window opened outside the weekly hours died on the next 15s tick unless
+    // it cleared the flag itself, the way setSession and startTimer do.
+    check('['+TZ+'] an immediately-opened window clears weekly_active',
+          !!saved && saved.weekly_active===false, saved && JSON.stringify(saved));
     check('['+TZ+'] ...and its ends_at lands within a minute of the close time',
           !!saved && Math.abs((saved.ends_at-Date.now())-60*60*1000) < 60*1000,
           saved && String((saved.ends_at-Date.now())/1000|0)+'s away, expected ~3600s');
