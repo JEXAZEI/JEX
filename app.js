@@ -4080,6 +4080,15 @@ async function settleLimitOrder(order,cancelIfUnfilled){
       let pr;
       try{pr=await sb.rpc('rpc_fill_limit_vs_pool',{p_order_id:order.id});}catch(e){pr=null;}
       if(pr&&pr.filled){applyLimitPoolFillResult(order.id,pr);filled+=(originalQty-filled);}
+      // The server refuses a fill that would breach the limit after price
+      // impact -- buying the whole quantity at once moves the price past what
+      // the student said they would pay. Leaving the order resting is correct,
+      // but silence is not: a limit set AT the market price never fills, for a
+      // reason that is invisible unless it is said out loud.
+      else if(pr&&pr.reason==='limit_would_be_breached'){
+        toast('Order resting — filling all '+order.qty+' × '+order.ticker+' at once would push the price past your limit of '+fmt(order.limit_price)
+          +'. It fills if the market comes to you, or try a smaller quantity.');
+      }
     }
   }
   mine=DB.limitOrders.find(o=>o.id===order.id);
