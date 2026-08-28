@@ -874,6 +874,63 @@ function computeIndex(classroomId){
   return{value,change,constituents};
 }
 function computeJXI(){return computeIndex(null);}
+// An index row's price and price_history are a CACHE of a derived number, and
+// only the paths that trade the index itself refresh them. But the index value
+// moves whenever a CONSTITUENT moves -- which is most trades on the exchange --
+// and whenever the constituent set changes at all: a new listing, a delisting,
+// a share class becoming restricted, a test account being hidden again.
+//
+// Between those events the cache is stale, and the market page showed it: the
+// index card read 1244.00 (computed live) while the Listed Companies table
+// read $123.68 (the cached column) for the same instrument at the same moment,
+// under a flat chart and "+0% today" sitting next to a constituent that was up
+// 0.58%. Same instrument, three different answers.
+//
+// Chasing that with more cache-invalidation would mean finding every path that
+// can move the value, and there is no complete list -- miss one and the
+// numbers drift apart again. So the series is DERIVED instead, rebuilt from
+// the constituents' own histories. Every existing consumer (intervalChg,
+// buildChart, priceChg, every Change badge) keeps working untouched and simply
+// gets a series that is correct by construction.
+function indexSeries(co){
+  const cons=computeIndex(co.index_classroom_id||null).constituents
+    .map(c=>getCo(c.ticker)).filter(Boolean);
+  if(!cons.length)return[];
+  const bases=new Map(),stamps=new Set();
+  for(const c of cons){
+    const raw=(c.price_history&&c.price_history[0]&&c.price_history[0].p)||c.price;
+    bases.set(c.ticker,raw*(c.index_base_adjust??1));
+    (c.price_history||[]).forEach(p=>{if(p&&p.t)stamps.add(p.t);});
+  }
+  // A constituent contributes only from its own first point onward. Before
+  // that it was not listed, and treating it as flat at its IPO price would
+  // invent index history that never happened.
+  const priceAt=(c,t)=>{let v=null;for(const p of(c.price_history||[])){if(p&&p.t&&p.t<=t)v=p.p;else break;}return v;};
+  const out=[];
+  for(const t of [...stamps].sort()){
+    const rs=[];
+    for(const c of cons){const p=priceAt(c,t),b=bases.get(c.ticker);if(p!=null&&b>0)rs.push(p/b);}
+    if(!rs.length)continue;
+    // The index level is avg(ratio) * 1000; a unit is a tenth of that, which
+    // is what jex_companies.price holds for an index row and what every
+    // display path already expects. So a unit is avg * 100.
+    const avg=rs.reduce((s,x)=>s+x,0)/rs.length;
+    out.push({t,p:Math.round(avg*100*100)/100});
+  }
+  return out;
+}
+// Points every index row at its derived series. Called once per render, before
+// anything reads a price, so the card, the table, the chart, the portfolio and
+// net worth all quote the same number.
+function syncIndexRows(){
+  for(const co of DB.companies||[]){
+    if(!co.is_index_fund)continue;
+    const series=indexSeries(co);
+    if(!series.length)continue;                     // empty basket: leave the last known price alone
+    co.price_history=series;
+    co.price=series[series.length-1].p;
+  }
+}
 // An index with no listed constituents has no defined price. An average over
 // zero companies does not exist, so computeIndex() hands back a base-1000
 // placeholder (its `!listed.length` early return above) and snapshotJXI()
@@ -9054,6 +9111,11 @@ function getPageContent(){
   return '';
 }
 function render(){
+  // Before anything reads a price. An index row's stored price is a cache of a
+  // derived value that only index trades refresh, so without this the card,
+  // the market table and the portfolio can each quote a different number for
+  // the same instrument.
+  syncIndexRows();
   // Carry typed input across a repaint the user did not ask for.
   if(_bgRender)_formSnapshot=snapshotFormState();
   // Only background repaints, and only when explicitly enabled -- this used
