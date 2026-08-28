@@ -842,7 +842,18 @@ const RPC = {
     const crosses=(o.side==='buy'&&co.price<=o.limit_price)||(o.side==='sell'&&co.price>=o.limit_price);
     if(!crosses) return {filled:false};
     const u=DATA.jex_users.find(x=>x.id===o.user_id);
-    const price=r2(co.price);
+    // Production fills at the price AFTER impact, not at the pre-trade price.
+    // Modelling it as a free fill at co.price is why the harness never noticed
+    // that a limit order could fill worse than its limit: the stub was kinder
+    // than the exchange.
+    const price=r2(Math.max(0.01, co.price*(1+(o.side==='buy'?1:-1)*priceImpact(co,o.qty))));
+    // A buy must never fill above its limit, a sell never below. The crossed
+    // check above compares the limit against the price BEFORE impact; this
+    // compares it against the price actually paid. No partial fills exist
+    // here, so the whole quantity has to be available within the limit or the
+    // order stays resting.
+    if(o.side==='buy' ? price>o.limit_price : price<o.limit_price)
+      return {filled:false, reason:'limit_would_be_breached'};
     const total=r2(price*o.qty);
     if(o.side==='buy'){
       if(u.cash<total||co.shares_avail<o.qty) return {filled:false};
@@ -860,6 +871,7 @@ const RPC = {
       co.shares_avail+=o.qty;
     }
     o.status='filled';
+    pushPrice(co, price);   // production moves the price on a pool fill too
     const trade=recordTrade({ticker:o.ticker, qty:o.qty, price,
       buyer_id:o.side==='buy'?u.id:'exchange', seller_id:o.side==='buy'?'exchange':u.id, type:'limit'});
     return {filled:true, ticker:o.ticker, price, price_history:co.price_history,

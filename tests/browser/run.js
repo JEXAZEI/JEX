@@ -1415,6 +1415,105 @@ ${PRELUDE}
     return 'filled vs the pool @ '+filled.filled_price;
   });
 
+  // ── the limit price is a promise ──
+  //
+  // rpc_fill_limit_vs_pool decided "is it crossed" from the price BEFORE
+  // impact, then filled at the price AFTER it, and never compared the two. A
+  // buy limit filled above its limit and a sell below: with a $31.10 stock and
+  // 1000 shares, a 500-share buy limit at $31.10 filled at $34.83.
+  //
+  // The stub never caught it because it filled at co.price with no impact at
+  // all -- kinder than the exchange. Both now apply impact and refuse a fill
+  // that would breach the limit, leaving the order resting.
+  // Settled one order at a time via settleLimitOrder rather than through
+  // checkLimitOrders(): the latter settles every resting order, so another
+  // order's toast overwrites the one being asserted on. The toast element only
+  // ever holds the most recent message.
+  await step('a buy limit will not fill above its limit price', async ()=>{
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const me=DB.users.find(u=>u.id==='u-stu');
+    // Sized so the impact certainly breaches a limit set AT the market.
+    const o={id:'lo-breach', user_id:'u-stu', ticker:'ACME', side:'buy', qty:40,
+      limit_price:co.price, status:'open', order_type:'gtc',
+      created_at:new Date().toISOString()};
+    DB.limitOrders.push(o); stub.data.jex_limit_orders.push(o);
+    const cash0=me.cash, held0=(me.holdings.ACME||0), p0=co.price;
+    await settleLimitOrder(o, false);
+    const after=DB.limitOrders.find(x=>x.id==='lo-breach');
+    if(after.status==='filled')
+      throw new Error('filled at '+after.filled_price+' against a limit of '+o.limit_price);
+    if(after.status!=='open') throw new Error('unexpected status '+after.status);
+    const m=DB.users.find(u=>u.id==='u-stu');
+    if(m.cash!==cash0) throw new Error('cash moved on a refused fill');
+    if((m.holdings.ACME||0)!==held0) throw new Error('holdings moved on a refused fill');
+    if(DB.companies.find(c=>c.ticker==='ACME').price!==p0)
+      throw new Error('the price moved on a refused fill');
+    // A limit set at the market never fills, for a reason that is invisible
+    // unless it is said. Silence here reads as a broken feature.
+    const t=lastToast()||'';
+    if(!/push the price past your limit/i.test(t))
+      throw new Error('no explanation was shown -- toast: '+t);
+    return 'resting and explained, not filled above '+o.limit_price;
+  });
+
+  await step('a sell limit will not fill below its limit price', async ()=>{
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const me=DB.users.find(u=>u.id==='u-stu');
+    const held0=(me.holdings.ACME||0);
+    if(held0<5) throw new Error('not enough held to test a sell breach: '+held0);
+    // The previous step deliberately leaves a BUY resting at the market price.
+    // Left in place it becomes this sell's counterparty and they match
+    // book-to-book at exactly the limit -- which breaches nothing and is
+    // correct, but means the pool path under test never runs. Retire it so the
+    // pool is the only counterparty.
+    ['lo-breach'].forEach(id=>{
+      const a=DB.limitOrders.find(x=>x.id===id); if(a)a.status='cancelled';
+      const b=stub.data.jex_limit_orders.find(x=>x.id===id); if(b)b.status='cancelled';
+    });
+    const o={id:'lo-breach-sell', user_id:'u-stu', ticker:'ACME', side:'sell', qty:held0,
+      limit_price:co.price, status:'open', order_type:'gtc',
+      created_at:new Date().toISOString()};
+    DB.limitOrders.push(o); stub.data.jex_limit_orders.push(o);
+    const cash0=me.cash;
+    await settleLimitOrder(o, false);
+    const after=DB.limitOrders.find(x=>x.id==='lo-breach-sell');
+    if(after.status==='filled')
+      throw new Error('filled at '+after.filled_price+' against a limit of '+o.limit_price);
+    const m=DB.users.find(u=>u.id==='u-stu');
+    if(m.cash!==cash0) throw new Error('cash moved on a refused fill');
+    if((m.holdings.ACME||0)!==held0) throw new Error('holdings moved on a refused fill');
+    return 'resting, not filled below '+o.limit_price;
+  });
+
+  await step('a limit with room for the impact still fills', async ()=>{
+    // The guard must not block legitimate fills -- a limit set generously
+    // above the market has to go through, or the feature is just broken in a
+    // new way.
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const me=DB.users.find(u=>u.id==='u-stu');
+    const o={id:'lo-ok', user_id:'u-stu', ticker:'ACME', side:'buy', qty:3,
+      limit_price:Math.round(co.price*1.20*100)/100, status:'open', order_type:'gtc',
+      created_at:new Date().toISOString()};
+    // Retire the two deliberately-resting orders from the steps above. Left
+    // open, this buy crosses the resting sell and they match book-to-book --
+    // the student trading with themselves, netting zero holdings -- and the
+    // pool path under test never runs.
+    ['lo-breach','lo-breach-sell'].forEach(id=>{
+      const a=DB.limitOrders.find(x=>x.id===id); if(a)a.status='cancelled';
+      const b=stub.data.jex_limit_orders.find(x=>x.id===id); if(b)b.status='cancelled';
+    });
+    DB.limitOrders.push(o); stub.data.jex_limit_orders.push(o);
+    const held0=(me.holdings.ACME||0);
+    await settleLimitOrder(o, false);
+    const after=DB.limitOrders.find(x=>x.id==='lo-ok');
+    if(after.status!=='filled') throw new Error('a fillable order did not fill: '+after.status);
+    if(after.filled_price>o.limit_price)
+      throw new Error('filled at '+after.filled_price+', above the limit '+o.limit_price);
+    if((DB.users.find(u=>u.id==='u-stu').holdings.ACME||0)!==held0+3)
+      throw new Error('holdings did not increase');
+    return 'filled at '+after.filled_price+' within a limit of '+o.limit_price;
+  });
+
   await step('the poll loop does nothing while the session is closed', async ()=>{
     const co=DB.companies.find(c=>c.ticker==='ACME');
     const o={id:'lo-closed', user_id:'u-stu', ticker:'ACME', side:'buy', qty:1,
