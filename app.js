@@ -4095,7 +4095,19 @@ async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
   qty=parseInt(qty);limitPrice=parseFloat(limitPrice);
   if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   if(isNaN(limitPrice)||limitPrice<=0)return toast('Enter a valid limit price');
-  const orderTypeEl=document.getElementById('limit-order-type');
+  // The buy and sell panels are mutually exclusive and render DIFFERENT
+  // selects: 'limit-order-type' in the buy panel, 'limit-order-type-sell' in
+  // the sell one. Reading only the first meant that on the Sell tab the
+  // element did not exist at all, so every sell limit order went out as GTC no
+  // matter what the student picked -- a FOK sell silently became a resting
+  // order. cpLimit() tried to paper over this by copying one select's value
+  // into the other, which could not work: the target is not in the DOM when
+  // the sell panel is showing.
+  //
+  // The market quick-panel renders no select at all, so it falls through to
+  // gtc, which is what it has always sent and what its UI implies.
+  const orderTypeEl=document.getElementById(side==='sell'?'limit-order-type-sell':'limit-order-type')
+    ||document.getElementById('limit-order-type');
   const orderType=(orderTypeEl?.value||'gtc').toLowerCase();
   const icebergQtyEl=document.getElementById('limit-iceberg-qty');
   const icebergQty=orderType==='iceberg'&&icebergQtyEl?Math.max(1,parseInt(icebergQtyEl.value)||Math.ceil(qty/4)):null;
@@ -6605,10 +6617,10 @@ function cpLimit(side){
   if(side==='buy'){
     return placeLimitOrder(t,'buy',get('cp-lmt-qty')?.value,get('cp-lmt-price')?.value);
   } else {
-    // Sync sell order type selector to the shared limit-order-type element
-    const sellTypeEl=get('limit-order-type-sell');
-    const sharedTypeEl=get('limit-order-type');
-    if(sellTypeEl&&sharedTypeEl)sharedTypeEl.value=sellTypeEl.value;
+    // No sync needed: placeLimitOrder reads the select that belongs to the
+    // side being traded. The copy that used to live here could never have
+    // worked -- its target lives in the buy panel, which is not rendered while
+    // the sell panel is.
     return placeLimitOrder(t,'sell',get('cp-lmt-sty')?.value,get('cp-lmt-sprice')?.value);
   }
 }
