@@ -787,8 +787,30 @@ const RPC = {
     const open=DATA.jex_limit_orders.filter(o=>o.ticker===p.p_ticker&&o.status==='open');
     const bids=open.filter(o=>o.side==='buy').sort((a,b)=>b.limit_price-a.limit_price);
     const asks=open.filter(o=>o.side==='sell').sort((a,b)=>a.limit_price-b.limit_price);
-    const bid=bids[0], ask=asks[0];
-    if(!bid||!ask||bid.limit_price<ask.limit_price) return {matched:false};
+    // Nobody trades with themselves. Each side resolves to the PERSON behind
+    // it -- a fund order is controlled by its manager -- so this blocks a
+    // student against their own resting order, a manager against their own
+    // fund, and one of a manager's funds against another. Mirrors the pairing
+    // condition in rpc_match_limit_order_book.
+    //
+    // The stub lacked this while production had it, so the harness modelled a
+    // more permissive exchange: a test of mine had one student on both sides,
+    // netting zero cash and zero holdings while still printing a trade and
+    // moving the price. That is exactly what the guard exists to prevent, and
+    // it went unnoticed because nothing here disallowed it.
+    const actor=o=>{
+      const f=o.fund_id&&DATA.jex_funds&&DATA.jex_funds.find(x=>x.id===o.fund_id);
+      return (f&&f.manager_id)||o.user_id;
+    };
+    let bid=null, ask=null;
+    outer: for(const b of bids){
+      for(const a of asks){
+        if(a.limit_price>b.limit_price) break;
+        if(actor(a)===actor(b)) continue;
+        bid=b; ask=a; break outer;
+      }
+    }
+    if(!bid||!ask) return {matched:false};
     const co=findCo(p.p_ticker);
     const qty=Math.min(bid.qty, ask.qty);
     // The resting order sets the price, as a real book does.

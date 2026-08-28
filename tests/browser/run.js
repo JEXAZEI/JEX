@@ -1461,15 +1461,10 @@ ${PRELUDE}
     const me=DB.users.find(u=>u.id==='u-stu');
     const held0=(me.holdings.ACME||0);
     if(held0<5) throw new Error('not enough held to test a sell breach: '+held0);
-    // The previous step deliberately leaves a BUY resting at the market price.
-    // Left in place it becomes this sell's counterparty and they match
-    // book-to-book at exactly the limit -- which breaches nothing and is
-    // correct, but means the pool path under test never runs. Retire it so the
-    // pool is the only counterparty.
-    ['lo-breach'].forEach(id=>{
-      const a=DB.limitOrders.find(x=>x.id===id); if(a)a.status='cancelled';
-      const b=stub.data.jex_limit_orders.find(x=>x.id===id); if(b)b.status='cancelled';
-    });
+    // The previous step leaves a BUY resting at the market price, from this
+    // same student. It is NOT retired here on purpose: the self-match guard is
+    // what stops it becoming this sell's counterparty, so leaving it in place
+    // means this step fails if that guard is ever lost.
     const o={id:'lo-breach-sell', user_id:'u-stu', ticker:'ACME', side:'sell', qty:held0,
       limit_price:co.price, status:'open', order_type:'gtc',
       created_at:new Date().toISOString()};
@@ -1494,14 +1489,9 @@ ${PRELUDE}
     const o={id:'lo-ok', user_id:'u-stu', ticker:'ACME', side:'buy', qty:3,
       limit_price:Math.round(co.price*1.20*100)/100, status:'open', order_type:'gtc',
       created_at:new Date().toISOString()};
-    // Retire the two deliberately-resting orders from the steps above. Left
-    // open, this buy crosses the resting sell and they match book-to-book --
-    // the student trading with themselves, netting zero holdings -- and the
-    // pool path under test never runs.
-    ['lo-breach','lo-breach-sell'].forEach(id=>{
-      const a=DB.limitOrders.find(x=>x.id===id); if(a)a.status='cancelled';
-      const b=stub.data.jex_limit_orders.find(x=>x.id===id); if(b)b.status='cancelled';
-    });
+    // Both orders from the steps above are still resting, and both belong to
+    // this student. Left in place deliberately: the self-match guard is what
+    // sends this order to the pool instead of crossing with them.
     DB.limitOrders.push(o); stub.data.jex_limit_orders.push(o);
     const held0=(me.holdings.ACME||0);
     await settleLimitOrder(o, false);
@@ -1512,6 +1502,42 @@ ${PRELUDE}
     if((DB.users.find(u=>u.id==='u-stu').holdings.ACME||0)!==held0+3)
       throw new Error('holdings did not increase');
     return 'filled at '+after.filled_price+' within a limit of '+o.limit_price;
+  });
+
+  await step('a student cannot trade with themselves', async ()=>{
+    // A real exchange blocks self-matching because it lets one account print
+    // trades -- moving the visible price, the volume and the chart at no cost
+    // to itself. In a classroom that is a plausible discovery, and it would
+    // quietly corrupt the leaderboard.
+    //
+    // rpc_match_limit_order_book resolves each side to the PERSON behind it
+    // (a fund order to its manager) and requires them to differ. Found because
+    // a test of mine accidentally had one student on both sides and netted
+    // zero; production was already right, the harness was not.
+    const co=DB.companies.find(c=>c.ticker==='ACME');
+    const me=DB.users.find(u=>u.id==='u-stu');
+    const px=Math.round(co.price*100)/100;
+    const mine=[
+      {id:'lo-self-b', user_id:'u-stu', ticker:'ACME', side:'buy',  qty:2, limit_price:px,
+       status:'open', order_type:'gtc', created_at:new Date().toISOString()},
+      {id:'lo-self-a', user_id:'u-stu', ticker:'ACME', side:'sell', qty:2, limit_price:px,
+       status:'open', order_type:'gtc', created_at:new Date().toISOString()}];
+    mine.forEach(o=>{DB.limitOrders.push(o); stub.data.jex_limit_orders.push(o);});
+    const cash0=me.cash, held0=(me.holdings.ACME||0);
+    const trades0=stub.data.jex_trades.filter(t=>t.type==='book_match').length;
+    const r=await sb.rpc('rpc_match_limit_order_book',{p_ticker:'ACME'});
+    if(r&&r.matched&&r.bid_order_id==='lo-self-b'&&r.ask_order_id==='lo-self-a')
+      throw new Error('the student matched against their own order');
+    const m=DB.users.find(u=>u.id==='u-stu');
+    if(m.cash!==cash0) throw new Error('cash moved: '+cash0+' -> '+m.cash);
+    if((m.holdings.ACME||0)!==held0) throw new Error('holdings moved');
+    if(stub.data.jex_trades.filter(t=>t.type==='book_match').length!==trades0)
+      throw new Error('a trade was printed with one person on both sides');
+    mine.forEach(o=>{
+      const a=DB.limitOrders.find(x=>x.id===o.id); if(a)a.status='cancelled';
+      const b=stub.data.jex_limit_orders.find(x=>x.id===o.id); if(b)b.status='cancelled';
+    });
+    return 'refused to cross both sides of one account';
   });
 
   await step('the poll loop does nothing while the session is closed', async ()=>{
