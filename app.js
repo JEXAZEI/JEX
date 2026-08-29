@@ -3707,7 +3707,15 @@ async function checkPriceAlerts(){
     if(!r.triggered){if(r.reason==='already_triggered_or_missing')a.triggered=true;continue;}
     a.triggered=true;
     await pushNotification(r.user_id,'price_alert','🎯 Price alert: '+r.ticker+' is '+r.direction+' '+fmt(r.target_price)+' (now '+fmt(r.price)+')',r.ticker);
-    toast('Price alert triggered: '+r.ticker+' '+r.direction+' '+fmt(r.target_price));
+    // Same rule as fills and stop-losses: every client polls every alert, so
+    // without this the toast lands wherever the poll ran. Holdings and cash
+    // are public in JEX by design, but a target price is not -- it is a
+    // private intention, sitting on jex_price_alerts rather than in the
+    // shared user projection -- and an alert someone else set is noise to
+    // everybody but them.
+    const meA=cu();
+    if(meA&&(meA.id===r.user_id||isAdmin(meA)))
+      toast('Price alert triggered: '+r.ticker+' '+r.direction+' '+fmt(r.target_price));
   }
 }
 
