@@ -6344,7 +6344,12 @@ function renderCompanyPage(parentTicker){
       if(!idxFund){
       const myStopLoss=DB.stopLossOrders.find(s=>s.user_id===u.id&&s.ticker===parentTicker&&s.status==='active');
       html+='<div class="card" style="margin-top:14px"><div class="section-title">🛑 Stop-loss order</div>'
-        +'<div class="ibox ibox-purple">Automatically sells all your shares if the price drops to your trigger price.</div>';
+        // Says what actually happens. rpc_place_stop_loss records the holding
+        // as it stands when the order is placed, and rpc_trigger_stop_loss
+        // sells least(held_now, that_number) -- so selling some beforehand
+        // shrinks it, but buying more afterwards does NOT extend the
+        // protection. "All your shares" promised the second thing.
+        +'<div class="ibox ibox-purple">Automatically sells the '+held+' '+esc(parentTicker)+' you hold now, if the price drops to your trigger price. Shares you buy later are not covered — set it again to include them.</div>';
       if(myStopLoss){
         html+='<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;margin-bottom:8px">'
           +'<div><div style="font-size:13px">Active: sell '+myStopLoss.shares+'×'+parentTicker+' if price ≤ <strong style="color:var(--red);font-family:var(--mono)">'+fmt(myStopLoss.trigger_price)+'</strong></div>'
