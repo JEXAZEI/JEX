@@ -1378,7 +1378,12 @@ async function togglePracticeMode(){
     if(!snapId)return toast('Could not save the snapshot — practice mode NOT started, so nothing becomes unreversible. Try again.');
     await saveSession({practice_mode:now,practice_snapshot_id:snapId});
   } else {
-    if(!confirm('End practice mode? The exchange will be automatically restored to its state from just before practice mode started, undoing all practice trades.'))return;
+    // Says what the RPC actually restores. It writes back user cash, holdings
+    // and shorts, and company price, shares, shares_avail and price_history,
+    // then clears open orders and active stop-losses. It does NOT delete the
+    // jex_trades rows, so the tape still shows what happened -- and until
+    // snapshot_coverage is extended it does not restore jex_funds either.
+    if(!confirm('End practice mode?\n\nCash, holdings, shorts and every share price go back to exactly where they were before practice started, and open orders and stop-losses are cleared.\n\nThe practice trades stay visible in the trade history — the money is undone, the record is not.'))return;
     const snapId=DB.session.practice_snapshot_id;
     if(snapId){
       const restored=await doRestoreSnapshot(snapId);
@@ -1486,15 +1491,26 @@ async function doRestoreSnapshot(snapshotId){
   const snap=DB.snapshots.find(s=>s.id===snapshotId);
   if(!snap){toast('Snapshot not found');return false;}
   toast('Restoring snapshot...');
-  // Restoring cash/holdings/shorts/price/shares_avail runs server-side
-  // (rpc_admin_restore_snapshot), reading the snapshot's data from
-  // jex_snapshots (RPC-written only) instead of a client-writable row.
-  // Clearing active orders and stop-loss, and rolling back any trade made
-  // AFTER the snapshot was taken, happens inside the same RPC transaction
-  // instead of separate direct client DELETEs -- a true "roll back to this
-  // point in time" (this is what actually powers "End practice mode...
-  // undoing all practice trades"), not just prices/cash/holdings with stale
-  // trade history left behind.
+  // Runs server-side (rpc_admin_restore_snapshot), reading the snapshot's data
+  // from jex_snapshots (RPC-written only) rather than a client-writable row.
+  //
+  // What it actually does, read from the deployed function rather than assumed:
+  //
+  //   jex_users       cash, holdings, shorts
+  //   jex_companies   price, shares, shares_avail, price_history
+  //   deletes         limit orders in open/after_hours, active stop-losses
+  //
+  // This comment previously claimed it also rolled back every trade made after
+  // the snapshot -- "a true roll back to this point in time". It does not, and
+  // never has: rpc_admin_restore_snapshot does not mention jex_trades at all,
+  // and returns restored_users/restored_companies/label with no removed_trades.
+  // The tradesMsg below has therefore always been empty. Left in place because
+  // it is harmless and correct the day the RPC does return it.
+  //
+  // Also NOT restored, and worth knowing before relying on practice mode:
+  // jex_funds (a fund's cash and holdings survive a rollback),
+  // jex_companies.fund_holdings (the index basket pool), and
+  // index_base_adjust. See audit_snapshot_coverage.sql.
   let r;
   try{r=await sb.rpc('rpc_admin_restore_snapshot',{p_activity_id:snapshotId});}
   catch(e){toast(rpcErrorMessage(e));return false;}
