@@ -133,6 +133,36 @@ const setup=(mode)=>{
   check('a null id is not mine',
         (viewer=JANE, myFillSide('user',null))===false);
 
+  // ── price alerts, the third loop with the same shape ──
+  //
+  // Holdings and cash ARE public in JEX -- they are in JEX_USERS_SAFE_SELECT,
+  // deliberately, because the leaderboard ranks by net worth. A target price
+  // is not: it lives on jex_price_alerts and is a private intention. And an
+  // alert somebody else set is noise to everyone but them.
+  eval(grabFn('checkPriceAlerts'));
+  const setupAlert=()=>{
+    toasts=[]; notes=[];
+    global.DB={companies:[{ticker:'ACME',price:12}],
+      priceAlerts:[{id:'a1',user_id:'u-jane',ticker:'ACME',direction:'above',target_price:11,triggered:false}]};
+    global.sb={rpc:async()=>({triggered:true,user_id:'u-jane',ticker:'ACME',
+      direction:'above',target_price:11,price:12})};
+  };
+  for(const [who,label,shown] of [[NOSY,'an uninvolved classmate',false],
+                                  [JANE,'the person who set it',true],
+                                  [CHAIR,'an admin',true]]){
+    viewer=who; setupAlert();
+    await checkPriceAlerts();
+    check('price alert: '+label+(shown?' is told':' is told nothing'),
+          (toasts.length>0)===shown, JSON.stringify(toasts));
+  }
+  viewer=NOSY; setupAlert();
+  await checkPriceAlerts();
+  check('the alert still fires and notifies its owner from a stranger’s poll',
+        DB.priceAlerts[0].triggered===true && notes.length===1 && notes[0][0]==='u-jane',
+        JSON.stringify(notes));
+  check('...and the target price is not shown to the stranger',
+        !toasts.some(t=>/11/.test(t)), JSON.stringify(toasts));
+
   console.log(fails?('\n'+fails+' FAILURE(S)'):('\nAll fill-privacy checks passed.'));
   process.exit(fails?1:0);
 })();
