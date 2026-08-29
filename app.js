@@ -3619,7 +3619,21 @@ async function checkStopLossOrders(){
     pushTradeToSheets(r.trade);
     await pushNotification(r.user_id,'stop_loss','🛑 Stop-loss triggered: sold '+r.sell_qty+'×'+sl.ticker+' @ '+fmt(r.price)+' (trigger: '+fmt(sl.trigger_price)+')',sl.ticker);
     await logActivity('stop_loss',(u?u.name:'Someone')+' stop-loss triggered on '+sl.ticker+' @ '+fmt(r.price),{ticker:sl.ticker,userId:r.user_id,userName:u?u.name:'',amount:r.sell_qty*r.price});
-    toast('Stop-loss triggered'+(u?' for '+u.name:'')+': sold '+r.sell_qty+'×'+sl.ticker+' @ '+fmt(r.price));
+    // Whose screen this appears on matters. Every logged-in client polls and
+    // triggers ANY due stop-loss -- that is the whole point of the design,
+    // since there is no server-side cron -- so without this gate the toast
+    // lands on whichever student's browser happened to notice first, naming
+    // the student who was sold out and the price it happened at. That is
+    // another student's position, broadcast to a classmate for doing nothing
+    // but leaving a tab open.
+    //
+    // The owner still gets the notification (pushNotification above), which is
+    // the durable, private channel. Admins keep the live toast because
+    // watching the market react is part of running the session.
+    const me=cu();
+    if(me&&(me.id===r.user_id||isAdmin(me))){
+      toast('Stop-loss triggered'+(u&&u.id!==me.id?' for '+u.name:'')+': sold '+r.sell_qty+'×'+sl.ticker+' @ '+fmt(r.price));
+    }
   }
 }
 // ═══════════════════════════════════════════════
