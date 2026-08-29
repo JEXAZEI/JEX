@@ -4205,6 +4205,23 @@ async function cancelLimitOrder(id){
 }
 
 // ── Periodic check: match crossed orders & fill vs pool ───
+// Was this side of a fill mine? A fill identifies each side as either a user
+// id or a fund id, and a fund is "mine" when I manage it.
+//
+// This exists because every logged-in client runs the matching loop -- there is
+// no server cron -- so without it the announcement lands on whichever browser
+// happened to notice, naming both parties to the whole room: "5xACME matched:
+// Jane bought from Bob @ $11.01". A real tape is public in price and size and
+// anonymous in identity; this was the opposite.
+//
+// The trade still appears on the Market and Trades pages, where it belongs.
+// Participants and admins keep the toast, because for them it is news.
+function myFillSide(type,id){
+  const me=cu();
+  if(!me||id==null)return false;
+  if(type==='fund')return getFund(id)?.manager_id===me.id;
+  return id===me.id;
+}
 async function checkLimitOrders(){
   if(!isOpen())return;
   const openOrders=DB.limitOrders.filter(o=>o.status==='open');
@@ -4220,7 +4237,8 @@ async function checkLimitOrders(){
       const buyerName=r.buyer_type==='fund'?(getFund(r.buyer_id)?.name||'a fund'):(getUser(r.buyer_id)?.name||'someone');
       const sellerName=r.seller_type==='fund'?(getFund(r.seller_id)?.name||'a fund'):(getUser(r.seller_id)?.name||'someone');
       await logActivity('limit_fill',buyerName+' ↔ '+sellerName+': '+r.fill_qty+'×'+ticker+' @ '+fmt(r.fill_price),{ticker,amount:r.fill_price});
-      toast(r.fill_qty+'×'+ticker+' matched: '+buyerName+' bought from '+sellerName+' @ '+fmt(r.fill_price));
+      if(myFillSide(r.buyer_type,r.buyer_id)||myFillSide(r.seller_type,r.seller_id)||isAdmin(cu()))
+        toast(r.fill_qty+'×'+ticker+' matched: '+buyerName+' bought from '+sellerName+' @ '+fmt(r.fill_price));
     }
     for(const o of DB.limitOrders.filter(ord=>ord.ticker===ticker&&ord.status==='open')){
       const co=getCo(ticker);if(!co)continue;
@@ -4235,7 +4253,8 @@ async function checkLimitOrders(){
       const ownerName=r.owner_type==='fund'?(getFund(r.owner_id)?.name||'a fund'):(getUser(r.owner_id)?.name||'someone');
       await logActivity('limit_fill',ownerName+"'s limit "+o.side+" "+qty+"×"+ticker+" filled vs JEX pool @ "+fmt(r.fill_price),{ticker,amount:r.fill_price});
       if(r.owner_type==='user')await pushNotification(r.owner_id,'limit_fill','⚡ Limit '+o.side+' filled: '+qty+'×'+ticker+' @ '+fmt(r.fill_price),ticker);
-      toast(ownerName+"'s limit order filled: "+qty+"×"+ticker+" @ "+fmt(r.fill_price));
+      if(myFillSide(r.owner_type,r.owner_id)||isAdmin(cu()))
+        toast(ownerName+"'s limit order filled: "+qty+"×"+ticker+" @ "+fmt(r.fill_price));
     }
   }
 }
