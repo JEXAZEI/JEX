@@ -4716,6 +4716,13 @@ async function issueDividend(ticker,perShare,note){
       toast('Dividend submitted for Treasurer approval ('+fmt(total)+' exceeds '+fmt(divApprovalThreshold)+' threshold)');
       UI.companyTab='dividends';render();return;
     }
+    // No Treasurer appointed. Execution used to fall straight through to the
+    // payment, so a dividend over the threshold paid immediately with nothing
+    // said -- the control silently absent rather than satisfied. Blocking
+    // instead would make dividends impossible until the role is filled, which
+    // is worse in a class where roles get assigned over the first few weeks.
+    // So it proceeds, and says that it is proceeding unapproved.
+    if(!confirm('This dividend total ('+fmt(total)+') is over the '+fmt(divApprovalThreshold)+' approval threshold, but no Treasurer has been appointed to approve it.\n\nPay it anyway, without approval?'))return;
   }
   const sharesAcrossClasses=s=>allT.reduce((sum,t)=>sum+((s.holdings&&s.holdings[t])||0),0);
   if(!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(sharesAcrossClasses(s)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
