@@ -2564,7 +2564,26 @@ async function approveReg(id,startCash){
   // that so the losing click gets a clear toast instead of an uncaught error.
   let u;
   try{u=await sb.rpc('approve_registration',{p_pending_id:id,p_starting_cash:startCash,p_classroom_id:classroomId||null});}
-  catch(e){DB.pending=DB.pending.filter(x=>x.id!==id);render();return toast('This registration was already approved');}
+  catch(e){
+    // ONLY a primary-key collision means "somebody already approved this".
+    // Every other failure -- the wifi dropped, an RLS denial, a fault inside
+    // the RPC -- means the student was NOT approved, and this used to report
+    // all of them as success while deleting the row from the pending list.
+    //
+    // On day one that is how a student silently never gets an account: the
+    // admin is told it is done, the name disappears from the queue, and only
+    // a reload would reveal that jex_pending still has them. Thirty
+    // registrations on classroom wifi is exactly where one request fails.
+    let raw='';
+    try{const p=JSON.parse(e.message);raw=(p&&p.message)||e.message;}catch(_){raw=(e&&e.message)||String(e);}
+    if(/duplicate key|already exists|unique constraint/i.test(raw)){
+      DB.pending=DB.pending.filter(x=>x.id!==id);render();
+      return toast('This registration was already approved');
+    }
+    // Row deliberately left in DB.pending so the admin can simply try again.
+    return toast('Could not approve '+r.name+' — '+rpcErrorMessage(e,'approveReg')
+      +' They are still waiting, so try again.');
+  }
   DB.users.push(u);DB.pending=DB.pending.filter(x=>x.id!==id);
   await logActivity('registration',r.name+' approved ('+r.role+') with '+fmt(startCash),{userId:r.id,userName:r.name,amount:startCash});
 
