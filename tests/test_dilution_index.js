@@ -66,6 +66,7 @@ const T=n=>'2026-08-2'+n+'T12:00:00.000Z';
 const reset=(rpc,rows)=>{
   toasts=[];gets=[];rpcResult=rpc;getRows=rows;
   global.DB={
+    session:{session_open_prices:{ACME:50}},
     users:[{id:'o1',classroom_id:'cA'}],
     dilApps:[{id:'d1',ticker:'ACME',company_name:'Acme Corp',new_shares:1000,status:'pending'}],
     companies:[
@@ -88,8 +89,17 @@ const idxPrice=()=>{syncIndexRows();return getCo('JXI').price;};
 
   // ── the RPC hands back the new divisor ──
   reset({approved:true,shares:2000,shares_avail:1400,price:25,
-         price_history:[{p:50,t:T(1)},{p:25,t:T(2)}],index_base_adjust:0.5},null);
+         price_history:[{p:50,t:T(1)},{p:25,t:T(2)}],index_base_adjust:0.5,
+         session_open_prices:{ACME:25}},null);
   await reviewDilution('d1',true);
+  // The server rescales session_open_prices by the same factor -- it drives
+  // bandLimits(), the daily % badges and the circuit breaker. Left stale, the
+  // band is measured against a pre-dilution open and the badges read the
+  // dilution step as a crash, which is what the rescaling exists to prevent.
+  check('the rescaled session opens are applied',
+        DB.session && DB.session.session_open_prices
+          && DB.session.session_open_prices.ACME===25,
+        JSON.stringify(DB.session&&DB.session.session_open_prices));
   check('the new divisor is applied', getCo('ACME').index_base_adjust===0.5,
         String(getCo('ACME').index_base_adjust));
   check('a 2:1 dilution leaves the index exactly where it was', idxPrice()===100,
