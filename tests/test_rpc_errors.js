@@ -69,6 +69,12 @@ const run=msg=>{reported=[];return rpcErrorMessage(new Error(JSON.stringify({mes
   ['a missing function',                    'function index_live_value(unknown) does not exist'],
   ['a strict select that found nothing',    'query returned no rows'],
   ['a numeric overflow',                    'numeric field overflow -- value out of range'],
+  // Shown verbatim to a student on the Share classes tab before this was
+  // added. It is a column-versus-parameter mismatch inside an RPC: a fault in
+  // the function, and meaningless to anyone not reading its source.
+  ['the share-class type mismatch',         'column "whitelist" is of type jsonb but expression is of type text[]'],
+  ['a failed cast',                         'cannot cast type record to jsonb'],
+  ['a missing table',                       'relation "jex_nope" does not exist'],
 ].forEach(([label,msg])=>{
   const out=run(msg);
   check('hidden: '+label, GENERIC.test(out), out);
