@@ -4407,7 +4407,27 @@ function pushTradeToSheets(trade){
 function applyTradeResult(ticker,r){
   const u=cu(),co=getCo(ticker);
   if(u){u.cash=r.cash;if('holdings'in r)u.holdings=r.holdings;if('shorts'in r)u.shorts=r.shorts;}
-  if(co){co.price=r.price;if('shares_avail'in r)co.shares_avail=r.shares_avail;co.price_history=r.price_history;}
+  if(co){
+    const availBefore=co.shares_avail;
+    co.price=r.price;if('shares_avail'in r)co.shares_avail=r.shares_avail;co.price_history=r.price_history;
+    // An index row mints on a buy and burns on a sell, so the server moves
+    // BOTH counts by the same amount:
+    //
+    //   shares = v_co.shares + p_qty, shares_avail = v_co.shares_avail + p_qty
+    //
+    // and reports only shares_avail back. Left alone, co.shares keeps its
+    // pre-trade value: sharesBar() then prints a stale "units outstanding" for
+    // the instrument just traded, and locally shares_avail creeps above
+    // shares, which is the one relationship the schema's own check constraint
+    // forbids.
+    //
+    // The delta comes from shares_avail rather than the quantity because that
+    // is exactly what the server applied, and this function is never told the
+    // quantity. Short and cover change neither count and return no
+    // shares_avail, so they fall through untouched.
+    if(co.is_index_fund&&'shares_avail'in r&&availBefore!=null)
+      co.shares=Math.max(0,(co.shares||0)+(co.shares_avail-availBefore));
+  }
   if(r.owner_id&&r.owner_cash!=null){const owner=getUser(r.owner_id);if(owner)owner.cash=r.owner_cash;}
   // Real backing: minting/redeeming JXI actually buys/sells a basket of its
   // constituents server-side (see rpc_trade_buy/sell's is_index_fund branch)
@@ -4592,7 +4612,27 @@ async function withdrawFromFund(fundId,unitsStr){
 function applyFundTradeResult(fundId,ticker,r){
   const f=getFund(fundId),co=getCo(ticker);
   if(f){f.cash=r.cash;f.holdings=r.holdings;}
-  if(co){co.price=r.price;if('shares_avail'in r)co.shares_avail=r.shares_avail;co.price_history=r.price_history;}
+  if(co){
+    const availBefore=co.shares_avail;
+    co.price=r.price;if('shares_avail'in r)co.shares_avail=r.shares_avail;co.price_history=r.price_history;
+    // An index row mints on a buy and burns on a sell, so the server moves
+    // BOTH counts by the same amount:
+    //
+    //   shares = v_co.shares + p_qty, shares_avail = v_co.shares_avail + p_qty
+    //
+    // and reports only shares_avail back. Left alone, co.shares keeps its
+    // pre-trade value: sharesBar() then prints a stale "units outstanding" for
+    // the instrument just traded, and locally shares_avail creeps above
+    // shares, which is the one relationship the schema's own check constraint
+    // forbids.
+    //
+    // The delta comes from shares_avail rather than the quantity because that
+    // is exactly what the server applied, and this function is never told the
+    // quantity. Short and cover change neither count and return no
+    // shares_avail, so they fall through untouched.
+    if(co.is_index_fund&&'shares_avail'in r&&availBefore!=null)
+      co.shares=Math.max(0,(co.shares||0)+(co.shares_avail-availBefore));
+  }
   if(r.owner_id&&r.owner_cash!=null){const owner=getUser(r.owner_id);if(owner)owner.cash=r.owner_cash;}
   // Real backing: a fund minting/redeeming JXI actually buys/sells a
   // basket of its constituents server-side too (see rpc_fund_buy/sell's
