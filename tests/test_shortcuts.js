@@ -94,5 +94,70 @@ check("'s' only opens the sell panel and repaints",
       /panelMode='sell'/.test(sLine) && callsSomething(sLine).length===0,
       sLine+' -> calls '+JSON.stringify(callsSomething(sLine)));
 
+// ── the list and the handler must not drift apart ──
+//
+// JEX had four working shortcuts and nothing telling anyone they existed, so
+// in practice it had none. The SHORTCUTS list drives the help card; if it and
+// the handler disagree, students are either told about a key that does nothing
+// or not told about one that does. Both are worth failing a build over.
+function grabFn(name){
+  const m=new RegExp('^(?:async )?function '+name+'\\(','m').exec(src);
+  if(!m)throw new Error('not found: '+name);
+  let i=src.indexOf('{',m.index),d=0;
+  for(;i<src.length;i++){ if(src[i]==='{')d++; else if(src[i]==='}'){d--;if(!d)return src.slice(m.index,i+1);} }
+  throw new Error('unterminated: '+name);
+}
+function grabConst(name){
+  const m=new RegExp('(?:^|;)const '+name+'=','m').exec(src);
+  if(!m)throw new Error('not found: '+name);
+  const start=m.index+(m[0].startsWith(';')?1:0);
+  let depth=0;
+  for(let i=start;i<src.length;i++){
+    const c=src[i];
+    if('([{'.includes(c))depth++;
+    else if(')]}'.includes(c))depth--;
+    else if(c===';'&&depth===0)return src.slice(start,i+1);
+  }
+  throw new Error('unterminated: '+name);
+}
+const SHORTCUTS=eval('('+grabConst('SHORTCUTS').replace(/^const SHORTCUTS=/,'').replace(/;$/,'')+')');
+const norm=k=>({esc:'escape'}[k.toLowerCase()]||k.toLowerCase());
+const documented=new Set(SHORTCUTS.map(s=>norm(s.keys)));
+const handled=new Set((code.match(/key===['"]([^'"]+)['"]/g)||[])
+  .map(m=>m.replace(/key===['"]/,'').replace(/['"]$/,'')));
+
+for(const k of documented)
+  check('the documented shortcut "'+k+'" is actually handled', handled.has(k),
+        'the help card promises it but the handler has no branch');
+for(const k of handled)
+  check('the handled key "'+k+'" is documented', documented.has(k),
+        'it works but no student is told it exists');
+
+check('every entry has a key and a description',
+      SHORTCUTS.every(s=>s.keys&&s.what), JSON.stringify(SHORTCUTS));
+check('the list is not empty', SHORTCUTS.length>=10, String(SHORTCUTS.length));
+
+// ── the help card itself ──
+global.UI={showShortcuts:false};
+global.esc=s=>String(s);
+eval(grabFn('renderShortcutHelp'));
+check('the card renders nothing when closed', renderShortcutHelp()==='');
+UI.showShortcuts=true;
+const card=renderShortcutHelp();
+check('the card renders when opened', card.length>0);
+for(const s of SHORTCUTS)
+  check('the card lists '+s.keys, card.includes(s.keys), s.keys+' missing from the card');
+check('the card says shortcuts never place an order', /needs the button/i.test(card));
+check('the card says typing is not interrupted', /typing in a box/i.test(card));
+check('the card can be dismissed', /showShortcuts=false/.test(card));
+
+// '?' must reach the toggle for everyone, admins included -- it is gated
+// before the student/company role check, not inside it.
+const qIndex=code.indexOf("key==='?'");
+const roleIndex=code.indexOf("role==='student'");
+check('the help key works for admins too, not just students',
+      qIndex>-1 && qIndex<roleIndex,
+      "'?' is inside the student/company branch");
+
 console.log(fails?('\n'+fails+' FAILURE(S)'):('\nAll keyboard-shortcut checks passed.'));
 process.exit(fails?1:0);
