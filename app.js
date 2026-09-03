@@ -506,7 +506,7 @@ document.addEventListener('mousemove',resetActivityTimer,{passive:true});
 document.addEventListener('keydown',resetActivityTimer,{passive:true});
 document.addEventListener('touchstart',resetActivityTimer,{passive:true});
 let UI={userId:null,navTab:'market',adminTab:'registrations',appTab:'status',companyTab:'stock',portfolioTab:'holdings',loginView:'select',loginTab:'student',loginUsername:'',loginError:null,forgotUserId:null,forgotAnswer:null,panelTicker:null,panelMode:'buy',companyPage:null,companyPageTab:'overview',tradePage:0,activityFilter:{type:'',ticker:'',user:''},classroomFilter:null,lbClassroom:null,
-  regVerify:{reg:{status:'idle',email:'',resendAt:0},'reg-co':{status:'idle',email:'',resendAt:0}},fundPage:null,googleAuth:null};
+  regVerify:{reg:{status:'idle',email:'',resendAt:0},'reg-co':{status:'idle',email:'',resendAt:0}},fundPage:null,googleAuth:null,showShortcuts:false};
 let charts={},sessionTimer=null;
 // Pages that have been split out into their own real HTML file (see the
 // "split into real separate pages" plan) -- everything else still lives as
@@ -2190,19 +2190,40 @@ document.addEventListener('keydown',function(e){
   if(e.metaKey||e.ctrlKey||e.altKey)return;
   const key=e.key.toLowerCase();
   if(key==='escape'){
+    // The help card is on top, so it closes first.
+    if(UI.showShortcuts){UI.showShortcuts=false;render();return;}
     if(UI.companyPage){closeCompanyPage();return;}
   }
   if(!UI.userId)return;
+  // '?' is available to everyone, including admins -- knowing which keys do
+  // nothing for you is as useful as knowing which ones do something.
+  if(key==='?'||(key==='/'&&e.shiftKey)){UI.showShortcuts=!UI.showShortcuts;render();return;}
   const u=cu();
   if(u?.role==='student'||u?.role==='company'){
     if(key==='m'){setTab('market');return;}
+    if(key==='e'){setTab('exchange');return;}
     if(key==='p'){setTab('portfolio');return;}
+    if(key==='f'){setTab('funds');return;}
     if(key==='l'){setTab('leaderboard');return;}
-    if(key==='n'&&(u.role==='student'||u.role==='company')){UI.navTab='notifications';render();return;}
+    if(key==='t'){setTab('trades');return;}
+    if(key==='n'){UI.navTab='notifications';render();return;}
+    // Focus the market search. Switches to the Market tab first if needed,
+    // since the box only exists there. The focus is deferred because the tab
+    // switch re-renders and destroys the element this would otherwise grab.
+    if(key==='/'){
+      e.preventDefault();
+      if(UI.navTab!=='market'||UI.companyPage){UI.companyPage=null;setTab('market');}
+      setTimeout(()=>{const el=document.getElementById('market-search');if(el){el.focus();el.select&&el.select();}},0);
+      return;
+    }
     if(UI.companyPage){
-      if(key==='b'){UI.companyPageTab='trade';UI.panelMode='buy';render();}
-      if(key==='s'){UI.companyPageTab='trade';UI.panelMode='sell';render();}
-      if(key==='o'){UI.companyPageTab='overview';render();}
+      // On a company page these act on the company. 'o' means Overview here
+      // and Orders everywhere else -- the same key, the nearer meaning.
+      if(key==='b'){UI.companyPageTab='trade';UI.panelMode='buy';render();return;}
+      if(key==='s'){UI.companyPageTab='trade';UI.panelMode='sell';render();return;}
+      if(key==='o'){UI.companyPageTab='overview';render();return;}
+    } else {
+      if(key==='o'){setTab('orders');return;}
     }
   }
 });
@@ -9315,7 +9336,7 @@ function render(){
     <a class="mbn-btn ${UI.navTab==='orders'?'active':''}" href="${pageHref('orders')}"><span class="mbn-icon">📋</span>Orders</a>
     <a class="mbn-btn ${UI.navTab==='notifications'?'active':''}" href="${pageHref('notifications')}"><span class="mbn-icon">🔔</span><span>${_unread?'<span style="color:var(--red)">'+_unread+'</span>':'Alerts'}</span></a>
   </div>`:'';
-  app.innerHTML=`${renderTopbar()}${renderBanner()}${renderNav()}<div class="content${_isMobileStudent?' content-bnav':''}">${getPageContent()}${renderLegalFooter()}</div>${_bnav}`;
+  app.innerHTML=`${renderTopbar()}${renderBanner()}${renderNav()}<div class="content${_isMobileStudent?' content-bnav':''}">${getPageContent()}${renderLegalFooter()}</div>${_bnav}${renderShortcutHelp()}`;
   if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);
   setTimeout(()=>{
     if(UI.navTab==='mystock'&&UI.companyTab==='stock'){
@@ -9353,6 +9374,52 @@ function render(){
   restoreDrafts();
 }
 function setTab(t){UI.navTab=t;UI.panelTicker=null;destroyCharts();render();}
+// ── Keyboard shortcuts: the list, and the card that shows it ──
+//
+// Kept as data rather than scattered through the handler so the help card and
+// the handler cannot drift apart -- a shortcut that exists but is undocumented
+// is nearly as useless as one that does not exist, and JEX already had four of
+// those before this card.
+//
+// Nothing here trades. Every entry navigates, switches a panel, or focuses an
+// input. tests/test_shortcuts.js enforces that against the handler itself: a
+// keypress must never move money, because on a shared Chromebook that is a
+// stray elbow away.
+const SHORTCUTS=[
+  {keys:'M',      what:'Market'},
+  {keys:'E',      what:'Exchange'},
+  {keys:'P',      what:'Portfolio'},
+  {keys:'F',      what:'Funds'},
+  {keys:'L',      what:'Leaderboard'},
+  {keys:'O',      what:'Orders  (Overview, on a company page)'},
+  {keys:'T',      what:'Trades'},
+  {keys:'N',      what:'Notifications'},
+  {keys:'/',      what:'Search the market'},
+  {keys:'B',      what:'Buy panel  (on a company page)'},
+  {keys:'S',      what:'Sell panel  (on a company page)'},
+  {keys:'Esc',    what:'Close this card, or the open company'},
+  {keys:'?',      what:'Show this list'}
+];
+function renderShortcutHelp(){
+  if(!UI.showShortcuts)return'';
+  return`<div onclick="UI.showShortcuts=false;render()"
+      style="position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9000;display:flex;align-items:center;justify-content:center;padding:20px">
+    <div onclick="event.stopPropagation()" class="card" style="max-width:420px;width:100%;max-height:80vh;overflow:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div class="section-title" style="margin:0">Keyboard shortcuts</div>
+        <button class="btn btn-sm" onclick="UI.showShortcuts=false;render()">close</button>
+      </div>
+      <table><tbody>${SHORTCUTS.map(s=>`<tr>
+        <td style="width:70px"><span class="badge b-gray" style="font-family:var(--mono)">${esc(s.keys)}</span></td>
+        <td style="font-size:13px">${esc(s.what)}</td></tr>`).join('')}</tbody></table>
+      <div class="ibox ibox-blue" style="margin-top:12px;font-size:12px">
+        Shortcuts are ignored while you are typing in a box, so they never
+        interrupt a quantity or a password. None of them place an order —
+        buying and selling always needs the button.
+      </div>
+    </div>
+  </div>`;
+}
 
 // ═══════════════════════════════════════════════
 // BOOT
