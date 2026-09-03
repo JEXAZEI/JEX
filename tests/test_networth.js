@@ -45,8 +45,11 @@ global.DB={companies:[],funds:[],dividends:[]};
 global.getCo=t=>DB.companies.find(c=>c.ticker===t);
 for(const n of ['holdings','shorts','watchlist','pv','sPnl','shortCollateral','fundValue','nw'])
   eval(grabConst(n).replace(new RegExp('^const '+n+'='),'global.'+n+'='));
+// currentFundNav is now just fundAUM() split across units outstanding -- one
+// definition of a fund's total value, shared with the AUM figure on screen.
+eval(grabFn('fundAUM').replace('function fundAUM','global.fundAUM=function'));
 eval(grabFn('currentFundNav').replace('function currentFundNav','global.currentFundNav=function'));
-// currentFundNav also reaches for the fund's short book.
+// fundAUM also reaches for the fund's short book.
 global.fundShortPnl=f=>Object.entries(f.shorts||{}).reduce((s,[t,p])=>{
   const c=getCo(t);return c?s+(p.avgPrice-c.price)*p.qty:s;},0);
 global.fundShortCollateral=f=>Object.entries(f.shorts||{}).reduce((s,[,p])=>s+(p.collateral||0),0);

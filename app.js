@@ -476,7 +476,7 @@ function handleRealtimeUpdate(table,event,newRow,oldRow){
     // later reviewed (UPDATE, status flips to 'approved'/'rejected') --
     // see rpc_review_founder_allocation.
     case 'jex_founder_allocations':
-      if(newRow){const idx=DB.founderAllocations.findIndex(a=>a.id===newRow.id);if(idx>=0)Object.assign(DB.founderAllocations[idx],newRow);else if(event==='INSERT')DB.founderAllocations.push(newRow);}
+      if(newRow){const idx=DB.founderAllocations.findIndex(a=>a.id===newRow.id);if(idx>=0)Object.assign(DB.founderAllocations[idx],newRow);else if(event==='INSERT')DB.founderAllocations.unshift(newRow);}
       break;
     // Share classes are keyed by their own ticker (e.g. ACME.B), not a
     // separate id column -- matches the existing local mutation pattern
@@ -892,30 +892,57 @@ function computeJXI(){return computeIndex(null);}
 // the constituents' own histories. Every existing consumer (intervalChg,
 // buildChart, priceChg, every Change badge) keeps working untouched and simply
 // gets a series that is correct by construction.
+//
+// It also has to stay cheap. This runs on every render -- every 3-second poll,
+// every trade, every tab switch -- and every trade on the exchange adds another
+// point to some constituent's history, so the series only grows over a term.
+// The first version rescanned each constituent's whole history from the start
+// for every timestamp in the merged set, which is quadratic. Measured here:
+// 11ms for a first period's trading, 93ms after a busy hour, 1347ms once eight
+// companies had 2000 trades each. That last one is a visible freeze, arriving
+// mid-class, on whatever laptop a student happens to have.
+//
+// So the timestamps are walked in order with one cursor per constituent that
+// only ever moves forward. Each cursor advances a total of once per point it
+// passes over the whole sweep, which puts the cost back at points + stamps.
 function indexSeries(co){
   const cons=computeIndex(co.index_classroom_id||null).constituents
     .map(c=>getCo(c.ticker)).filter(Boolean);
   if(!cons.length)return[];
-  const bases=new Map(),stamps=new Set();
+  const bases=[],hists=[],cursor=[],stampSet=new Set();
   for(const c of cons){
+    // Base is the constituent's first recorded price, adjusted for corporate
+    // actions -- taken from the raw history so it matches computeIndex().
     const raw=(c.price_history&&c.price_history[0]&&c.price_history[0].p)||c.price;
-    bases.set(c.ticker,raw*(c.index_base_adjust??1));
-    (c.price_history||[]).forEach(p=>{if(p&&p.t)stamps.add(p.t);});
+    bases.push(raw*(c.index_base_adjust??1));
+    // Points with no timestamp cannot be placed on a shared time axis at all,
+    // so they are dropped here rather than being allowed to halt the scan
+    // partway through a history.
+    const h=(c.price_history||[]).filter(p=>p&&p.t);
+    hists.push(h);
+    cursor.push(-1);                                 // -1 = not listed yet
+    for(const p of h)stampSet.add(p.t);
   }
-  // A constituent contributes only from its own first point onward. Before
-  // that it was not listed, and treating it as flat at its IPO price would
-  // invent index history that never happened.
-  const priceAt=(c,t)=>{let v=null;for(const p of(c.price_history||[])){if(p&&p.t&&p.t<=t)v=p.p;else break;}return v;};
+  const stamps=[...stampSet].sort();
   const out=[];
-  for(const t of [...stamps].sort()){
-    const rs=[];
-    for(const c of cons){const p=priceAt(c,t),b=bases.get(c.ticker);if(p!=null&&b>0)rs.push(p/b);}
-    if(!rs.length)continue;
+  for(const t of stamps){
+    let sum=0,n=0;
+    for(let i=0;i<hists.length;i++){
+      const h=hists[i];
+      let j=cursor[i];
+      while(j+1<h.length&&h[j+1].t<=t)j++;
+      cursor[i]=j;
+      // A constituent contributes only from its own first point onward. Before
+      // that it was not listed, and treating it as flat at its IPO price would
+      // invent index history that never happened -- which is what a cursor
+      // still at -1 means.
+      if(j>=0&&bases[i]>0){sum+=h[j].p/bases[i];n++;}
+    }
+    if(!n)continue;
     // The index level is avg(ratio) * 1000; a unit is a tenth of that, which
     // is what jex_companies.price holds for an index row and what every
     // display path already expects. So a unit is avg * 100.
-    const avg=rs.reduce((s,x)=>s+x,0)/rs.length;
-    out.push({t,p:Math.round(avg*100*100)/100});
+    out.push({t,p:Math.round((sum/n)*100*100)/100});
   }
   return out;
 }
@@ -3138,7 +3165,7 @@ async function requestFounderAllocation(ticker,studentId,shares,reason){
   let rec;
   try{
     rec=await sb.rpc('rpc_request_founder_allocation',{p_ticker:ticker,p_student_id:studentId,p_shares:shares,p_reason:reason||''});
-    DB.founderAllocations.push(rec);
+    DB.founderAllocations.unshift(rec);   // newest first, as loaded
     await logActivity('founder_alloc',companyName+' requested '+shares+' '+classLabel+' founder shares for '+student.name,{ticker});
     toast('✓ Allocation request submitted: '+shares+'×'+ticker+' for '+student.name);
     render();
@@ -3671,7 +3698,7 @@ async function checkStopLossOrders(){
     const u=getUser(r.user_id);
     if(u){u.cash=r.cash;u.holdings=r.holdings;}
     co.price=r.price;co.shares_avail=r.shares_avail;co.price_history=r.price_history;
-    if(r.trade)DB.trades.push(r.trade);
+    if(r.trade)recordLocalTrade(r.trade);
     pushTradeToSheets(r.trade);
     await pushNotification(r.user_id,'stop_loss','🛑 Stop-loss triggered: sold '+r.sell_qty+'×'+sl.ticker+' @ '+fmt(r.price)+' (trigger: '+fmt(sl.trigger_price)+')',sl.ticker);
     await logActivity('stop_loss',(u?u.name:'Someone')+' stop-loss triggered on '+sl.ticker+' @ '+fmt(r.price),{ticker:sl.ticker,userId:r.user_id,userName:u?u.name:'',amount:r.sell_qty*r.price});
@@ -4092,7 +4119,7 @@ function applyLimitFillToOwner(type,id,cash,holdings){
 }
 function applyLimitMatchResult(r){
   const co=getCo(r.ticker);if(co){co.price=r.price;co.price_history=r.price_history;}
-  if(r.trade)DB.trades.push(r.trade);
+  if(r.trade)recordLocalTrade(r.trade);
   applyLimitFillToOwner(r.buyer_type,r.buyer_id,r.buyer_cash,r.buyer_holdings);
   applyLimitFillToOwner(r.seller_type,r.seller_id,r.seller_cash,r.seller_holdings);
   const bidLocal=DB.limitOrders.find(o=>o.id===r.bid_order_id);
@@ -4104,7 +4131,7 @@ function applyLimitMatchResult(r){
 }
 function applyLimitPoolFillResult(orderId,r){
   const co=getCo(r.ticker);if(co){co.price=r.price;co.price_history=r.price_history;if('shares_avail'in r)co.shares_avail=r.shares_avail;}
-  if(r.trade)DB.trades.push(r.trade);
+  if(r.trade)recordLocalTrade(r.trade);
   applyLimitFillToOwner(r.owner_type,r.owner_id,r.cash,r.holdings);
   if(r.company_owner_id&&r.company_owner_cash!=null){const owner=getUser(r.company_owner_id);if(owner)owner.cash=r.company_owner_cash;}
   const o=DB.limitOrders.find(x=>x.id===orderId);
@@ -4345,7 +4372,32 @@ async function checkLimitOrders(){
     }
   }
 }
-setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();await checkPriceAlerts();checkShortSqueezes();checkCircuitBreakerAutoResume();},3000);
+// One pass at a time. Every browser in the room drives this loop, and a pass
+// is not a fixed amount of work: checkLimitOrders() awaits up to 50 match RPCs
+// per ticker with an open order, then a pool-fill RPC for each order still
+// resting, then an activity write per fill. With thirty clients on the same
+// book that can easily run past three seconds -- and setInterval does not care,
+// so the next pass used to start on top of the one still running.
+//
+// That compounds in exactly the wrong direction: slower responses mean more
+// overlapping passes, which mean more concurrent RPCs, which make the responses
+// slower again. Nothing was ever double-executed (each RPC re-checks and claims
+// atomically server-side), but the pile-up is real load, and it arrives during
+// the busiest moment of a session, which is the only time it can happen.
+let _pollBusy=false;
+setInterval(async()=>{
+  if(_pollBusy)return;
+  _pollBusy=true;
+  try{
+    await checkLimitOrders();await checkStopLossOrders();await checkPriceAlerts();
+    checkShortSqueezes();checkCircuitBreakerAutoResume();
+  }catch(e){
+    // A pass that throws must still release the flag, or the loop stops for
+    // the rest of the session -- limit orders and stop-losses would silently
+    // never fill again in this tab.
+    reportClientError(e&&e.message?e.message:String(e),e&&e.stack,'poll loop');
+  }finally{_pollBusy=false;}
+},3000);
 
 // ═══════════════════════════════════════════════
 // TRADING
@@ -4412,6 +4464,25 @@ function pushTradeToSheets(trade){
     buyer:resolve(trade.buyer_id,['exchange','short']),
     seller:resolve(trade.seller_id,['exchange','cover'])}]});
 }
+// DB.trades is newest-first: the boot load is order=created_at.desc, the 20s
+// poll is order=id.desc, and the realtime handler unshifts. Every path that
+// added a trade the CURRENT user had just made pushed it onto the END instead,
+// which filed your own trade at the oldest position in the list -- the one
+// place it certainly did not belong.
+//
+// The visible damage was on the company page, where "Recent trades" takes the
+// first 30 after a reverse and so was showing that company's OLDEST 30: a
+// student who had just traded could not find their trade there at all. The
+// paginated Trade history had the mirror-image problem, with your own trades
+// sorted apart from everyone else's rather than interleaved by time.
+//
+// Realised P&L was never affected -- calcPnLAttribution() sorts by id before
+// walking, precisely because array order cannot be relied on.
+function recordLocalTrade(trade){
+  if(!trade)return;
+  if(DB.trades.some(t=>t.id===trade.id))return;   // realtime may have arrived first
+  DB.trades.unshift(trade);
+}
 function applyTradeResult(ticker,r){
   const u=cu(),co=getCo(ticker);
   if(u){u.cash=r.cash;if('holdings'in r)u.holdings=r.holdings;if('shorts'in r)u.shorts=r.shorts;}
@@ -4442,7 +4513,7 @@ function applyTradeResult(ticker,r){
   // -- apply those price moves immediately instead of waiting for the next
   // poll, so the trader sees the market they just moved right away.
   if(r.constituents)r.constituents.forEach(cu2=>{const c2=getCo(cu2.ticker);if(c2){c2.price=cu2.price;c2.shares_avail=cu2.shares_avail;c2.price_history=cu2.price_history;}});
-  if(r.trade)DB.trades.push(r.trade);
+  if(r.trade)recordLocalTrade(r.trade);
   if(u)snapshotNW(u.id);
   checkPriceAlerts();
   checkCircuitBreakers();
@@ -4539,9 +4610,10 @@ const fundShortPnl=f=>Object.entries(fundShorts(f)).reduce((s,[t,pos])=>{const c
 // same reason: it's shown standalone as the fund's own "Short P&L" stat
 // elsewhere (app.js's fund detail page).
 const fundShortCollateral=f=>Object.entries(fundShorts(f)).reduce((s,[,pos])=>s+(pos.collateral||0),0);
+// NAV per unit is just the fund's total assets split across its units --
+// see fundAUM(), which is where that total is computed, once.
 function currentFundNav(f){
-  const holdingsValue=Object.entries(f.holdings||{}).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0);
-  const totalValue=Math.round((f.cash+holdingsValue+fundShortPnl(f)+fundShortCollateral(f))*100)/100;
+  const totalValue=fundAUM(f);
   return f.units_outstanding>0?Math.round((totalValue/f.units_outstanding)*10000)/10000:10;
 }
 
@@ -4647,7 +4719,7 @@ function applyFundTradeResult(fundId,ticker,r){
   // is_index_fund branch) -- apply those price moves immediately, same as
   // applyTradeResult() already does for a direct student trade.
   if(r.constituents)r.constituents.forEach(cu2=>{const c2=getCo(cu2.ticker);if(c2){c2.price=cu2.price;c2.shares_avail=cu2.shares_avail;c2.price_history=cu2.price_history;}});
-  if(r.trade)DB.trades.push(r.trade);
+  if(r.trade)recordLocalTrade(r.trade);
   checkPriceAlerts();
   checkCircuitBreakers();
   pushBalances();
@@ -4692,7 +4764,7 @@ function applyFundShortResult(fundId,ticker,r){
   const f=getFund(fundId),co=getCo(ticker);
   if(f){f.cash=r.cash;f.shorts=r.shorts;}
   if(co){co.price=r.price;co.price_history=r.price_history;}
-  if(r.trade)DB.trades.push(r.trade);
+  if(r.trade)recordLocalTrade(r.trade);
   checkPriceAlerts();
   checkCircuitBreakers();
   pushBalances();
@@ -5594,7 +5666,12 @@ async function postVote(parentTicker,question,optA,optB){
   let v;
   try{v=await sb.rpc('rpc_post_vote',{p_ticker:parentTicker,p_question:question.trim(),p_option_a:optA.trim(),p_option_b:optB.trim(),p_closes_at:closesAt});}
   catch(e){return toast(rpcErrorMessage(e));}
-  DB.votes.push(v);
+  // Newest first: jex_votes is loaded order=created_at.desc and the realtime
+  // handler unshifts, so a vote pushed onto the END landed at the BOTTOM of
+  // the company's vote list -- for the person who just posted it, and for
+  // nobody else. DB.votes is not in the 20-second poll either, so it stayed
+  // there until a full reload.
+  DB.votes.unshift(v);
   await logActivity('vote',co.name+' posted vote: '+question.trim(),{ticker:parentTicker,userId:u.id,userName:u.name});
   await pushNotificationToHolders(parentTicker,'vote','🗳️ '+co.name+' posted a vote: '+question.trim());
   toast('Vote posted');UI.companyTab='votes';render();
@@ -6257,7 +6334,11 @@ function renderCompanyPage(parentTicker){
   const companyVotes=DB.votes.filter(v=>v.parent_ticker===parentTicker);
   const companyNews=DB.news.filter(n=>n.ticker===parentTicker).slice(0,10);
   const companyDivs=DB.dividends.filter(d=>d.ticker===parentTicker).reverse();
-  const companyTrades=[...DB.trades].filter(t=>allTickers.includes(t.ticker)).reverse().slice(0,30);
+  // Newest 30, which is what "Recent trades" below claims to show. This
+  // reversed the newest-first list FIRST and then took the head, so it was
+  // showing this company's oldest 30 trades ever -- on a page a student opens
+  // right after trading, to see the trade they just made.
+  const companyTrades=DB.trades.filter(t=>allTickers.includes(t.ticker)).slice(0,30);
   // Shareholders
   const shareholderMap=buildShareholderMap(allTickers);
   const shareholders=Object.values(shareholderMap);
@@ -6992,7 +7073,28 @@ function renderFundsPage(){
   if(UI.fundPage)return renderFundDetail(UI.fundPage);
   return renderFundList();
 }
-function fundAUM(f){return Math.round((f.cash+Object.entries(f.holdings||{}).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0))*100)/100;}
+// The fund's total assets, and the one definition of them: currentFundNav()
+// divides this by units outstanding, so the "NAV / unit" and "Assets under
+// management" cards on the same page cannot disagree.
+//
+// This used to be cash + holdings only, which is wrong for any fund with a
+// short. Opening a short locks 150% of the position value out of f.cash and
+// credits no proceeds, so a fund that shorted $2,000 of stock appeared to lose
+// $3,000 of assets the instant it did -- on the funds list, the leaderboard,
+// and its own detail card -- while its NAV correctly did not move. The
+// collateral is still the fund's money; it is escrowed, not spent, and it comes
+// back on cover. The short P&L belongs here for the same reason: it is value
+// the fund has made or lost that is in neither cash nor holdings.
+//
+// This is the fourth copy of this sum in the codebase. Two of the earlier
+// three had already drifted apart server-side (rpc_fund_deposit valued a fund
+// without the collateral while rpc_fund_withdraw valued it with, which let
+// anyone deposit low and withdraw high at the other unit-holders' expense).
+// That is why there is now exactly one of it on each side.
+function fundAUM(f){
+  const holdingsValue=Object.entries(f.holdings||{}).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?c.price*q:0);},0);
+  return Math.round((f.cash+holdingsValue+fundShortPnl(f)+fundShortCollateral(f))*100)/100;
+}
 function renderFundList(){
   const u=cu();
   const visibleFunds=DB.funds.filter(f=>!isHiddenTestEntity(f.manager_id));
@@ -7224,9 +7326,19 @@ function renderPortfolio(){
 // ═══════════════════════════════════════════════
 // RENDER: TRADES
 // ═══════════════════════════════════════════════
+const TRADE_TAPE_MAX=200;
 function renderTrades(adminView){
-  const u=cu();const trades=adminView?DB.trades:[...DB.trades].filter(t=>t.buyer_id===u.id||t.seller_id===u.id);
-  return `<div class="card"><div class="section-title">${adminView?'All trades':'Your trades'}</div><table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th>${adminView?'<th>Buyer</th><th>Seller</th>':''}</tr></thead><tbody>${trades.length?[...trades].reverse().map(t=>`<tr><td style="color:var(--text2)">${t.ts}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.price)}</td><td>${t.qty}</td><td><span class="badge ${t.type==='short'?'b-purple':t.type==='cover'?'b-amber':t.type==='book_match'?'b-teal':t.type==='limit_buy'||t.type==='limit_sell'?'b-blue':'b-gray'}">${t.type==='book_match'?'matched':t.type==='limit_buy'?'limit buy':t.type==='limit_sell'?'limit sell':t.type||'market'}</span></td>${adminView?`<td>${['exchange','short'].includes(t.buyer_id)?'JEX':esc(getUser(t.buyer_id)?.name||'?')}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':esc(getUser(t.seller_id)?.name||'?')}</td>`:''}</tr>`).join(''):`<tr><td colspan="7"><div class="empty">No trades yet</div></td></tr>`}</tbody></table></div>`;
+  const u=cu();const trades=adminView?DB.trades:DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id);
+  // Newest first, and capped. DB.trades starts at the last 200 rows but grows
+  // for as long as the tab stays open -- the 20-second poll and the realtime
+  // feed both merge in every trade anyone on the exchange makes, and nothing
+  // ever trims it. This built one <tr> per trade on EVERY render, which is
+  // every three seconds, so a tab left open through a class day was rebuilding
+  // thousands of rows over and over. The same 200 the PDF export already
+  // shows, from the same end of the list.
+  const shown=trades.slice(0,TRADE_TAPE_MAX);
+  const more=trades.length-shown.length;
+  return `<div class="card"><div class="section-title">${adminView?'All trades':'Your trades'}${more>0?` <span style="font-size:12px;font-weight:400;color:var(--text2)">latest ${TRADE_TAPE_MAX} of ${trades.length}</span>`:''}</div><table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th>${adminView?'<th>Buyer</th><th>Seller</th>':''}</tr></thead><tbody>${shown.length?shown.map(t=>`<tr><td style="color:var(--text2)">${t.ts}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${t.ticker}</span></td><td style="font-family:var(--mono)">${fmt(t.price)}</td><td>${t.qty}</td><td><span class="badge ${t.type==='short'?'b-purple':t.type==='cover'?'b-amber':t.type==='book_match'?'b-teal':t.type==='limit_buy'||t.type==='limit_sell'?'b-blue':'b-gray'}">${t.type==='book_match'?'matched':t.type==='limit_buy'?'limit buy':t.type==='limit_sell'?'limit sell':t.type||'market'}</span></td>${adminView?`<td>${['exchange','short'].includes(t.buyer_id)?'JEX':esc(getUser(t.buyer_id)?.name||'?')}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':esc(getUser(t.seller_id)?.name||'?')}</td>`:''}</tr>`).join(''):`<tr><td colspan="7"><div class="empty">No trades yet</div></td></tr>`}</tbody></table></div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -8926,7 +9038,13 @@ function renderNWChart(u){
 const TRADES_PER_PAGE=20;
 function renderTradingHistory(){
   const u=cu();
-  const allMyTrades=DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id).reverse();
+  // Newest first, so page 1 is the trade you just made. DB.trades is already
+  // in that order; the reverse() that used to be here turned page 1 into the
+  // oldest trades of the term. It only looked right because your own trades
+  // were being appended to the tail of a newest-first list, which put them
+  // back at the front after the reverse -- two bugs cancelling, until you
+  // reloaded and the server's correctly-ordered rows came back.
+  const allMyTrades=DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id);
   if(!allMyTrades.length)return`<div class="card"><div class="empty">No trades yet</div></div>`;
   const totalPages=Math.ceil(allMyTrades.length/TRADES_PER_PAGE)||1;
   if(UI.tradePage>=totalPages)UI.tradePage=totalPages-1;
@@ -9296,6 +9414,12 @@ function renderAdminAnnouncements(){
 function generatePDFReport(){
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nw(u),_divs:divRec(u)})).sort((a,b)=>b._nw-a._nw);
   const totalTrades=DB.trades.length;
+  // The newest 200 FIRST, then put in time order for the page. Reversing
+  // before slicing took the OLDEST 200 -- an instructor exporting this
+  // mid-term got the first 200 trades of the year and nothing since.
+  // DB.trades is newest-first (order=created_at.desc at boot, id.desc on the
+  // poll), which is what makes the order of these two operations matter.
+  const recentTrades=DB.trades.slice(0,200).reverse();
   const totalDivsPaid=DB.dividends.reduce((s,d)=>s+d.total,0);
   const w=window.open('','_blank');
   w.document.write(`<!DOCTYPE html><html><head><title>JEX Exchange Report</title>
@@ -9335,8 +9459,8 @@ function generatePDFReport(){
   </tbody></table>
   <h2>All Trades (${DB.trades.length})</h2>
   <table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th><th>Buyer</th><th>Seller</th></tr></thead><tbody>
-  ${[...DB.trades].reverse().slice(0,200).map(t=>`<tr><td>${t.ts}</td><td>${esc(t.ticker)}</td><td>$${t.price.toFixed(2)}</td><td>${t.qty}</td><td>${t.type||'market'}</td><td>${['exchange','short'].includes(t.buyer_id)?'JEX':esc(getUser(t.buyer_id)?.name||'?')}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':esc(getUser(t.seller_id)?.name||'?')}</td></tr>`).join('')}
-  ${DB.trades.length>200?`<tr><td colspan="7" style="text-align:center;color:#666">Showing 200 of ${DB.trades.length} trades</td></tr>`:''}
+  ${recentTrades.map(t=>`<tr><td>${t.ts}</td><td>${esc(t.ticker)}</td><td>$${t.price.toFixed(2)}</td><td>${t.qty}</td><td>${t.type||'market'}</td><td>${['exchange','short'].includes(t.buyer_id)?'JEX':esc(getUser(t.buyer_id)?.name||'?')}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':esc(getUser(t.seller_id)?.name||'?')}</td></tr>`).join('')}
+  ${DB.trades.length>200?`<tr><td colspan="7" style="text-align:center;color:#666">Showing the most recent 200 of ${DB.trades.length} trades</td></tr>`:''}
   </tbody></table>
   <h2>Dividends Paid (${DB.dividends.length})</h2>
   <table><thead><tr><th>Time</th><th>Company</th><th>Per share</th><th>Total</th><th>Recipients</th><th>Note</th></tr></thead><tbody>

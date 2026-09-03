@@ -151,5 +151,63 @@ syncIndexRows();
 check('a classroom index prices off its own classroom only',
       getCo('CBX').price===200, String(getCo('CBX').price));
 
+// ── a point with no timestamp cannot stop the scan ──
+// It has no place on a shared time axis, so it is skipped -- not treated as
+// the end of that constituent's history. The first version bailed out of the
+// scan at the first such point, which would have frozen a constituent at
+// whatever price preceded it for the whole rest of the series.
+DB.users=[{id:'o1',classroom_id:'cA'}];
+DB.companies=[IDX(),Object.assign(AZEI(),{price_history:[
+  {p:25.00,t:T(1)},{p:99.99},{p:31.10,t:T(6)}]})];
+syncIndexRows();
+check('an undated point is skipped, not treated as the end of history',
+      getCo('JXI').price===124.40, String(getCo('JXI').price));
+check('...and contributes no point of its own',
+      getCo('JXI').price_history.length===2,
+      JSON.stringify(getCo('JXI').price_history));
+
+// ── the cost has to stay linear in the number of points ──
+//
+// This runs on every render -- every 3-second poll, every trade, every tab
+// switch -- and every trade on the exchange adds a point to some constituent's
+// history, so the series only ever gets longer over a term.
+//
+// The first version rescanned each constituent's full history from the start
+// for every timestamp in the merged set. Measured on this machine: 11ms for a
+// first period's worth of trading, 93ms after a busy hour, and 1347ms once
+// eight companies had 2000 trades each -- a visible freeze, arriving mid-class,
+// on a page that re-renders every three seconds.
+//
+// Doubling the history must therefore roughly double the time, not quadruple
+// it. The bound below is deliberately loose (5x for a 4x input) so a slow or
+// contended machine does not fail the suite, while a return to quadratic --
+// which would be ~16x here -- still does.
+const bench=(nCo,nPts)=>{
+  const cos=[IDX()];
+  const users=[];
+  for(let i=0;i<nCo;i++){
+    users.push({id:'o'+i,classroom_id:'cA'});
+    const h=[];let p=20+i;
+    // Distinct timestamps per company, as real trades have: that is what makes
+    // the merged stamp set as large as the total number of points.
+    for(let k=0;k<nPts;k++){
+      p=Math.max(1,p*(1+Math.sin(i*k)*0.01));
+      h.push({t:new Date(Date.UTC(2026,7,25)+(k*nCo+i)*1000).toISOString(),p:Math.round(p*100)/100});
+    }
+    cos.push({ticker:'C'+i,name:'C'+i,status:'listed',owner_id:'o'+i,index_base_adjust:1,
+      price:h[h.length-1].p,shares:1000,shares_avail:500,price_history:h});
+  }
+  DB.users=users;DB.companies=cos;
+  const t0=process.hrtime.bigint();
+  syncIndexRows();
+  return Number(process.hrtime.bigint()-t0)/1e6;
+};
+bench(6,200);                                  // warm the JIT so the ratio is real
+const small=bench(6,500),large=bench(6,2000);  // 4x the points
+check('quadrupling the history does not more than quintuple the work',
+      large<Math.max(small*5,25), small.toFixed(1)+'ms -> '+large.toFixed(1)+'ms');
+check('...and a full term of history still renders in well under a frame',
+      large<100, large.toFixed(1)+'ms');
+
 console.log(fails?('\n'+fails+' FAILURE(S)'):('\nAll index-series checks passed.'));
 process.exit(fails?1:0);
