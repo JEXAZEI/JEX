@@ -4891,7 +4891,33 @@ async function reviewDilution(id,approve){
   app.status=approve?'approved':'rejected';
   if(r.approved){
     const co=getCo(app.ticker);
-    if(co){co.shares=r.shares;co.shares_avail=r.shares_avail;co.price=r.price;co.price_history=r.price_history;}
+    if(co){
+      co.shares=r.shares;co.shares_avail=r.shares_avail;co.price=r.price;co.price_history=r.price_history;
+      // index_base_adjust matters as much as the price here, and only the
+      // server writes it -- the client has no code that ever sets it.
+      //
+      // A dilution changes the price without changing what the company is
+      // worth, and index_base_adjust is what tells the index that. Applying
+      // the new price locally while leaving the old divisor in place makes
+      // computeIndex() divide a halved price by an unhalved base, so the
+      // index appears to crater by the dilution factor -- on the screen of
+      // the admin who just approved it, and in everyone's net worth, until
+      // the next 20s refresh happens to correct it.
+      //
+      // That is the exact failure the comment above computeIndex() records
+      // as having cost real money once already, and syncIndexRows() now
+      // spreads it further: the index row's price, its whole rebuilt
+      // history, portfolio value and the leaderboard all read from it.
+      if(r.index_base_adjust!=null)co.index_base_adjust=r.index_base_adjust;
+      else{
+        // The RPC did not hand it back, so ask for it rather than carry a
+        // stale divisor. One row, and a dilution is rare and admin-driven.
+        try{
+          const fresh=await sb.get('jex_companies','ticker=eq.'+encodeURIComponent(app.ticker));
+          if(fresh&&fresh[0])Object.assign(co,fresh[0]);
+        }catch(e){ reportClientError('dilution refresh failed: '+((e&&e.message)||String(e)),'','reviewDilution'); }
+      }
+    }
     toast(app.company_name+': +'+app.new_shares+' shares');
   } else {
     toast('Dilution rejected');
