@@ -60,6 +60,8 @@ global.getCo=t=>DB.companies.find(c=>c.ticker===t)||null;
 global.pushNotification=async(uid,kind,msg)=>{notified.push({uid,kind,msg});};
 global.logActivity=async()=>{};
 global.pushTradeToSheets=()=>{};
+// Trades made locally go in at the FRONT of DB.trades, which is newest-first.
+global.recordLocalTrade=t=>{if(t&&!DB.trades.some(x=>x.id===t.id))DB.trades.unshift(t);};
 // A due stop-loss that the server accepts.
 global.sb={rpc:async()=>({triggered:true,user_id:'u-jane',sell_qty:20,price:9.8,
   cash:1196,holdings:{},shares_avail:420,price_history:[],trade:{id:'t1'}})};

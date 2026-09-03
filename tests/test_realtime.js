@@ -154,8 +154,18 @@ check('health is channel-join based, not last-event based',
   /function realtimeHealthy\(\)\{return _rtJoined&&_realtimeChannels\.length>0;\}/.test(src));
 check('a confirmed join marks the channel healthy', /_rtJoined=true;/.test(src));
 check('a close marks it unhealthy again', (src.match(/_rtJoined=false;/g)||[]).length>=2);
-check('the 3s matching poll is untouched (limit fills stay fast)',
-  /await checkLimitOrders\(\);await checkStopLossOrders\(\)[\s\S]{0,120}?\},3000\);/.test(src));
+// The matching poll stays at 3 seconds -- backing IT off would make limit
+// fills feel broken -- but it now runs one pass at a time. A pass awaits up to
+// 50 match RPCs per ticker plus a pool-fill RPC per resting order, which with a
+// roomful of clients on one book can outlast the interval; setInterval would
+// otherwise stack the next pass on top of the one still running, and slower
+// responses would produce MORE concurrent passes rather than fewer.
+check('the matching poll still runs every 3 seconds (limit fills stay fast)',
+  /await checkLimitOrders\(\);await checkStopLossOrders\(\)[\s\S]{0,400}?\},3000\);/.test(src));
+check('...one pass at a time, so slow passes cannot stack up',
+  /if\(_pollBusy\)return;\s*\n?\s*_pollBusy=true;/.test(src));
+check('...and a pass that throws still releases the flag',
+  /finally\{_pollBusy=false;\}/.test(src));
 
 // A quiet market must not look like a dead socket.
 (function(){
