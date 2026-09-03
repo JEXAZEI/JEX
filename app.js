@@ -7101,10 +7101,33 @@ function renderFundDetail(fundId){
   }
 
   if(isManager&&f.status==='active'){
-    // JXI/classroom indexes included -- rpc_fund_buy/sell/short/cover_short
-    // all have their own is_index_fund branch (basket-backed buy/sell,
-    // NAV-priced short/cover), same as the direct student trade RPCs.
-    const tradable=DB.companies.filter(c=>c.status==='listed'&&c.owner_id!==f.manager_id);
+    // Index funds are kept out of this list. One dropdown drives six buttons
+    // here -- Buy/Sell/Short/Cover AND Limit buy/Limit sell -- and the two
+    // limit buttons cannot work on an index: placeLimitOrder refuses them
+    // client-side and rpc_place_limit_order refuses them server-side. Every
+    // other place an index can be traded (the market panel, the company page
+    // trade tab) hides its limit row for exactly that reason, but a shared
+    // dropdown has no way to hide half of itself, so JXI sat in the list
+    // offering two buttons that were always going to be rejected.
+    //
+    // Restricted classes come out for the same reason, filtered by the
+    // MANAGER's access because that is whose whitelist rpc_fund_buy checks
+    // ("the fund manager is not on the whitelist").
+    //
+    // A fund is a portfolio of companies; the index is a measure of those
+    // companies. Letting a fund hold units of the index that is measuring its
+    // own constituents is a layer students do not need, and the manager can
+    // still buy index units on their own account.
+    //
+    // But a fund that ALREADY holds index units, or is short them, keeps the
+    // row: dropping it outright would strand the position, because this
+    // dropdown is the fund's only sell/cover control -- the Holdings table
+    // above is display-only. Same rule as an index with no constituents:
+    // closed for opening, open for closing.
+    const fundShortQty=t=>((fundShorts(f)[t]||{}).qty)||0;
+    const fundHasPos=t=>(((f.holdings||{})[t])||0)>0||fundShortQty(t)>0;
+    const tradable=DB.companies.filter(c=>c.status==='listed'&&c.owner_id!==f.manager_id
+      &&(!c.is_index_fund||fundHasPos(c.ticker))&&canAccessTicker(c.ticker,f.manager_id));
     html+=`<div class="card"><div class="section-title">Trade on behalf of the fund</div>
       <div class="ibox ibox-amber" style="margin-bottom:12px">Fund cash available: <strong>${fmt(f.cash)}</strong>. You cannot trade your own company's stock through this fund.</div>
       <div class="frow"><label class="flabel">Ticker</label><select id="fund-trade-ticker">${tradable.map(c=>`<option value="${c.ticker}">${c.ticker} — ${esc(c.name)} (${fmt(c.price)})</option>`).join('')}</select></div>
