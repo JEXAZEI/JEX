@@ -4374,7 +4374,15 @@ setInterval(async()=>{await checkLimitOrders();await checkStopLossOrders();await
 // The list below is Postgres' own vocabulary for "the function is wrong",
 // not for "your order is invalid". Anything not matching falls through and is
 // shown verbatim, so a new deliberate message never needs registering here.
-const INTERNAL_DB_ERROR=/is not assigned yet|division by zero|violates (not-null|check|foreign key|unique) constraint|invalid input syntax|cannot be matched|column .* does not exist|function .* does not exist|query returned no rows|query string argument of EXECUTE|stack depth limit|out of range|malformed array literal|operator does not exist/i;
+// `is of type .* but expression is of type` was added after a student was
+// shown, verbatim, on the Share classes tab:
+//
+//     column "whitelist" is of type jsonb but expression is of type text[]
+//
+// which is a column-versus-parameter type mismatch inside an RPC -- a fault in
+// the function, and unreadable to anyone who is not looking at its source.
+// `cannot cast type` and `does not exist` variants are the same family.
+const INTERNAL_DB_ERROR=/is not assigned yet|division by zero|violates (not-null|check|foreign key|unique) constraint|invalid input syntax|cannot be matched|is of type .* but expression is of type|cannot cast type|column .* does not exist|function .* does not exist|relation .* does not exist|query returned no rows|query string argument of EXECUTE|stack depth limit|out of range|malformed array literal|operator does not exist/i;
 function rpcErrorMessage(e,context){
   let msg=null;
   try{const parsed=JSON.parse(e.message);if(parsed&&parsed.message)msg=parsed.message;}catch(err){}
