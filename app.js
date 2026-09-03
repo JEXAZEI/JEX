@@ -4150,7 +4150,19 @@ async function settleLimitOrder(order,cancelIfUnfilled){
   }
   mine=DB.limitOrders.find(o=>o.id===order.id);
   if(mine&&mine.status==='open'&&cancelIfUnfilled){
-    try{await sb.rpc('rpc_cancel_limit_order',{p_order_id:order.id});mine.status='cancelled';}catch(e){}
+    // Fill-or-kill: it did not fill, so it must not be left resting. A failure
+    // here was swallowed whole -- the status stayed 'open', the order stayed
+    // live on the book, and nothing was said. The student asked for "all of it
+    // right now or none of it" and silently got a standing order instead,
+    // which is the opposite instruction and leaves them exposed to a fill they
+    // believed they had declined.
+    try{
+      await sb.rpc('rpc_cancel_limit_order',{p_order_id:order.id});
+      mine.status='cancelled';
+    }catch(e){
+      toast('Careful: this fill-or-kill order could not fill AND could not be cancelled, so it is still live on the book. Cancel it yourself from the Orders page.');
+      reportClientError('FOK cancel failed: '+((e&&e.message)||String(e)),'','settleLimitOrder');
+    }
   }
   return filled;
 }
@@ -4216,7 +4228,18 @@ async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
   const filledQty=await settleLimitOrder(r.order,orderType==='fok');
   if(filledQty>=qty)toast('Limit order fully filled!');
   else if(filledQty>0)toast('Partial fill: '+filledQty+' matched, '+(qty-filledQty)+' queued @ '+fmt(limitPrice));
-  else if(orderType!=='fok')toast('Limit '+side+': '+qty+'×'+ticker+' @ '+fmt(limitPrice)+' — waiting for match');
+  // A fill-or-kill that did not fill used to say nothing whatsoever, so the
+  // student could not tell whether it had worked, failed, or was still
+  // pending. Reads the real local status rather than assuming the cancel
+  // succeeded -- if it did not, settleLimitOrder has already warned that the
+  // order is still live, and repeating "it was cancelled" here would
+  // contradict it.
+  else if(orderType==='fok'){
+    const o=DB.limitOrders.find(x=>x.id===r.order?.id);
+    if(!o||o.status==='cancelled')
+      toast('Fill-or-kill: all '+qty+'×'+ticker+' could not be filled at '+fmt(limitPrice)+' right now, so nothing was traded and the order was cancelled.');
+  }
+  else toast('Limit '+side+': '+qty+'×'+ticker+' @ '+fmt(limitPrice)+' — waiting for match');
   render();
 }
 
