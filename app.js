@@ -4909,6 +4909,12 @@ async function reviewDilution(id,approve){
       // spreads it further: the index row's price, its whole rebuilt
       // history, portfolio value and the leaderboard all read from it.
       if(r.index_base_adjust!=null)co.index_base_adjust=r.index_base_adjust;
+      // session_open_prices is rescaled by the same factor server-side, and
+      // drives bandLimits(), every daily % badge and the circuit-breaker
+      // check. Left stale, the band quoted to students is measured against a
+      // pre-dilution open, and the badges read the dilution step itself as a
+      // crash -- which is precisely what the rescaling exists to prevent.
+      if(r.session_open_prices)DB.session.session_open_prices=r.session_open_prices;
       else{
         // The RPC did not hand it back, so ask for it rather than carry a
         // stale divisor. One row, and a dilution is rare and admin-driven.
