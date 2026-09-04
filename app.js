@@ -2212,8 +2212,25 @@ if(typeof document!=='undefined'){
 
 // ── Keyboard shortcuts ────────────────────────────────────
 document.addEventListener('keydown',function(e){
-  // Skip if typing in a form field
-  if(['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName))return;
+  // Not every keydown carries a key.
+  //
+  // This threw "Cannot read properties of undefined (reading 'toLowerCase')"
+  // on real students' browsers -- most of it on the sign-in page, which is
+  // where password managers and autofill are busiest. A synthetic keydown
+  // dispatched as a plain Event (document.dispatchEvent(new Event('keydown')))
+  // has no .key at all, and some mobile keyboards and extensions send exactly
+  // that. Every one of them landed an uncaught error in the Errors tab.
+  //
+  // Nothing downstream can do anything sensible without a key, so leave.
+  if(!e||typeof e.key!=='string')return;
+  // An IME composing a character sends a keydown per keystroke (keyCode 229).
+  // Those are text entry, not shortcuts, and the composed letters would
+  // otherwise be read as commands.
+  if(e.isComposing||e.keyCode===229)return;
+  // Skip if typing in a form field. isContentEditable covers the rich-text
+  // areas that are not one of those three tags.
+  const active=document.activeElement;
+  if(active&&(['INPUT','TEXTAREA','SELECT'].includes(active.tagName)||active.isContentEditable))return;
   if(e.metaKey||e.ctrlKey||e.altKey)return;
   const key=e.key.toLowerCase();
   if(key==='escape'){
