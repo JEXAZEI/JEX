@@ -49,8 +49,12 @@ function extract(name){
 }
 
 // The helpers under test, pulled from the shipped source.
-const HELPERS=['AZ_TZ','azParts','getAZTime','fmtAZTime','azDateStamp','azDateLabel',
-               'azTsPrefix','isTodayTs','ts','pad','isNewTradingDay'].map(extract).join('\n');
+// _azFmt holds the two shared Intl.DateTimeFormat instances (built once, not
+// per call) and _todayCache the once-a-second "today's prefix". Both are
+// dependencies of the helpers below and have to come before them.
+const HELPERS=['AZ_TZ','_azFmt','azParts','getAZTime','fmtAZTime','azDateStamp','azDateLabel',
+               'azTsPrefix','_todayCache','todayPrefix','isTodayTs','ts','pad',
+               'isNewTradingDay'].map(extract).join('\n');
 
 // Run a body in a given TZ, in a fresh node so process.env.TZ actually takes.
 function inTZ(tz, body){

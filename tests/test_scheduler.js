@@ -73,6 +73,9 @@ if(process.env.JEX_TZ_CHILD){
     global[name]=eval('('+src2.replace(new RegExp('^const '+name+'='),'').replace(/;$/,'')+')');
   };
   bindConst('AZ_TZ');
+  // azParts caches its Intl.DateTimeFormat here instead of building a new one
+  // on every call; without the binding it throws on first use.
+  bindConst('_azFmt');
   bindConst('WEEKDAY_KEYS');
   bindConst('WEEKDAY_LABELS');
   eval(grabFn('azParts'));
