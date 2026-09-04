@@ -159,5 +159,87 @@ check('the help key works for admins too, not just students',
       qIndex>-1 && qIndex<roleIndex,
       "'?' is inside the student/company branch");
 
+// ── a keydown that carries no key must not throw ──
+//
+// From the live Errors tab, ten times in an hour on real students' browsers:
+//
+//     Uncaught TypeError: Cannot read properties of undefined
+//                         (reading 'toLowerCase')
+//     at HTMLDocument.<anonymous> (app.js:2083)
+//
+// That line was `const key=e.key.toLowerCase()`. Most of them were on the
+// sign-in page, which is where password managers and autofill are busiest: a
+// synthetic keydown dispatched as a plain Event -- document.dispatchEvent(new
+// Event('keydown')) -- has no .key at all, and some mobile keyboards and
+// extensions send exactly that.
+//
+// Everything above this line is read from the source. This part RUNS the
+// handler, because "it looks guarded" is how the guard went missing.
+const fnSrc=handler.slice(handler.indexOf('function(e){'));
+let acted=[];
+global.document={activeElement:null,getElementById:()=>null};
+global.UI=Object.assign(global.UI||{},{userId:'u1',navTab:'market',companyPage:null,
+  companyPageTab:'overview',panelMode:'buy',showShortcuts:false});
+global.cu=()=>({id:'u1',role:'student'});
+global.render=()=>{acted.push('render');};
+global.setTab=t=>{acted.push('tab:'+t);};
+global.closeCompanyPage=()=>{acted.push('closeCompanyPage');};
+global.isAdmin=()=>false;
+global.setTimeout=(f)=>{try{f();}catch(e){}return 0;};
+const handle=eval('('+fnSrc+')');
+const press=(ev,active)=>{
+  acted=[];
+  document.activeElement=active||null;
+  let threw=null;
+  try{handle(ev);}catch(err){threw=err;}
+  return{acted,threw};
+};
+const ev=(k,extra)=>Object.assign({key:k,preventDefault(){},shiftKey:false},extra||{});
+
+// The exact shapes that were crashing.
+check('a keydown with no key property at all does not throw',
+      press({preventDefault(){}}).threw===null, String(press({preventDefault(){}}).threw));
+check('a keydown whose key is undefined does not throw',
+      press(ev(undefined)).threw===null, String(press(ev(undefined)).threw));
+check('a keydown whose key is null does not throw',
+      press(ev(null)).threw===null, String(press(ev(null)).threw));
+check('a non-string key does not throw', press(ev(13)).threw===null, String(press(ev(13)).threw));
+check('no event object at all does not throw',
+      press(null).threw===null, String(press(null).threw));
+check('...and none of those did anything either',
+      press({preventDefault(){}}).acted.length===0, JSON.stringify(press({}).acted));
+
+// Still works for a real keypress -- the guard must not have turned it off.
+check('a real keypress still switches tabs',
+      press(ev('m')).acted.includes('tab:market'), JSON.stringify(press(ev('m')).acted));
+check('...and is case-insensitive', press(ev('M')).acted.includes('tab:market'));
+check('...and Escape still reaches the handler',
+      (UI.companyPage='ACME', press(ev('Escape')).acted.includes('closeCompanyPage')));
+UI.companyPage=null;
+
+// An IME sends a keydown per keystroke while composing; those are letters
+// being typed, not commands.
+check('a composing keystroke is ignored', press(ev('m',{isComposing:true})).acted.length===0,
+      JSON.stringify(press(ev('m',{isComposing:true})).acted));
+check('...including the keyCode 229 form',
+      press(ev('m',{keyCode:229})).acted.length===0);
+
+// The typing guards, exercised rather than grepped.
+check('typing in an input is left alone',
+      press(ev('m'),{tagName:'INPUT'}).acted.length===0);
+check('typing in a textarea is left alone',
+      press(ev('m'),{tagName:'TEXTAREA'}).acted.length===0);
+check('a focused select is left alone',
+      press(ev('m'),{tagName:'SELECT'}).acted.length===0);
+check('a contenteditable region is left alone',
+      press(ev('m'),{tagName:'DIV',isContentEditable:true}).acted.length===0);
+check('a focused button is NOT left alone',
+      press(ev('m'),{tagName:'BUTTON'}).acted.includes('tab:market'));
+
+// Browser and OS combos still pass through untouched.
+for(const mod of ['metaKey','ctrlKey','altKey'])
+  check(mod+' combinations are left to the browser',
+        press(ev('p',{[mod]:true})).acted.length===0, mod);
+
 console.log(fails?('\n'+fails+' FAILURE(S)'):('\nAll keyboard-shortcut checks passed.'));
 process.exit(fails?1:0);
