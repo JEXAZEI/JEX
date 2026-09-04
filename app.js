@@ -109,15 +109,26 @@ const sb = {
     // (see the password-hash-fix migration), so this is a no-op in practice —
     // kept in case that revoke is ever missing on a given project.
     if(t==='jex_users'&&Array.isArray(d))d.forEach(u=>{delete u.password;delete u.sec_a;});return d;},
-  // jex_users/jex_pending only have column-level (not table-level) SELECT for
-  // anon/authenticated (see the password-hash-fix migration), and `return=
-  // representation` needs to read back the affected row same as a bare
-  // select=* does — same failure mode, so those two tables ask for no
-  // representation at all. Nothing reads the POST/PATCH response body for
-  // either table anyway (checked every call site before making this change).
-  async post(t,d){const minimal=t==='jex_users'||t==='jex_pending';const h=await this.headers({'Prefer':'return='+(minimal?'minimal':'representation')});const r=await fetchWithTimeout(this.url(t),{method:'POST',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return minimal?null:r.json();},
-  async patch(t,q,d){const minimal=t==='jex_users'||t==='jex_pending';const h=await this.headers({'Prefer':'return='+(minimal?'minimal':'representation')});const r=await fetchWithTimeout(this.url(t,q),{method:'PATCH',headers:h,body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());return minimal?null:r.json();},
-  async del(t,q){const h=await this.headers();const r=await fetchWithTimeout(this.url(t,q),{method:'DELETE',headers:h});if(!r.ok)throw new Error(await r.text());},
+  // There is no post/patch/del here any more, and there cannot be one.
+  //
+  // Every mutation in JEX goes through an RPC -- all ~110 of them, including
+  // registration, bug reports and verification codes. Nothing in this file ever
+  // called sb.post/patch/del; they sat unused.
+  //
+  // As of close_anon_writes_migration.sql that is no longer a convention, it is
+  // enforced: INSERT, UPDATE and DELETE are revoked from anon and authenticated
+  // on every jex_ table, and revoked from the schema's default privileges so a
+  // table added later does not arrive open. A raw write from this client would
+  // now fail with a permission error -- at runtime, in front of a student.
+  //
+  // Before that migration, anon -- the role a browser uses BEFORE anyone signs
+  // in, whose key is in the page source by design -- held INSERT on
+  // jex_limit_orders. A forged resting order naming another student would have
+  // been executed by rpc_match_limit_order_book, which verifies the named owner
+  // holds the shares but not that they placed the order.
+  //
+  // If something genuinely needs to write a table, it needs an RPC. Putting
+  // these back would only move the failure later.
   async rpc(fn,params){
     // Deadlock retry, and ONLY deadlock. See retryable() above for why writes
     // are otherwise never retried: a write whose RESPONSE was lost may well
@@ -2280,6 +2291,8 @@ if(typeof document!=='undefined'){
 }
 
 // ── Keyboard shortcuts ────────────────────────────────────
+// The previous key and when it was pressed, for the double-tap shortcuts.
+let _lastKey={k:'',at:0};
 document.addEventListener('keydown',function(e){
   // Not every keydown carries a key.
   //
@@ -2311,6 +2324,20 @@ document.addEventListener('keydown',function(e){
   // '?' is available to everyone, including admins -- knowing which keys do
   // nothing for you is as useful as knowing which ones do something.
   if(key==='?'||(key==='/'&&e.shiftKey)){UI.showShortcuts=!UI.showShortcuts;render();return;}
+  // Digits pick the Nth tab of whatever tabbed page you are on -- the company
+  // page, your own company, Portfolio, Admin. One rule instead of a different
+  // letter per page, and it works for every role without this handler needing
+  // to know which tabs that role is allowed: it clicks the button that is
+  // actually on screen, so the admin tab set (which differs for Chairman,
+  // Treasurer, Secretary and Compliance) needs no special case at all.
+  if(key>='1'&&key<='9'){
+    const row=document.querySelector('.tab-row');
+    if(row){
+      const tab=row.querySelectorAll('.tab')[Number(key)-1];
+      if(tab){e.preventDefault();tab.click();}
+    }
+    return;
+  }
   const u=cu();
   if(u?.role==='student'||u?.role==='company'){
     if(key==='m'){setTab('market');return;}
@@ -2333,7 +2360,25 @@ document.addEventListener('keydown',function(e){
       // On a company page these act on the company. 'o' means Overview here
       // and Orders everywhere else -- the same key, the nearer meaning.
       if(key==='b'){UI.companyPageTab='trade';UI.panelMode='buy';render();return;}
-      if(key==='s'){UI.companyPageTab='trade';UI.panelMode='sell';render();return;}
+      if(key==='s'){
+        // Once for Sell, twice for Short. Short is the riskier of the pair and
+        // the one a stray keypress should not land on, so it costs a second
+        // deliberate press rather than a key of its own -- and it keeps the
+        // two sides of the same idea under the same finger.
+        const now=Date.now();
+        const again=_lastKey.k==='s'&&now-_lastKey.at<700;
+        _lastKey={k:'s',at:now};
+        UI.companyPageTab='trade';UI.panelMode=again?'short':'sell';render();return;
+      }
+      if(key==='c'){
+        // Cover, but only when there is something to cover. The panel itself
+        // only renders a Cover button under exactly this condition, so a
+        // shortcut that opened an empty cover form would be showing a control
+        // the page has decided not to offer.
+        const pos=(shorts(u)||{})[UI.companyPage];
+        if(pos&&pos.qty>0){UI.companyPageTab='trade';UI.panelMode='cover';render();}
+        return;
+      }
       if(key==='o'){UI.companyPageTab='overview';render();return;}
     } else {
       if(key==='o'){setTab('orders');return;}
@@ -7462,7 +7507,13 @@ function renderFundDetail(fundId){
     // closed for opening, open for closing.
     const fundShortQty=t=>((fundShorts(f)[t]||{}).qty)||0;
     const fundHasPos=t=>(((f.holdings||{})[t])||0)>0||fundShortQty(t)>0;
+    // Test companies come out too. Sixteen other lists hide them -- the market
+    // table, the ticker bar, the index basket, the leaderboard, the funds list,
+    // news, votes, shareholder registries -- and this dropdown was the only
+    // ticker list in the app that did not, so a test company appeared here and
+    // nowhere else.
     const tradable=DB.companies.filter(c=>c.status==='listed'&&c.owner_id!==f.manager_id
+      &&!isHiddenTestEntity(c.owner_id)
       &&(!c.is_index_fund||fundHasPos(c.ticker))&&canAccessTicker(c.ticker,f.manager_id));
     html+=`<div class="card"><div class="section-title">Trade on behalf of the fund</div>
       <div class="ibox ibox-amber" style="margin-bottom:12px">Fund cash available: <strong>${fmt(f.cash)}</strong>. You cannot trade your own company's stock through this fund.</div>
@@ -9826,6 +9877,9 @@ const SHORTCUTS=[
   {keys:'/',      what:'Search the market'},
   {keys:'B',      what:'Buy panel  (on a company page)'},
   {keys:'S',      what:'Sell panel  (on a company page)'},
+  {keys:'S S',    what:'Short panel  \u2014 press S twice'},
+  {keys:'C',      what:'Cover panel  (only when you have a short open)'},
+  {keys:'1-9',    what:'Jump to a tab \u2014 works on Admin, your company, Portfolio and any company page'},
   {keys:'Esc',    what:'Close this card, or the open company'},
   {keys:'?',      what:'Show this list'}
 ];

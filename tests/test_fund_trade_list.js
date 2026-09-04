@@ -36,6 +36,9 @@ const FILTER=m[0];
 let FUND=null,COMPANIES=[],ACCESS=()=>true;
 global.fundShorts=f=>f.shorts||{};
 global.canAccessTicker=(t,uid)=>ACCESS(t,uid);
+// Test companies are hidden from every list in the app unless dev mode is on.
+let TEST_OWNERS=new Set();
+global.isHiddenTestEntity=id=>TEST_OWNERS.has(id);
 const listFor=(fund,companies,access)=>{
   FUND=fund;COMPANIES=companies;ACCESS=access||(()=>true);
   global.DB={companies:COMPANIES};
@@ -111,6 +114,32 @@ out=listFor(fund(),[JXI()]);
 check('an exchange with only an index yields an empty list', out.length===0, out.join(','));
 out=listFor(fund({holdings:null,shorts:null}),[co('ACME'),JXI()]);
 check('a fund with null holdings/shorts does not throw', out.join(',')==='ACME', out.join(','));
+
+// ── test companies are hidden here too ──
+//
+// Reported from a live screenshot: this dropdown was offering "TCO2 - Test
+// Company 2". Sixteen other lists filter test accounts out -- the market
+// table, the ticker bar, the index basket, the leaderboard, the funds list,
+// news, votes, the shareholder registry -- and this was the only ticker list
+// in the app that did not, so a test company showed up here and nowhere else.
+TEST_OWNERS=new Set(['tester']);
+out=listFor(fund(),[co('ACME'),co('TCO2',{owner_id:'tester'}),co('BOLT')]);
+check('a test company is not offered', !out.includes('TCO2'), out.join(','));
+check('...and the real ones still are', out.join(',')==='ACME,BOLT', out.join(','));
+
+// Unlike the index rule, this exclusion is NOT relaxed by a holding. An index
+// position is real money that has to stay closeable; a position in a test
+// company is itself part of the test, and dev mode -- which is what makes test
+// accounts visible everywhere else in the app -- brings it straight back.
+out=listFor(fund({holdings:{TCO2:5}}),[co('ACME'),co('TCO2',{owner_id:'tester'})]);
+check('holding a test company does not re-admit it', !out.includes('TCO2'), out.join(','));
+
+// Dev mode is what makes test accounts visible everywhere else, and
+// isHiddenTestEntity already encodes that, so nothing extra is needed here --
+// with the flag off, they come back.
+TEST_OWNERS=new Set();
+out=listFor(fund(),[co('ACME'),co('TCO2',{owner_id:'tester'})]);
+check('in dev mode a test company is offered again', out.includes('TCO2'), out.join(','));
 
 console.log(fails?('\n'+fails+' FAILURE(S)'):('\nAll fund trade-list checks passed.'));
 process.exit(fails?1:0);
