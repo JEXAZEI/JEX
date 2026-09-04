@@ -42,7 +42,14 @@ global.getCo=t=>(DB.companies||[]).find(c=>c.ticker===t)||null;
 eval(grabFn('computeIndex'));
 eval(grabFn('computeJXI'));
 eval(grabFn('indexSeries'));
+// syncIndexRows only rebuilds the series when the constituents' shape
+// changes; this is where it remembers the last one.
+global._indexSeriesCache=new Map();
 eval(grabFn('syncIndexRows'));
+// ptMs parses each point's timestamp once and remembers it; both window
+// helpers below go through it.
+global._ptMs=new WeakMap();
+eval(grabFn("ptMs"));
 eval(grabFn("filterByInterval"));
 eval(grabFn("anchorToSessionOpen"));
 eval(grabFn("intervalChg"));
@@ -165,6 +172,40 @@ check('an undated point is skipped, not treated as the end of history',
 check('...and contributes no point of its own',
       getCo('JXI').price_history.length===2,
       JSON.stringify(getCo('JXI').price_history));
+
+// ── the series is cached, and the cache must not hide a stale row ──
+//
+// Rebuilding costs time proportional to every price point on the exchange and
+// runs on every render, so it only rebuilds when the constituents' shape
+// changes. The dangerous half is the hit: autoRefresh replaces DB.companies
+// wholesale every 20-60 seconds, so the index row can be a BRAND NEW object
+// carrying the server's stale cached price while no constituent has moved --
+// and that stale price is the entire reason this function exists.
+DB.users=[{id:'o1',classroom_id:'cA'}];
+DB.companies=[IDX(),AZEI()];
+syncIndexRows();
+const cachedPrice=getCo('JXI').price;
+check('the first pass derives the live value', cachedPrice===124.40, String(cachedPrice));
+// The poll comes back: same constituents, a fresh index row at the stale price.
+DB.companies=[IDX(),AZEI()];
+syncIndexRows();
+check('a replaced index row is corrected even on a cache hit',
+      getCo('JXI').price===124.40, String(getCo('JXI').price));
+check('...and gets the full series, not the one-point cache',
+      getCo('JXI').price_history.length===4,
+      String(getCo('JXI').price_history.length));
+// A constituent moves: same count of points would not be enough to notice, so
+// the fingerprint carries the latest point itself.
+DB.companies=[IDX(),Object.assign(AZEI(),{price:40,price_history:[
+  {p:25.00,t:T(1)},{p:28.00,t:T(3)},{p:30.92,t:T(5)},{p:40.00,t:T(6)}]})];
+syncIndexRows();
+check('a price change at the same point count still rebuilds',
+      getCo('JXI').price===160, String(getCo('JXI').price));
+// And a split adjustment, which changes the base rather than any point.
+DB.companies=[IDX(),Object.assign(AZEI(),{index_base_adjust:0.5})];
+syncIndexRows();
+check('a change to index_base_adjust rebuilds too',
+      getCo('JXI').price===248.80, String(getCo('JXI').price));
 
 // ── the cost has to stay linear in the number of points ──
 //

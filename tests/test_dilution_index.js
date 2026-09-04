@@ -48,6 +48,9 @@ global.getCo=t=>(DB.companies||[]).find(c=>c.ticker===t)||null;
 eval(grabFn('computeIndex'));
 eval(grabFn('computeJXI'));
 eval(grabFn('indexSeries'));
+// syncIndexRows only rebuilds the series when the constituents' shape
+// changes; this is where it remembers the last one.
+global._indexSeriesCache=new Map();
 eval(grabFn('syncIndexRows'));
 eval(grabFn('reviewDilution'));
 

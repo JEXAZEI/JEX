@@ -949,10 +949,34 @@ function indexSeries(co){
 // Points every index row at its derived series. Called once per render, before
 // anything reads a price, so the card, the table, the chart, the portfolio and
 // net worth all quote the same number.
+//
+// Rebuilding the series costs time proportional to every price point on the
+// exchange, and this runs on EVERY render -- every click, every 3-second poll
+// -- while the answer only changes when a constituent actually moves. Measured
+// at 13ms a render once thirteen companies had 3000 points each, which is a
+// floor under every screen in the app whether it shows the index or not.
+//
+// So the constituents' shape is fingerprinted -- who is in the basket, how many
+// points each has, their latest point, their split adjustment -- and the series
+// is rebuilt only when that changes. The ASSIGNMENT below still happens every
+// time: autoRefresh replaces DB.companies wholesale, so the index row can be a
+// fresh object carrying the server's stale cached price even when no
+// constituent has moved, and that stale price is the whole reason this
+// function exists.
+const _indexSeriesCache=new Map();
 function syncIndexRows(){
   for(const co of DB.companies||[]){
     if(!co.is_index_fund)continue;
-    const series=indexSeries(co);
+    let key='';
+    for(const c of computeIndex(co.index_classroom_id||null).constituents){
+      const s=getCo(c.ticker);if(!s)continue;
+      const h=s.price_history||[],last=h[h.length-1];
+      key+=c.ticker+':'+h.length+':'+(last?last.t+'@'+last.p:'-')+':'+(s.index_base_adjust??1)+'|';
+    }
+    const hit=_indexSeriesCache.get(co.ticker);
+    let series;
+    if(hit&&hit.key===key)series=hit.series;
+    else{series=indexSeries(co);_indexSeriesCache.set(co.ticker,{key,series});}
     if(!series.length)continue;                     // empty basket: leave the last known price alone
     co.price_history=series;
     co.price=series[series.length-1].p;
@@ -1251,10 +1275,23 @@ const pad=n=>n<10?'0'+n:String(n);
 // That is exactly what the admin session panel used to do, and it read seven
 // hours off for anyone whose device was not itself set to Arizona.
 const AZ_TZ='America/Phoenix';
+// Built once, reused forever.
+//
+// Constructing an Intl.DateTimeFormat is one of the most expensive things in
+// the language -- it resolves a locale and loads timezone data, tens of
+// microseconds a time -- and these two were being constructed fresh on every
+// single call. isTodayTs() calls azTsPrefix() once PER TRADE, so opening the
+// Exchange tab built one formatter for every trade on the exchange. Measured
+// in headless Chromium: 114ms after a class day of trading, 1258ms once there
+// were 6000 trades. Every render, on every click.
+//
+// A DateTimeFormat is stateless and safe to share; only the argument to
+// formatToParts changes.
+const _azFmt={parts:null,prefix:null};
 function azParts(d){
-  const p=new Intl.DateTimeFormat('en-US',{timeZone:AZ_TZ,hour12:false,
+  const p=(_azFmt.parts||(_azFmt.parts=new Intl.DateTimeFormat('en-US',{timeZone:AZ_TZ,hour12:false,
     year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',
-    weekday:'short'}).formatToParts(d||new Date());
+    weekday:'short'}))).formatToParts(d||new Date());
   const g=t=>(p.find(x=>x.type===t)||{}).value||'';
   return {year:+g('year'), month:+g('month'), day:+g('day'),
           // en-US hour12:false yields "24" for midnight in some ICU versions.
@@ -1306,11 +1343,25 @@ function azDateLabel(d){const a=azParts(d);return a.month+'/'+a.day+'/'+a.year;}
 // biggest trade, and every session recap posted "Total trades: 0" no matter
 // how busy the session had been.
 function azTsPrefix(d){
-  const p=new Intl.DateTimeFormat('en-US',{timeZone:AZ_TZ,month:'short',day:'numeric'}).formatToParts(d||new Date());
+  const p=(_azFmt.prefix||(_azFmt.prefix=new Intl.DateTimeFormat('en-US',
+    {timeZone:AZ_TZ,month:'short',day:'numeric'}))).formatToParts(d||new Date());
   const g=t=>(p.find(x=>x.type===t)||{}).value||'';
   return g('month')+' '+g('day')+',';
 }
-const isTodayTs=t=>!!t&&String(t).startsWith(azTsPrefix());
+// "Is this row from today?" -- asked once per trade, over every trade on the
+// exchange, on three different screens. The answer to "what is today's prefix"
+// is the same for every row in the same filter pass, so it is computed once a
+// second rather than once a row. A calendar day always rolls over on a whole
+// second, so a one-second cache can never straddle midnight and report the
+// wrong day for more than that second's remainder -- and the caller is
+// deciding whether to bold a number on a dashboard, not settling a trade.
+const _todayCache={prefix:'',at:0};
+const todayPrefix=()=>{
+  const now=Date.now();
+  if(now-_todayCache.at>=1000||!_todayCache.prefix){_todayCache.prefix=azTsPrefix();_todayCache.at=now;}
+  return _todayCache.prefix;
+};
+const isTodayTs=t=>!!t&&String(t).startsWith(todayPrefix());
 // Runs server-side (rpc_admin_save_session) -- saveSession() itself had no
 // auth check at all, and neither did most of its callers (saveBudgetThreshold,
 // saveDivThreshold, savePriceBand, saveCBPct, saveEmailJSConfig, startTimer,
@@ -5233,12 +5284,37 @@ function buildIntervalButtons(canvasId,co){
 // 24-hour window that would still show yesterday's session bleeding into
 // today's. Falls back to the plain rolling-window filterByInterval() when
 // no session has opened yet (e.g. a brand new exchange).
+// A price point's timestamp in milliseconds, parsed once.
+//
+// Parsing a date string costs about a microsecond, and these windowing helpers
+// were parsing every point of every company several times per render: the
+// sparkline on each market row, the %-change badge next to each chart, the
+// chart itself, the trade panel's "N pts | Open" line. With a term of history
+// behind an exchange that is tens of thousands of parses per click.
+//
+// A WeakMap rather than a field on the point, so nothing new appears on an
+// object that gets handed to Chart.js, written back from an RPC response, or
+// compared with JSON.stringify in the tests. Points are stable objects that
+// outlive a render, and the entries die with them.
+const _ptMs=new WeakMap();
+function ptMs(p){
+  if(!p||!p.t)return NaN;
+  let v=_ptMs.get(p);
+  if(v===undefined){v=new Date(p.t).getTime();_ptMs.set(p,v);}
+  return v;
+}
 function anchorToSessionOpen(allPts,interval){
   if(interval==='1d'&&DB.session.session_started_at){
     const cutoff=DB.session.session_started_at;
-    const before=allPts.filter(p=>p.t&&new Date(p.t).getTime()<cutoff);
-    const after=allPts.filter(p=>p.t&&new Date(p.t).getTime()>=cutoff);
-    return{pts:before.length?[before[before.length-1],...after]:after,anchoredAtOpen:before.length>0};
+    // One pass. This was two filters over the whole history, each parsing
+    // every timestamp again -- and only the LAST point before the cutoff is
+    // ever used, so the first pass was building an array to throw away.
+    let lastBefore=null;const after=[];
+    for(const p of allPts){
+      if(!p||!p.t)continue;
+      if(ptMs(p)<cutoff)lastBefore=p;else after.push(p);
+    }
+    return{pts:lastBefore?[lastBefore,...after]:after,anchoredAtOpen:!!lastBefore};
   }
   return{pts:filterByInterval(allPts,interval),anchoredAtOpen:false};
 }
@@ -5286,15 +5362,16 @@ function filterByInterval(pts,interval){
   const ms={'1d':86400000,'5d':5*86400000,'1m':30*86400000}[interval];
   if(!ms)return pts;
   const cutoff=now-ms;
-  // Filter by real timestamp if available, else fall back to slicing
-  const withRealTs=pts.filter(p=>p.t&&p.t.includes('T')&&p.t.includes('Z'));
-  if(withRealTs.length>0){
-    const filtered=pts.filter(p=>{
-      if(!p.t||!p.t.includes('T'))return false;
-      try{return new Date(p.t).getTime()>=cutoff;}catch(e){return false;}
-    });
-    return filtered.length>0?filtered:pts; // return all if nothing in range
+  // Filter by real timestamp if available, else fall back to slicing.
+  // One pass, and each timestamp parsed once (see ptMs) -- this was two full
+  // passes over the history with a fresh parse of every point in each.
+  let hasRealTs=false;const filtered=[];
+  for(const p of pts){
+    if(!p||!p.t||!p.t.includes('T'))continue;
+    if(p.t.includes('Z'))hasRealTs=true;
+    if(ptMs(p)>=cutoff)filtered.push(p);
   }
+  if(hasRealTs)return filtered.length>0?filtered:pts; // return all if nothing in range
   // Fallback: slice from end
   const counts={'1d':Math.min(pts.length,30),'5d':Math.min(pts.length,150),'1m':Math.min(pts.length,500)};
   return pts.slice(-counts[interval]);
@@ -6822,7 +6899,7 @@ function renderMarketRows(u,listed){
     const prevPrice=_marketLastPrices[c.ticker];
     const flashClass=prevPrice!=null&&prevPrice!==c.price?(c.price>prevPrice?' flash-up':' flash-down'):'';
     _marketLastPrices[c.ticker]=c.price;
-    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${esc(c.name)}</span>${idxBadge}${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${esc(c.description||"")}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="${flashClass}" style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td><canvas id="spark-${c.ticker}" width="100" height="36" style="display:block"></canvas></td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')+(!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:'');
+    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${esc(c.name)}</span>${idxBadge}${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${esc(c.description||"")}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="${flashClass}" style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sparklineSVG(c)}</td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')+(!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:'');
 }
 function renderMarket(){
   const u=cu();
@@ -6847,36 +6924,84 @@ function renderMarket(){
     ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${visibleNews.length} post${visibleNews.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${esc(n.headline)}</div>${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${esc(n.company_name)}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${visibleNews.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${visibleNews.length} posts</div>`:''}</div>`:''}
     <div id="trade-panel"></div>`;
 }
-function buildSparklines(){
-  setTimeout(()=>{
-    DB.companies.filter(c=>c.status==='listed').forEach(c=>{
-      const canvas=document.getElementById('spark-'+c.ticker);
-      if(!canvas||!window.Chart)return;
-      // Always redraw sparkline to show latest prices
-      if(charts['spark-'+c.ticker]){
-        try{charts['spark-'+c.ticker].destroy();}catch(e){}
-        delete charts['spark-'+c.ticker];
-      }
-      // Today's move, same as everything else (priceChg(), the full-size
-      // charts) -- anchored to session-open instead of just "whatever the
-      // last 20 raw points happen to be," which could span several days.
-      const allPts=(c.price_history||[]).filter(p=>p&&typeof p.p==='number');
-      const{pts:anchoredPts}=anchorToSessionOpen(allPts,'1d');
-      // Right after the exchange reopens, before anyone's traded yet today,
-      // the anchored view can collapse to 0-1 points. Falling back to raw
-      // history here would show whatever dramatic move happened BEFORE
-      // today's reset -- a flat line at the current price (nothing's
-      // happened yet today) is the honest "reset" picture, same as a real
-      // market's intraday chart before the first trade of the day.
-      const pts=anchoredPts.length>=2?anchoredPts:[anchoredPts[0]||{p:c.price,t:new Date().toISOString()},{p:c.price,t:new Date().toISOString()}];
-      if(pts.length<2)return;
-      const prices=pts.map(p=>p.p);
-      const noMove=prices[prices.length-1]===prices[0];
-      const isUp=prices[prices.length-1]>=prices[0];
-      const sparkColor=noMove?'#8896a8':(isUp?'#00c896':'#ff4d6a');
-      charts['spark-'+c.ticker]=new Chart(canvas,{type:'line',data:{labels:prices.map((_,i)=>i),datasets:[{data:prices,borderColor:sparkColor,borderWidth:1.5,pointRadius:0,fill:false,tension:0.3}]},options:{responsive:false,animation:false,plugins:{legend:{display:false},tooltip:{enabled:false}},scales:{x:{display:false},y:{display:false}}}});
-    });
-  },80);
+// A market-row sparkline, as inline SVG.
+//
+// This was one Chart.js instance per listed company, built and torn down on
+// EVERY market render -- every click, every realtime trade from any student in
+// the room, every autoRefresh -- because render() rebuilds app.innerHTML
+// wholesale and takes every <canvas> with it. Thirteen companies meant
+// thirteen chart constructions and thirteen destructions per repaint, on top
+// of the JXI chart, and each one builds scales, controllers and a resize
+// observer before drawing a single pixel.
+//
+// Nothing in a 100x36 sparkline needs a charting library: no axes, no
+// tooltips, no legend, no animation, nothing to click. It is a stroked path.
+// As SVG it also arrives WITH the row instead of 80ms later out of a
+// setTimeout, so the table stops flashing empty boxes on every repaint.
+const SPARK_W=100,SPARK_H=36,SPARK_PAD=2.5,SPARK_MAX_PTS=80;
+// One entry per ticker, keyed on everything the drawing depends on. The market
+// table is re-rendered by every realtime trade anyone makes, and the row for a
+// company nobody has touched draws the identical path every time -- which
+// still means walking its whole price history to find the session-open anchor.
+const _sparkCache=new Map();
+function sparklineSVG(co){
+  const hist=co.price_history||[],newest=hist[hist.length-1];
+  const key=hist.length+'|'+(newest?newest.t+'@'+newest.p:'-')+'|'+co.price
+    +'|'+(DB.session.session_started_at||0);
+  const hit=_sparkCache.get(co.ticker);
+  if(hit&&hit.key===key)return hit.svg;
+  const svg=drawSparkline(co);
+  _sparkCache.set(co.ticker,{key,svg});
+  return svg;
+}
+function drawSparkline(co){
+  // Today's move, same window as everything else on the row (priceChg(), the
+  // full-size charts) -- anchored to session open rather than "the last N raw
+  // points", which could span several days.
+  const all=(co.price_history||[]).filter(p=>p&&typeof p.p==='number');
+  const{pts:anchoredPts}=anchorToSessionOpen(all,'1d');
+  // Right after the exchange reopens, before anyone has traded today, the
+  // anchored view collapses to 0-1 points. Falling back to raw history would
+  // show whatever dramatic move happened BEFORE today's reset; a flat line at
+  // the current price is the honest picture, same as a real market's intraday
+  // chart before the first trade of the day.
+  const pts=anchoredPts.length>=2?anchoredPts
+    :[anchoredPts[0]||{p:co.price},{p:co.price}];
+  // A hundred pixels wide cannot show a term of history point by point, and
+  // drawing 3000 invisible segments per row is most of what made this
+  // expensive. Sample down, always keeping the first and last -- those two are
+  // what set the colour and the visible endpoints.
+  let ys=[];
+  if(pts.length<=SPARK_MAX_PTS){for(const p of pts)ys.push(p.p);}
+  else{
+    const stride=(pts.length-1)/(SPARK_MAX_PTS-1);
+    for(let i=0;i<SPARK_MAX_PTS;i++)ys.push(pts[Math.round(i*stride)].p);
+    ys[ys.length-1]=pts[pts.length-1].p;
+  }
+  let lo=Infinity,hi=-Infinity;
+  for(const v of ys){if(v<lo)lo=v;if(v>hi)hi=v;}
+  const span=hi-lo;
+  const n=ys.length;
+  const X=i=>SPARK_PAD+(SPARK_W-2*SPARK_PAD)*(n<2?0.5:i/(n-1));
+  const Y=v=>span>0?(SPARK_H-SPARK_PAD)-((v-lo)/span)*(SPARK_H-2*SPARK_PAD):SPARK_H/2;
+  const noMove=ys[n-1]===ys[0];
+  const isUp=ys[n-1]>=ys[0];
+  const color=noMove?'#8896a8':(isUp?'#00c896':'#ff4d6a');
+  // The same gentle smoothing Chart.js applied at tension 0.3: each control
+  // point offset along the line between a point's two neighbours. With evenly
+  // spaced x the two weights are equal, which is why this is one constant.
+  const T=0.15;
+  const px=i=>X(Math.min(Math.max(i,0),n-1)),py=i=>Y(ys[Math.min(Math.max(i,0),n-1)]);
+  let d='M'+px(0).toFixed(1)+' '+py(0).toFixed(1);
+  for(let i=0;i<n-1;i++){
+    const c1x=px(i)+T*(px(i+1)-px(i-1)), c1y=py(i)+T*(py(i+1)-py(i-1));
+    const c2x=px(i+1)-T*(px(i+2)-px(i)), c2y=py(i+1)-T*(py(i+2)-py(i));
+    d+='C'+c1x.toFixed(1)+' '+c1y.toFixed(1)+','+c2x.toFixed(1)+' '+c2y.toFixed(1)
+      +','+px(i+1).toFixed(1)+' '+py(i+1).toFixed(1);
+  }
+  return '<svg class="spark" width="'+SPARK_W+'" height="'+SPARK_H+'" viewBox="0 0 '+SPARK_W+' '+SPARK_H
+    +'" style="display:block" aria-hidden="true"><path d="'+d+'" fill="none" stroke="'+color
+    +'" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
 function openCompanyPage(ticker){
@@ -6959,8 +7084,9 @@ function renderMarketInPlace(){
   // what actually made the search box look broken.
   const u=cu();
   const rows=document.getElementById('market-rows');
+  // The sparklines come back with the rows now -- they are SVG in the row
+  // markup, not canvases waiting on a deferred chart build.
   if(rows)rows.innerHTML=renderMarketRows(u,getMarketListed(u));
-  setTimeout(()=>buildSparklines(),60);
 }
 function closeCompanyPage(){
   UI.companyPage=null;destroyCharts();render();
@@ -9560,7 +9686,7 @@ function render(){
         });
       }
     }
-    if(UI.navTab==='market'&&!UI.companyPage){buildSparklines();buildJxiChart('jxi-chart');}
+    if(UI.navTab==='market'&&!UI.companyPage)buildJxiChart('jxi-chart');
     if(UI.navTab==='portfolio'&&UI.portfolioTab==='nwchart'){
       setTimeout(()=>{
         const u=cu();if(!u)return;
