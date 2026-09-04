@@ -5646,6 +5646,27 @@ function getCompanyTickers(parentTicker){
   return [...base,...classes];
 }
 // Helper: can this user see/trade this ticker?
+// A share class's whitelist, always as an array of user ids.
+//
+// The column is jsonb. Until fix_class_application_whitelist.sql, no
+// application had EVER been submitted -- the insert was rejected before it ran,
+// because the RPC takes text[] and Postgres has no implicit cast from text[] to
+// jsonb, and the database confirmed it: applications_ever = 0. So every reader
+// of this field is about to run against live data for the first time, and the
+// one class that does exist was created by some other route with a whitelist
+// this code has never seen.
+//
+// '{}'::jsonb is an empty OBJECT, not an empty array. ({}).includes is
+// undefined and ({}).map throws -- and canAccessTicker() below is called from
+// renderTickerBar() and getMarketListed() on every render, so that is not a
+// broken tab, it is a blank page.
+const classWhitelist=meta=>{
+  const w=meta&&meta.whitelist;
+  if(Array.isArray(w))return w;
+  // An array that made a round trip through something that keyed it by index.
+  if(w&&typeof w==='object')return Object.values(w).filter(v=>typeof v==='string');
+  return [];
+};
 function canAccessTicker(ticker,userId){
   const meta=getClassMeta(ticker);
   if(!meta)return true; // base class, always accessible
@@ -5653,7 +5674,7 @@ function canAccessTicker(ticker,userId){
   if(!userId)return false;
   const u=getUser(userId);
   if(u&&isAdmin(u))return true; // admins see all
-  return (meta.whitelist||[]).includes(userId);
+  return classWhitelist(meta).includes(userId);
 }
 // Helper: voting power a user has for a company
 function getVotingPower(userId,parentTicker){
@@ -7721,7 +7742,7 @@ function renderStockOverview(co,u){
       +'<span class="badge '+classColor+'">'+classLabel+'</span>'
       +(meta&&meta.restricted?'<span class="badge b-red">Restricted</span>':'')
       +'</div>'
-      +'<div style="font-size:11px;color:var(--text2)">'+vps+' vote'+(vps!==1?'s':'')+'/share'+(meta&&meta.restricted?' · '+(meta.whitelist||[]).length+' whitelisted':'')+'</div>'
+      +'<div style="font-size:11px;color:var(--text2)">'+vps+' vote'+(vps!==1?'s':'')+'/share'+(meta&&meta.restricted?' · '+classWhitelist(meta).length+' whitelisted':'')+'</div>'
       +'</div>'
       +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Price</div><div style="font-family:var(--mono);font-weight:500">'+fmt(stock.price)+'</div></div>'
       +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Change</div><div id="chg-badge-'+chartId+'" class="'+tickerChgClass(chartId,stock)+'" style="font-family:var(--mono)">'+tickerChgBadgeHtml(chartId,stock)+'</div></div>'
@@ -7867,7 +7888,7 @@ function renderClassesTab(co){
       +'<div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">'+co.ticker+'</span> <span class="badge b-amber">Class '+baseMeta.class+'</span>'
       +(baseMeta.restricted?'<span class="badge b-red" style="margin-left:4px">Restricted</span>':'')+'</div>'
       +'<div class="app-meta">'+baseMeta.votes_per_share+' vote'+(baseMeta.votes_per_share!==1?'s':'')+'/share · '+co.shares.toLocaleString()+' shares · '+fmt(co.price)
-      +(baseMeta.restricted?' · Whitelist: '+(baseMeta.whitelist||[]).map(id=>getUser(id)?.name||id).join(', '):'')+'</div>'
+      +(baseMeta.restricted?' · Whitelist: '+classWhitelist(baseMeta).map(id=>getUser(id)?.name||id).join(', '):'')+'</div>'
       +'</div></div>';
   } else {
     html+='<div class="app-row"><div class="app-info">'
@@ -7883,7 +7904,7 @@ function renderClassesTab(co){
         +(c.restricted?'<span class="badge b-red" style="margin-left:4px">Restricted</span>':'')+'</div>'
         +'<div class="app-meta">'+c.votes_per_share+' vote'+(c.votes_per_share!==1?'s':'')+'/share'
         +(co2?' · '+co2.shares.toLocaleString()+' shares · '+fmt(co2.price):'')
-        +(c.restricted?' · Whitelist: '+(c.whitelist||[]).map(id=>getUser(id)?.name||id).join(', '):'')+'</div>'
+        +(c.restricted?' · Whitelist: '+classWhitelist(c).map(id=>getUser(id)?.name||id).join(', '):'')+'</div>'
         +'</div></div>';
     }).join('');
   }
@@ -8570,7 +8591,7 @@ function renderAdminClasses(){
     +(pending.length?pending.map(a=>'<div class="app-row"><div class="app-info">'
       +'<div class="app-name">'+esc(a.company_name)+' — <span class="badge b-gray" style="font-family:var(--mono)">'+a.proposed_ticker+'</span> Class '+a.class+'</div>'
       +'<div class="app-meta">'+a.votes_per_share+' vote'+(a.votes_per_share!==1?'s':'')+'/share · '+a.shares.toLocaleString()+' shares @ '+fmt(a.price)
-      +(a.restricted?' · <span class="badge b-red">Restricted</span> to: '+esc((a.whitelist||[]).map(id=>getUser(id)?.name||id).join(', ')):'')+'</div>'
+      +(a.restricted?' · <span class="badge b-red">Restricted</span> to: '+esc(classWhitelist(a).map(id=>getUser(id)?.name||id).join(', ')):'')+'</div>'
       +(a.reason?'<div class="app-meta">Reason: '+esc(a.reason.replace('[CONVERT]','[Conversion]'))+'</div>':'')
       +'</div><div class="btn-row">'
       +'<button class="btn btn-success btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewClassApp(&quot;'+a.id+'&quot;,true))">Approve</button>'
@@ -8589,7 +8610,7 @@ function renderAdminClasses(){
               +'<div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">'+c.ticker+'</span> <span class="badge b-amber">Class '+c.class+'</span>'
               +(isConv?'<span class="badge b-blue" style="margin-left:4px">Conversion</span>':'<span class="badge b-teal" style="margin-left:4px">New class</span>')
               +(c.restricted?'<span class="badge b-red" style="margin-left:4px">Restricted</span>':'')+'</div>'
-              +'<div class="app-meta">'+c.votes_per_share+' vote'+(c.votes_per_share!==1?'s':'')+'/share'+(c.restricted?' · '+(c.whitelist||[]).length+' whitelisted':'')+'</div>'
+              +'<div class="app-meta">'+c.votes_per_share+' vote'+(c.votes_per_share!==1?'s':'')+'/share'+(c.restricted?' · '+classWhitelist(c).length+' whitelisted':'')+'</div>'
               +'</div>'
               +'<button class="btn btn-sm btn-danger" onclick="removeShareClass(&quot;'+c.ticker+'&quot;)">Remove</button>'
               +'</div>';
