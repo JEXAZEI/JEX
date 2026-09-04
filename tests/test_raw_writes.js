@@ -116,6 +116,41 @@ global.sb={
   await activateAfterHoursOrders();
   check('RPC failure leaves local state untouched', DB.limitOrders[0].status==='after_hours');
 
-  console.log(fails?('\n'+fails+' FAILURES'):'\nAll passed');
+  // ── and the raw write helpers are gone entirely ──
+//
+// This suite began as "these particular flows call an RPC instead of POSTing".
+// That is now a property of the whole client, and of the database underneath
+// it: close_anon_writes_migration.sql revoked INSERT, UPDATE and DELETE from
+// anon and authenticated on every jex_ table, and from the schema's default
+// privileges so a table added later does not arrive open.
+//
+// So sb.post/patch/del could not work any more even if something called them.
+// They are removed rather than left as a trap that fails in front of a student
+// -- and this check is what keeps them from drifting back in.
+const appSrc=fs.readFileSync(require('path').join(__dirname,'..','app.js'),'utf8');
+check('sb has no post helper', !/\basync post\(/.test(appSrc));
+check('sb has no patch helper', !/\basync patch\(/.test(appSrc));
+check('sb has no del helper', !/\basync del\(/.test(appSrc));
+check('nothing calls sb.post/patch/del', !/\bsb\s*\.\s*(post|patch|del)\s*\(/.test(appSrc));
+// The one remaining write path, and the reason the above is safe.
+check('sb still has the rpc helper', /\basync rpc\(fn,params\)\{/.test(appSrc));
+check('...and reads are untouched', /\basync get\(t,q=''\)\{/.test(appSrc));
+// A REST write built by hand rather than through a helper would slip past the
+// checks above. There are exactly two places that build a PostgREST URL at
+// all, so assert on those rather than hunting for the word POST -- the app
+// also POSTs to Google Sheets and to Supabase Storage, and neither is a table
+// write.
+const restLines=appSrc.split('\n').filter(l=>l.includes('rest/v1'));
+check('exactly two places build a PostgREST URL', restLines.length===2,
+      restLines.join(' | '));
+const tableUrl=restLines.find(l=>!l.includes('rest/v1/rpc/'))||'';
+const rpcUrl=restLines.find(l=>l.includes('rest/v1/rpc/'))||'';
+check('the one that addresses a TABLE never carries a method (so it can only read)',
+      !!tableUrl && !/method\s*:/.test(tableUrl), tableUrl);
+check('...and it is the url builder sb.get uses', /^\s*url:\(t,q=''\)=>/.test(tableUrl), tableUrl);
+check('the only PostgREST write is the RPC call',
+      /method:'POST'/.test(rpcUrl), rpcUrl);
+
+console.log(fails?('\n'+fails+' FAILURES'):'\nAll passed');
   process.exit(fails?1:0);
 })();

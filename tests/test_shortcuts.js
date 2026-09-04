@@ -79,8 +79,19 @@ check('escape still closes an open company page',
 
 // ── B and S switch the panel, they do not trade ──
 // The exact pair that would be tempting to "improve" into a real order.
-const bLine=(code.match(/if\(key==='b'\)\{[^}]*\}/)||[''])[0];
-const sLine=(code.match(/if\(key==='s'\)\{[^}]*\}/)||[''])[0];
+// Brace-matched, not [^}]*: the 's' branch now has nested braces (the
+// double-tap bookkeeping), and a lazy character class silently matched
+// nothing, which made this check pass by examining an empty string.
+function branch(k){
+  const i=code.indexOf("if(key==='"+k+"'){");
+  if(i<0)return '';
+  let j=code.indexOf('{',i),d=0;
+  for(;j<code.length;j++){ if(code[j]==='{')d++; else if(code[j]==='}'){d--;if(!d)return code.slice(i,j+1);} }
+  return '';
+}
+const bLine=branch('b'), sLine=branch('s'), cLine=branch('c');
+check("the 'b' branch was found at all", bLine.length>0);
+check("the 's' branch was found at all", sLine.length>0);
 // Matched on CALLS, not on the word "trade" -- UI.companyPageTab='trade' is a
 // string assignment naming a tab, and an earlier version of this check flagged
 // it as if it placed one.
@@ -90,9 +101,35 @@ const callsSomething=s=>(s.match(/\b[A-Za-z_$][\w$]*\s*\(/g)||[])
 check("'b' only opens the buy panel and repaints",
       /panelMode='buy'/.test(bLine) && callsSomething(bLine).length===0,
       bLine+' -> calls '+JSON.stringify(callsSomething(bLine)));
-check("'s' only opens the sell panel and repaints",
-      /panelMode='sell'/.test(sLine) && callsSomething(sLine).length===0,
-      sLine+' -> calls '+JSON.stringify(callsSomething(sLine)));
+// 's' now means Sell once, Short twice; 'c' means Cover. All three are panel
+// switches and none may DO anything -- but they are allowed to read, which is
+// the whole point of 'c' only firing when a short exists. The allowlist is
+// exactly the pure reads: the double-tap clock, and the accessor that answers
+// "is there a short here". Nothing that writes is on it, and the MONEY sweep
+// above still covers the entire handler regardless.
+const PURE_READS=['Date','now','shorts','getCo'];
+const callsIn=s2=>callsSomething(s2).filter(x=>!PURE_READS.includes(x));
+check("'s' opens the sell panel and nothing else",
+      /panelMode=again\?'short':'sell'/.test(sLine) && callsIn(sLine).length===0,
+      sLine+' -> calls '+JSON.stringify(callsIn(sLine)));
+check("...and the second press is what makes it Short, on a short timer",
+      /_lastKey\.k==='s'&&now-_lastKey\.at<[0-9]+/.test(sLine), sLine);
+// Short is the riskier half of the pair, so it must be the one that costs the
+// extra press -- never the default a single tap lands on.
+check("...so a single press can never open Short",
+      !/panelMode=again\?'sell':'short'/.test(sLine), sLine);
+// 'c' opens Cover only when there is a short to cover, matching the panel,
+// which only renders a Cover button under the same condition.
+check("'c' checks for an open short before opening Cover",
+      /shorts\(u\)/.test(cLine) && /qty>0/.test(cLine) && /panelMode='cover'/.test(cLine),
+      cLine);
+check("...and does nothing at all when there is no short",
+      /if\(pos&&pos\.qty>0\)\{/.test(cLine), cLine);
+check("'c' reads to decide, and does nothing else", callsIn(cLine).length===0,
+      JSON.stringify(callsIn(cLine)));
+// And the allowlist itself must stay honest: none of those may be a writer.
+check('the read allowlist contains nothing that moves money',
+      !PURE_READS.some(fn=>MONEY.includes(fn)), PURE_READS.join(','));
 
 // ── the list and the handler must not drift apart ──
 //
@@ -125,6 +162,10 @@ const norm=k=>({esc:'escape'}[k.toLowerCase()]||k.toLowerCase());
 const documented=new Set(SHORTCUTS.map(s=>norm(s.keys)));
 const handled=new Set((code.match(/key===['"]([^'"]+)['"]/g)||[])
   .map(m=>m.replace(/key===['"]/,'').replace(/['"]$/,'')));
+// Two entries are not single-key literals, so they need matching to the branch
+// that implements them rather than to a key=== comparison.
+if(/_lastKey\.k==='s'/.test(code))handled.add('s s');
+if(/key>='1'&&key<='9'/.test(code))handled.add('1-9');
 
 for(const k of documented)
   check('the documented shortcut "'+k+'" is actually handled', handled.has(k),
@@ -240,6 +281,31 @@ check('a focused button is NOT left alone',
 for(const mod of ['metaKey','ctrlKey','altKey'])
   check(mod+' combinations are left to the browser',
         press(ev('p',{[mod]:true})).acted.length===0, mod);
+
+// ── digits pick a tab, on every tabbed page ──
+//
+// One rule instead of a letter per page. It clicks the button that is actually
+// on screen, which is what lets it work for the Admin tab set without knowing
+// it -- that set differs for Chairman, Treasurer, Secretary and Compliance,
+// and a hardcoded list here would go stale the first time one changed.
+const digit=(code.match(/if\(key>='1'&&key<='9'\)\{[\s\S]*?\n  \}/)||[''])[0];
+check('the digit branch exists', digit.length>0);
+check('...and reads the tabs from the DOM, not from a list it keeps',
+      /querySelector\('\.tab-row'\)/.test(digit) && /querySelectorAll\('\.tab'\)/.test(digit), digit);
+check('...clicking the button rather than assigning UI state directly',
+      /\.click\(\)/.test(digit) && !/UI\.[a-zA-Z]+Tab=/.test(digit), digit);
+check('...and does nothing when the page has no tabs', /if\(row\)\{/.test(digit), digit);
+check('...or when that tab does not exist', /if\(tab\)\{?/.test(digit), digit);
+// It has to reach admins, who are excluded from the student/company branch.
+const digitIndex=code.indexOf("key>='1'");
+check('digits work for admins too, not just students',
+      digitIndex>-1 && digitIndex<code.indexOf("role==='student'"),
+      'the digit branch is inside the student/company branch');
+// A digit must not trade, same rule as every other shortcut. It clicks a tab
+// button, and tab buttons only ever set UI state -- but a button matching
+// .tab could one day do more, so this is the line to hold.
+check('a digit never calls a trade function directly',
+      !MONEY.some(fn=>new RegExp('\\b'+fn+'\\s*\\(').test(digit)), digit);
 
 console.log(fails?('\n'+fails+' FAILURE(S)'):('\nAll keyboard-shortcut checks passed.'));
 process.exit(fails?1:0);
