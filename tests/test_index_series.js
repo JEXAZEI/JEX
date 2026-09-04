@@ -250,5 +250,76 @@ check('quadrupling the history does not more than quintuple the work',
 check('...and a full term of history still renders in well under a frame',
       large<100, large.toFixed(1)+'ms');
 
+// ── one instrument, one PERCENTAGE ──
+//
+// From a live screenshot, all on one screen at one moment:
+//
+//   ticker bar        JXI  $119.64   -5.52%
+//   index card        JXI  1196.36   +0.44% today
+//   Listed companies  JXI  $119.64   -5.52%
+//   its one constituent    $27.19    +0.44%
+//
+// Same instrument, two answers, and the wrong one was the one shown twice.
+//
+// The card read the DERIVED series. priceChg() read session_open_prices --
+// a snapshot the server recorded at the open, which for an index recorded the
+// stale cached column rather than the derived value. So the numerator came
+// from one series and the denominator from another, and the gap between them
+// was whatever the cache had drifted by.
+// priceChg is a const arrow, not a function declaration -- brace-match it
+// from its own declaration rather than reaching for grabFn.
+(function(){
+  const i=src.indexOf('const priceChg=c=>{');
+  let j=src.indexOf('{',i),d=0,end=-1;
+  for(;j<src.length;j++){ if(src[j]==='{')d++; else if(src[j]==='}'){d--;if(!d){end=j+1;break;}} }
+  eval(src.slice(i,end).replace('const priceChg=','global.priceChg='));
+})();
+DB.users=[{id:'o1',classroom_id:'cA'}];
+DB.companies=[IDX(),AZEI()];
+// The session opens just AFTER the last recorded point, which is what happens
+// in production: rpc_record_session_open_prices snapshots whatever the price
+// is at that moment, and no new point is written just for the open. So the
+// snapshot and the last pre-session point are the same number -- 30.92 here.
+DB.session={session_started_at:Date.parse(T(5))+1};
+syncIndexRows();
+// ...except for the index, where the server snapshotted the STALE CACHED
+// column. 126.63 is not a value the derived series ever held.
+DB.session.session_open_prices={JXI:126.63,AZEI:30.92};
+const idxPct=Math.round(priceChg(getCo('JXI'))*100)/100;
+const conPct=Math.round(priceChg(getCo('AZEI'))*100)/100;
+const stalePct=Math.round((124.40-126.63)/126.63*10000)/100;
+check('the index change no longer comes from the stale snapshot',
+      idxPct!==stalePct, idxPct+' (stale would be '+stalePct+')');
+check('with one constituent the index moves exactly with it',
+      idxPct===conPct, idxPct+' vs '+conPct);
+check('...and matches what the index card computes',
+      idxPct===Math.round(intervalChg(getCo('JXI').price_history,'1d')*100)/100,
+      idxPct+' vs '+intervalChg(getCo('JXI').price_history,'1d'));
+
+// An ordinary company must STILL use the session snapshot -- that is the whole
+// point of a daily baseline, and this fix must not spread to it.
+check('an ordinary company still measures from session open',
+      conPct===Math.round((31.10-30.92)/30.92*10000)/100, String(conPct));
+// And moving ONLY the snapshot must move an ordinary company's figure while
+// leaving the index's alone -- which is what proves they read different things.
+DB.session.session_open_prices={JXI:126.63,AZEI:20};
+check('changing the snapshot moves a company', Math.round(priceChg(getCo('AZEI'))*100)/100!==conPct);
+check('...but not the index', Math.round(priceChg(getCo('JXI'))*100)/100===idxPct);
+DB.session.session_open_prices={JXI:126.63,AZEI:30.92};
+
+// Two constituents: the index sits between them, not on either.
+DB.companies=[IDX(),AZEI(),{ticker:'BETA',name:'Beta',status:'listed',owner_id:'o1',
+  price:60,shares:1000,shares_avail:500,index_base_adjust:1,
+  price_history:[{p:50,t:T(1)},{p:50,t:T(5)},{p:60,t:T(6)}]}];
+syncIndexRows();
+const two=priceChg(getCo('JXI'));
+check('with two constituents it lands between them',
+      two>0 && two<priceChg(getCo('BETA')), two+' vs '+priceChg(getCo('BETA')));
+
+// And an index with no usable history must be 0, not NaN.
+DB.companies=[IDX()];DB.companies[0].price_history=[];
+check('an index with no series reads 0, not NaN',
+      priceChg(getCo('JXI'))===0, String(priceChg(getCo('JXI'))));
+
 console.log(fails?('\n'+fails+' FAILURE(S)'):('\nAll index-series checks passed.'));
 process.exit(fails?1:0);
