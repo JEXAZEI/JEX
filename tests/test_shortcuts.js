@@ -79,9 +79,10 @@ check('escape still closes an open company page',
 
 // ── B and S switch the panel, they do not trade ──
 // The exact pair that would be tempting to "improve" into a real order.
-// Brace-matched, not [^}]*: the 's' branch now has nested braces (the
-// double-tap bookkeeping), and a lazy character class silently matched
-// nothing, which made this check pass by examining an empty string.
+// Brace-matched, not [^}]*: a character class that stops at the first brace
+// matched NOTHING once a branch grew a nested one, so the check passed by
+// examining an empty string. Hence the "was found at all" assertions below --
+// a matcher that finds nothing must fail, not succeed vacuously.
 function branch(k){
   const i=code.indexOf("if(key==='"+k+"'){");
   if(i<0)return '';
@@ -101,23 +102,29 @@ const callsSomething=s=>(s.match(/\b[A-Za-z_$][\w$]*\s*\(/g)||[])
 check("'b' only opens the buy panel and repaints",
       /panelMode='buy'/.test(bLine) && callsSomething(bLine).length===0,
       bLine+' -> calls '+JSON.stringify(callsSomething(bLine)));
-// 's' now means Sell once, Short twice; 'c' means Cover. All three are panel
+// 's' means Sell, Shift+S means Short; 'c' means Cover. All three are panel
 // switches and none may DO anything -- but they are allowed to read, which is
 // the whole point of 'c' only firing when a short exists. The allowlist is
-// exactly the pure reads: the double-tap clock, and the accessor that answers
-// "is there a short here". Nothing that writes is on it, and the MONEY sweep
+// exactly the pure reads. Nothing that writes is on it, and the MONEY sweep
 // above still covers the entire handler regardless.
-const PURE_READS=['Date','now','shorts','getCo'];
+const PURE_READS=['shorts','getCo'];
 const callsIn=s2=>callsSomething(s2).filter(x=>!PURE_READS.includes(x));
-check("'s' opens the sell panel and nothing else",
-      /panelMode=again\?'short':'sell'/.test(sLine) && callsIn(sLine).length===0,
+check("'s' opens a trade panel and nothing else",
+      /panelMode=e\.shiftKey\?'short':'sell'/.test(sLine) && callsIn(sLine).length===0,
       sLine+' -> calls '+JSON.stringify(callsIn(sLine)));
-check("...and the second press is what makes it Short, on a short timer",
-      /_lastKey\.k==='s'&&now-_lastKey\.at<[0-9]+/.test(sLine), sLine);
-// Short is the riskier half of the pair, so it must be the one that costs the
-// extra press -- never the default a single tap lands on.
-check("...so a single press can never open Short",
-      !/panelMode=again\?'sell':'short'/.test(sLine), sLine);
+// Short is the riskier half of the pair, so it must be the one behind the
+// modifier -- never the one a bare press lands on.
+check("...so a bare press can never open Short",
+      !/panelMode=e\.shiftKey\?'sell':'short'/.test(sLine), sLine);
+// Shift is available precisely because the modifier guard lets it through;
+// meta/ctrl/alt are handed back to the browser, shift is not.
+check("...and shift is deliberately not in the modifier bail-out",
+      /if\(e\.metaKey\|\|e\.ctrlKey\|\|e\.altKey\)return;/.test(code) && !/e\.shiftKey\)return/.test(code),
+      'shift is being swallowed with the OS modifiers');
+// No timing window anywhere: a double-tap is invisible state, and the same key
+// pressed twice slowly must behave exactly like pressing it twice quickly.
+check('no shortcut depends on how fast you press',
+      !/Date\.now\(\)/.test(code) && !/_lastKey/.test(code), code.slice(0,0)||'a timing window is back');
 // 'c' opens Cover only when there is a short to cover, matching the panel,
 // which only renders a Cover button under the same condition.
 check("'c' checks for an open short before opening Cover",
@@ -164,7 +171,7 @@ const handled=new Set((code.match(/key===['"]([^'"]+)['"]/g)||[])
   .map(m=>m.replace(/key===['"]/,'').replace(/['"]$/,'')));
 // Two entries are not single-key literals, so they need matching to the branch
 // that implements them rather than to a key=== comparison.
-if(/_lastKey\.k==='s'/.test(code))handled.add('s s');
+if(/panelMode=e\.shiftKey\?'short'/.test(code))handled.add('\u21e7s');
 if(/key>='1'&&key<='9'/.test(code))handled.add('1-9');
 
 for(const k of documented)
