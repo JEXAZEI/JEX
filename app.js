@@ -125,12 +125,30 @@ const sb = {
     //
     // A deadlock abort is the one exception, because Postgres guarantees the
     // losing transaction rolled back completely -- nothing was applied, so
-    // re-running it is safe. It matters here because the trade RPCs lock
-    // jex_users before jex_companies while rpc_pay_dividend and rpc_buyback
-    // lock them the other way round, so a dividend paid while someone is
-    // mid-trade on that same ticker can deadlock. Postgres picks a victim and
-    // aborts it; without this, a student sees a raw "deadlock detected" and
-    // their trade simply did not happen.
+    // re-running it is safe.
+    //
+    // Which pairs can actually deadlock was measured, not guessed: every FOR
+    // UPDATE in every RPC, in source order. jex_companies before jex_users is
+    // unanimous across all ten functions that take both, so the trade-versus-
+    // dividend collision this comment used to describe cannot happen. Two
+    // other pairs disagree, and both are live:
+    //
+    //   jex_funds -> jex_companies   rpc_fund_buy/sell/short/cover_short
+    //   jex_companies -> jex_funds   rpc_fill_limit_vs_pool,
+    //                                rpc_match_limit_order_book
+    //
+    //   jex_users -> jex_funds       rpc_fund_deposit, rpc_fund_withdraw
+    //   jex_funds -> jex_users       rpc_fill_limit_vs_pool,
+    //                                rpc_match_limit_order_book
+    //
+    // The first one is the reachable one: a manager buying ACME for their fund
+    // locks the fund and then waits for ACME, while any browser's 3-second
+    // matching poll locks ACME and then waits for that same fund because it
+    // owns a resting order. Every client runs that poll, so the collision needs
+    // no coincidence beyond a fund trading a ticker it also has an order on.
+    //
+    // Postgres picks a victim and aborts it; without this, a student sees a raw
+    // "deadlock detected" and their trade simply did not happen.
     //
     // The real fix is one consistent lock order server-side; this keeps a
     // classroom moving in the meantime, and stays worth having afterwards.
@@ -4936,6 +4954,42 @@ async function doBuyback(ticker,qty){
 // issueDividend(...,preApproved=true) directly and skip Treasurer review
 // for any payout size). Everything below the RPC call is just fast local
 // preview/confirm UX, not the security boundary.
+// The index-fund half of a dividend, mirroring rpc_pay_dividend.
+//
+// A dividend does not stop at the people holding the stock directly. JXI and
+// every classroom index hold real shares of their constituents (fund_holdings
+// is the basket pool), and the RPC pays that slice through to whoever holds
+// units of the fund:
+//
+//   fund_payout = fund_shares * per_share * (eligible_units / total_units)
+//
+// where eligible_units counts only approved students, exactly like the direct
+// loop -- so units held by anyone else are simply not paid, and the company is
+// not charged for them.
+//
+// The client preview left this out entirely. Three things read that preview
+// before the RPC is ever called: "No shareholders yet", "Insufficient funds",
+// and whether the total crosses the Treasurer approval threshold. All three
+// were working from a number smaller than the one the server would compute, so
+// a dividend could look payable here and be refused there.
+function dividendPassThrough(ticker,perShare){
+  let total=0;const cuts=[];
+  for(const f of DB.companies||[]){
+    if(!f.is_index_fund)continue;
+    const fundShares=Number((f.fund_holdings||{})[ticker]||0);
+    if(!(fundShares>0))continue;
+    const totalUnits=Number(f.shares||0);
+    let eligible=0;
+    for(const u of DB.users||[]){
+      if(u.role!=='student'||u.status!=='approved')continue;
+      eligible+=Number((u.holdings&&u.holdings[f.ticker])||0);
+    }
+    if(!(totalUnits>0)||!(eligible>0))continue;
+    const payout=Math.round(fundShares*perShare*(eligible/totalUnits)*100)/100;
+    if(payout>0){total+=payout;cuts.push({ticker:f.ticker,shares:fundShares,payout});}
+  }
+  return{total:Math.round(total*100)/100,cuts};
+}
 async function issueDividend(ticker,perShare,note){
   const co=getCo(ticker),owner=cu();if(!co||!owner)return;
   perShare=Math.round(parseFloat(perShare)*100)/100;
@@ -4946,8 +5000,24 @@ async function issueDividend(ticker,perShare,note){
   freshStudents.forEach(fs=>{const local=getUser(fs.id);if(local)Object.assign(local,fs);else DB.users.push(fs);});
   const allT=getCompanyTickers(ticker);
   const sh=freshStudents.filter(s=>allT.some(t=>(s.holdings&&s.holdings[t]||0)>0));
-  if(!sh.length)return toast('No shareholders yet');
-  const total=sh.reduce((s,u)=>s+allT.reduce((ts2,t)=>ts2+Math.round(((u.holdings&&u.holdings[t])||0)*perShare*100)/100,0),0);
+  // Rounded ONCE per holder, on their total across every class -- the same way
+  // rpc_pay_dividend does it. Rounding per ticker and then summing gave a
+  // different answer by a few cents for a multi-class company, and the number
+  // this produces is compared against the Treasurer threshold.
+  const directTotal=sh.reduce((s,u)=>{
+    const shares=allT.reduce((n,t)=>n+(((u.holdings&&u.holdings[t])||0)),0);
+    return s+Math.round(shares*perShare*100)/100;
+  },0);
+  // Shares the company's own stock held INSIDE an index fund pay out too --
+  // rpc_pay_dividend passes them through to the fund's unit-holders. Leaving
+  // them out of this preview understated the cost of every dividend paid by a
+  // company the index holds, which is every listed company.
+  const pass=dividendPassThrough(ticker,perShare);
+  const total=Math.round((directTotal+pass.total)*100)/100;
+  // The server refuses on its own total, after both loops. A company whose
+  // shares are held only through the index has no direct shareholders and used
+  // to be refused right here, even though the server would have paid it.
+  if(total<=0)return toast('No shareholders yet');
   if(owner.cash<total)return toast('Insufficient funds (need '+fmt(total)+')');
   const divApprovalThreshold=DB.session.dividend_approval_threshold||1000;
   if(total>=divApprovalThreshold){
