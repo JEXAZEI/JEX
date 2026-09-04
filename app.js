@@ -3945,11 +3945,26 @@ async function checkMarginCalls(){
       if(line==null||co.price<line)continue;      // not (locally) crossed yet
       if(isHalted(ticker))continue;
       let r;
-      // Tolerated rather than reported: until margin_call_migration.sql is
-      // run the function does not exist, and a missing RPC here must not fill
-      // the Errors tab three times a second or stop the rest of the poll.
-      try{r=await safeRpc('rpc_margin_call_short',{p_user_id:u.id,p_ticker:ticker});}
-      catch(e){continue;}
+      try{r=await sb.rpc('rpc_margin_call_short',{p_user_id:u.id,p_ticker:ticker});}
+      catch(e){
+        // Two very different failures, and they must not be treated alike.
+        //
+        // Before margin_call_migration.sql is run the function simply is not
+        // there, and that is expected -- a deploy reaches students before the
+        // SQL does. That one stays quiet, or it would file an error three
+        // times a second forever.
+        //
+        // Anything else means the safety net is DOWN: a short that should be
+        // getting closed is not, and it is drifting further from recoverable
+        // every tick. This is precisely the case where swallowing the error
+        // and carrying on looks identical to working. reportClientError
+        // de-dupes by message, so it lands in the Errors tab once, not once a
+        // tick.
+        const msg=(e&&e.message)||String(e);
+        if(!/PGRST202|Could not find the function|does not exist/i.test(msg))
+          reportClientError('margin call failed for '+ticker+': '+msg,e&&e.stack,'checkMarginCalls');
+        continue;
+      }
       if(!r||!r.called)continue;
       applyMarginCallResult(r);
       const who=getUser(r.user_id);

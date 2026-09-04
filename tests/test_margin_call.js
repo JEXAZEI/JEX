@@ -110,10 +110,21 @@ check('it re-reads the line from the position, not from a stored trigger',
       /shortMarginLine\(pos\)/.test(poll));
 check('it only acts when the server agrees it happened', /if\(!r\|\|!r\.called\)continue;/.test(poll));
 
-// Until the migration is run the RPC does not exist. A missing function must
-// not fill the Errors tab three times a second, nor stop the rest of the poll.
-check('a missing RPC is tolerated quietly', /safeRpc\('rpc_margin_call_short'/.test(poll), poll);
-check('...and never reported as a client error', !/reportClientError/.test(poll));
+// Two very different failures, which must not be treated alike.
+//
+// Before the migration runs the function is simply absent, and that is
+// expected -- a deploy reaches students before the SQL does. Reporting it
+// would file an error three times a second forever.
+check('a missing RPC is tolerated quietly',
+      /PGRST202\|Could not find the function\|does not exist/.test(poll), poll);
+// Anything else means the safety net is DOWN: a short that should be closing
+// is not, and it drifts further from recoverable every tick. Swallowing that
+// looks exactly like working.
+check('any OTHER failure is reported, not swallowed',
+      /reportClientError\('margin call failed for/.test(poll), poll);
+check('...and the two are told apart by the message, not lumped together',
+      /if\(!\/PGRST202/.test(poll), poll);
+check('a failure never stops the rest of the poll', /continue;\n      \}/.test(poll), poll);
 
 // Whose screen it lands on. Same rule as the stop-loss toast: any client can
 // trigger anyone's margin call, so an ungated toast would tell a classmate
