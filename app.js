@@ -845,6 +845,23 @@ const isoNow=()=>new Date().toISOString();
 // session-open capture happens (a brand new IPO mid-session, or before any
 // session has ever opened on a fresh exchange).
 const priceChg=c=>{
+  // An index row is a special case, and getting it wrong showed two different
+  // "today" figures for the same instrument on the same screen: the ticker bar
+  // and the Listed Companies table said -5.52% while the index card said
+  // +0.44%, next to a single constituent that was +0.44%.
+  //
+  // Everything about an index is DERIVED from its constituents (see
+  // indexSeries/syncIndexRows), including the price this function compares.
+  // But session_open_prices is a snapshot the server recorded at the open --
+  // and for an index it recorded the stale cached column, not the derived
+  // value. So this was measuring a derived price against a baseline that never
+  // came from the same series.
+  //
+  // The whole series is derived, so the baseline has to come from that series
+  // too. intervalChg over the '1d' window is exactly that -- the last point
+  // before the session opened, against the latest -- and it is what the index
+  // card already used, which is why the card was the one telling the truth.
+  if(c.is_index_fund)return intervalChg(c.price_history||[],'1d');
   const openPrice=DB.session.session_open_prices&&DB.session.session_open_prices[c.ticker];
   if(openPrice>0)return(c.price-openPrice)/openPrice*100;
   if(!c.price_history||c.price_history.length<2)return 0;
@@ -4789,6 +4806,8 @@ async function placeShort(ticker,qty){
   if(!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
   if(indexHasNoBasket(co))return toast(emptyIndexMsg(co));
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  const canBorrow=borrowable(co);
+  if(canBorrow!=null&&qty>canBorrow)return toast(borrowMsg(co));
   const coll=Math.round(co.price*qty*1.5*100)/100;
   if(u.cash<coll)return toast('Need '+fmt(coll)+' collateral');
   if(!checkRateLimit(u.id))return;
@@ -5004,6 +5023,8 @@ async function fundShort(fundId,ticker,qty){
   if(!canAccessTicker(ticker,f.manager_id))return toast('This share class is restricted — the fund manager is not on the whitelist.');
   if(indexHasNoBasket(co))return toast(emptyIndexMsg(co));
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  const canBorrow=borrowable(co);
+  if(canBorrow!=null&&qty>canBorrow)return toast(borrowMsg(co));
   const coll=Math.round(co.price*qty*1.5*100)/100;
   if(f.cash<coll)return toast('Fund needs '+fmt(coll)+' collateral');
   let r;
@@ -5790,7 +5811,47 @@ function impactPreview(co,qty,dir){
   }
   return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">Fill: <strong>${fmt(np)}</strong> <span class="${cls}">${delta>=0?'+':''}${fmt(delta)} (${delta>=0?'+':''}${pct}%)</span> &nbsp;|&nbsp; Total: <strong>${fmt(np*qty)}</strong>${note}</div>`;
 }
-function shortPrev(co,qty){if(!qty||qty<=0)return'';const c=Math.round(co.price*qty*1.5*100)/100;return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:rgba(83,74,183,0.1);border-radius:var(--radius);color:#AFA9EC">Short ${qty} @ ${fmt(co.price)} | Collateral: <strong>${fmt(c)}</strong></div>`;}
+// How many shares of a ticker are actually available to borrow.
+//
+// You can only short a share somebody is holding. jex_companies.shares is what
+// has been ISSUED and shares_avail is what is still sitting unsold in the
+// exchange pool -- nobody holds those, so they cannot be lent. What is
+// borrowable is what is in circulation, minus whatever is already on loan to
+// the shorts that are open.
+//
+// Without this, placeShort checked collateral and nothing else: with $10,000
+// you could short 6,666 shares of a company that had only ever issued 1,000.
+// checkShortSqueezes then read "666% short", and a squeeze alert that can say
+// 666% is not saying anything.
+//
+// Index funds are exempt, for the same reason they are exempt from the
+// shares_avail check on a buy: an index mints and burns units on demand rather
+// than trading a fixed float, and rpc_trade_short prices it off NAV. There is
+// no lender and nothing to run out of, so borrowable() returns null meaning
+// "no limit" rather than 0 meaning "none left".
+function borrowable(co){
+  if(!co||co.is_index_fund)return null;
+  const circulating=Math.max(0,(Number(co.shares)||0)-(Number(co.shares_avail)||0));
+  let onLoan=0;
+  for(const u of DB.users||[]) onLoan+=Number((u.shorts&&u.shorts[co.ticker]||{}).qty)||0;
+  for(const f of DB.funds||[])  onLoan+=Number((f.shorts&&f.shorts[co.ticker]||{}).qty)||0;
+  return Math.max(0,circulating-onLoan);
+}
+const borrowMsg=co=>'Only '+borrowable(co)+' share'+(borrowable(co)===1?'':'s')+' of '+co.ticker
+  +' can be borrowed right now — you can only short shares somebody actually holds, '
+  +'and the rest are already on loan to other short positions.';
+function shortPrev(co,qty){
+  if(!qty||qty<=0)return'';
+  const c=Math.round(co.price*qty*1.5*100)/100;
+  // The borrow limit is shown here rather than only in the refusal, so it is
+  // a number the student can plan against instead of one they discover by
+  // being told no.
+  const canBorrow=borrowable(co);
+  const over=canBorrow!=null&&qty>canBorrow;
+  return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:rgba(83,74,183,0.1);border-radius:var(--radius);color:#AFA9EC">Short ${qty} @ ${fmt(co.price)} | Collateral: <strong>${fmt(c)}</strong>`
+    +(canBorrow==null?'':`<div style="margin-top:3px;color:${over?'var(--red)':'#AFA9EC'}">${over?'Only ':''}${canBorrow} available to borrow${over?' — this order would be refused':''}</div>`)
+    +'</div>';
+}
 // ── Quick-quantity buttons (1/5/10/Max·All) shared by both trade panels
 // (renderCompanyPage's Trade tab and openPanel's market-page side panel) --
 // sets the quantity input and recomputes the preview in one click instead
@@ -5815,6 +5876,11 @@ function quickSetQty(ticker,mode,qtyInputId,previewId,value){
       // 1.5x collateral requirement, same math as shortPrev()
       const collateralPerShare=co.price*1.5;
       qty=collateralPerShare>0?Math.floor(u.cash/collateralPerShare):0;
+      // ...but never more than there is to borrow. Max offering a number the
+      // trade would be refused for is the same defect as a dropdown listing a
+      // ticker whose buttons cannot work.
+      const canBorrow=borrowable(co);
+      if(canBorrow!=null)qty=Math.min(qty,canBorrow);
     }
   } else if(value==='all'&&mode==='sell'){
     qty=(holdings(u)[ticker])||0;
