@@ -2291,8 +2291,6 @@ if(typeof document!=='undefined'){
 }
 
 // ── Keyboard shortcuts ────────────────────────────────────
-// The previous key and when it was pressed, for the double-tap shortcuts.
-let _lastKey={k:'',at:0};
 document.addEventListener('keydown',function(e){
   // Not every keydown carries a key.
   //
@@ -2361,14 +2359,15 @@ document.addEventListener('keydown',function(e){
       // and Orders everywhere else -- the same key, the nearer meaning.
       if(key==='b'){UI.companyPageTab='trade';UI.panelMode='buy';render();return;}
       if(key==='s'){
-        // Once for Sell, twice for Short. Short is the riskier of the pair and
-        // the one a stray keypress should not land on, so it costs a second
-        // deliberate press rather than a key of its own -- and it keeps the
-        // two sides of the same idea under the same finger.
-        const now=Date.now();
-        const again=_lastKey.k==='s'&&now-_lastKey.at<700;
-        _lastKey={k:'s',at:now};
-        UI.companyPageTab='trade';UI.panelMode=again?'short':'sell';render();return;
+        // s for Sell, Shift+S for Short: the same finger for the two sides of
+        // the same idea, with the riskier one behind a deliberate chord.
+        //
+        // This was a double-tap first, and that was worse. A timing window is
+        // invisible state -- press s twice slowly and you get Sell twice and no
+        // explanation, press it twice quickly while navigating and you land on
+        // Short without asking. Shift has neither failure: it is one gesture,
+        // it reads as "the bigger S", and '?' already uses shift here.
+        UI.companyPageTab='trade';UI.panelMode=e.shiftKey?'short':'sell';render();return;
       }
       if(key==='c'){
         // Cover, but only when there is something to cover. The panel itself
@@ -3904,6 +3903,84 @@ async function deletePriceAlert(id){
   DB.priceAlerts=DB.priceAlerts.filter(a=>a.id!==id);
   toast('Alert removed');render();
 }
+// A short is closed automatically once its losses have eaten most of the
+// collateral behind it.
+//
+// Without this the collateral is not a floor, it is just the first money you
+// lose. It is locked at the ENTRY price and never marked to market, so on a
+// $2,000 short with $3,000 posted, net worth keeps falling past $3,000 of
+// losses, past zero, with nothing to stop it -- and a 2.5x move is very
+// reachable when a single trade can move a price 12%.
+//
+// The far end is worse than a big loss: covering releases the collateral and
+// applies the loss, so past a point the student cannot get out at all, and the
+// position keeps growing against them for the rest of the term.
+//
+// The line is 80% of the collateral, not 100%, because the forced buy-back is
+// itself a market buy -- it pushes the price up and pays the higher price, so
+// the closing trade has to fit inside what is left. With the standard 150%
+// collateral that lands at 2.2x the entry price.
+//
+// Same design as the stop-loss poller above: no server cron, so every client
+// looks and any client may call it for anyone. rpc_margin_call_short re-derives
+// the line under a row lock and claims the position atomically, so two browsers
+// noticing at once is fine -- the second is told 'not_crossed'.
+const MARGIN_CALL_AT=0.8;
+// True when a short has lost at least MARGIN_CALL_AT of what was posted
+// against it. Shared with the trade panel, which warns before it happens.
+function shortMarginLine(pos){
+  const qty=Number(pos&&pos.qty)||0, coll=Number(pos&&pos.collateral)||0;
+  if(qty<=0||coll<=0)return null;
+  return Math.round((Number(pos.avgPrice)+MARGIN_CALL_AT*coll/qty)*100)/100;
+}
+async function checkMarginCalls(){
+  if(!isOpen())return;
+  // Everyone's shorts, not just this browser's user -- same reason the
+  // stop-loss poller scans everyone: there is nothing else to run it.
+  for(const u of DB.users||[]){
+    for(const [ticker,pos] of Object.entries(u.shorts||{})){
+      if(!pos||!(pos.qty>0))continue;
+      const co=getCo(ticker);if(!co)continue;
+      const line=shortMarginLine(pos);
+      if(line==null||co.price<line)continue;      // not (locally) crossed yet
+      if(isHalted(ticker))continue;
+      let r;
+      // Tolerated rather than reported: until margin_call_migration.sql is
+      // run the function does not exist, and a missing RPC here must not fill
+      // the Errors tab three times a second or stop the rest of the poll.
+      try{r=await safeRpc('rpc_margin_call_short',{p_user_id:u.id,p_ticker:ticker});}
+      catch(e){continue;}
+      if(!r||!r.called)continue;
+      applyMarginCallResult(r);
+      const who=getUser(r.user_id);
+      await pushNotification(r.user_id,'margin_call',
+        '\u26a0\ufe0f Margin call: your short of '+r.qty+'\u00d7'+ticker+' was closed at '+fmt(r.price)
+        +' (opened at '+fmt(r.avg_price)+'). Loss '+fmt(Math.abs(r.pnl))+' of the '+fmt(r.collateral)+' you posted.',ticker);
+      await logActivity('margin_call',(who?who.name:'Someone')+"'s short of "+r.qty+'\u00d7'+ticker
+        +' was closed by a margin call @ '+fmt(r.price),
+        {ticker,userId:r.user_id,userName:who?who.name:'',amount:r.qty*r.price});
+      // Same rule as the stop-loss toast: the person it happened to, and
+      // admins running the session. Not whichever classmate's tab noticed.
+      const me=cu();
+      if(me&&(me.id===r.user_id||isAdmin(me)))
+        toast('Margin call'+(who&&who.id!==me.id?' for '+who.name:'')+': short of '
+              +r.qty+'\u00d7'+ticker+' closed @ '+fmt(r.price));
+    }
+  }
+}
+function applyMarginCallResult(r){
+  const u=getUser(r.user_id);
+  if(u){u.cash=r.cash;u.shorts=r.shorts;}
+  const co=getCo(r.ticker);
+  if(co){co.price=r.price;co.price_history=r.price_history;
+    if('shares_avail'in r)co.shares_avail=r.shares_avail;}
+  if(r.trade)recordLocalTrade(r.trade);
+  checkPriceAlerts();
+  checkCircuitBreakers();
+  pushBalances();
+  snapshotJXI();
+  pushTradeToSheets(r.trade);
+}
 async function checkPriceAlerts(){
   const active=DB.priceAlerts.filter(a=>!a.triggered);
   for(const a of active){
@@ -4520,7 +4597,8 @@ setInterval(async()=>{
   if(_pollBusy)return;
   _pollBusy=true;
   try{
-    await checkLimitOrders();await checkStopLossOrders();await checkPriceAlerts();
+    await checkLimitOrders();await checkStopLossOrders();await checkMarginCalls();
+    await checkPriceAlerts();
     checkShortSqueezes();checkCircuitBreakerAutoResume();
   }catch(e){
     // A pass that throws must still release the flag, or the loop stops for
@@ -7587,7 +7665,17 @@ function renderPortfolio(){
   if(UI.portfolioTab==='shorts'){
     const shortRows=sh.length?sh.map(([t,pos])=>{
       const c=getCo(t);if(!c)return'';const p=(pos.avgPrice-c.price)*pos.qty;
-      return '<div class="short-pos"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-weight:500">'+esc(c.name)+' <span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></span><button class="btn btn-sm btn-warning" onclick="UI.companyPage=null;setTab(&quot;market&quot;);UI.panelMode=&quot;cover&quot;;setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Cover</button></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:12px"><div><div style="color:var(--text2)">Qty</div><div>'+pos.qty+'</div></div><div><div style="color:var(--text2)">Avg price</div><div style="font-family:var(--mono)">'+fmt(pos.avgPrice)+'</div></div><div><div style="color:var(--text2)">Current</div><div style="font-family:var(--mono)">'+fmt(c.price)+'</div></div><div><div style="color:var(--text2)">P&L</div><div style="font-family:var(--mono);color:'+(p>=0?'var(--green)':'var(--red)')+'">'+fmt(p)+'</div></div></div></div>';
+      // The price at which this position gets closed for you, and how close it
+      // already is. A margin call that arrives with no warning is a rule the
+      // student never had a chance to act on, so the number lives beside the
+      // position from the moment it is opened -- not only once it is nearly
+      // hit. It goes amber inside 25% of the way there.
+      const mline=shortMarginLine(pos);
+      const near=mline!=null&&c.price>=pos.avgPrice+(mline-pos.avgPrice)*0.75;
+      const marginCell=mline==null?'':'<div><div style="color:var(--text2)">Closed out at'
+        +infoBubble('If the price rises this far, your losses have used up 80% of the collateral you posted and the position is bought back automatically. That is what stops a short losing more than you put up.')
+        +'</div><div style="font-family:var(--mono);color:'+(near?'var(--amber)':'var(--text2)')+'">'+fmt(mline)+'</div></div>';
+      return '<div class="short-pos"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-weight:500">'+esc(c.name)+' <span class="badge b-gray" style="font-family:var(--mono)">'+t+'</span></span><button class="btn btn-sm btn-warning" onclick="UI.companyPage=null;setTab(&quot;market&quot;);UI.panelMode=&quot;cover&quot;;setTimeout(()=>openPanel(&quot;'+t+'&quot;),50)">Cover</button></div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;font-size:12px"><div><div style="color:var(--text2)">Qty</div><div>'+pos.qty+'</div></div><div><div style="color:var(--text2)">Avg price</div><div style="font-family:var(--mono)">'+fmt(pos.avgPrice)+'</div></div><div><div style="color:var(--text2)">Current</div><div style="font-family:var(--mono)">'+fmt(c.price)+'</div></div><div><div style="color:var(--text2)">P&L</div><div style="font-family:var(--mono);color:'+(p>=0?'var(--green)':'var(--red)')+'">'+fmt(p)+'</div></div>'+marginCell+'</div></div>';
     }).join(''):'<div class="empty">No open short positions</div>';
     const collTotal=Object.values(shorts(u)).reduce((s,p)=>s+p.collateral,0);
     return tabs+`<div class="grid3"><div class="mcard"><div class="mlabel">Open shorts</div><div class="mval">${sh.length}</div></div><div class="mcard"><div class="mlabel">Unrealised P&L</div><div class="mval ${_spnl>=0?'green':'red'}" style="font-family:var(--mono)">${fmt(_spnl)}</div></div><div class="mcard"><div class="mlabel">Collateral locked${infoBubble('When you short a stock, 1.5x the value of the shares you borrowed gets set aside from your cash as a safety deposit. You get it back (plus or minus your profit or loss) when you cover the position.')}</div><div class="mval" style="font-family:var(--mono)">${fmt(collTotal)}</div></div></div>${shortRows}`;
@@ -9877,7 +9965,7 @@ const SHORTCUTS=[
   {keys:'/',      what:'Search the market'},
   {keys:'B',      what:'Buy panel  (on a company page)'},
   {keys:'S',      what:'Sell panel  (on a company page)'},
-  {keys:'S S',    what:'Short panel  \u2014 press S twice'},
+  {keys:'\u21E7S',    what:'Short panel  \u2014 Shift and S'},
   {keys:'C',      what:'Cover panel  (only when you have a short open)'},
   {keys:'1-9',    what:'Jump to a tab \u2014 works on Admin, your company, Portfolio and any company page'},
   {keys:'Esc',    what:'Close this card, or the open company'},

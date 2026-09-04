@@ -161,7 +161,12 @@ check('a close marks it unhealthy again', (src.match(/_rtJoined=false;/g)||[]).l
 // otherwise stack the next pass on top of the one still running, and slower
 // responses would produce MORE concurrent passes rather than fewer.
 check('the matching poll still runs every 3 seconds (limit fills stay fast)',
-  /await checkLimitOrders\(\);await checkStopLossOrders\(\)[\s\S]{0,400}?\},3000\);/.test(src));
+  /await checkLimitOrders\(\);await checkStopLossOrders\(\)[\s\S]{0,500}?\},3000\);/.test(src));
+// Margin calls ride the same pass. A short that has blown through its
+// collateral has to be closed on the same cadence as a stop-loss, not on the
+// 20-60 second refresh -- the price is moving away from them the whole time.
+check('...and margin calls are checked on that same pass',
+  /await checkStopLossOrders\(\);await checkMarginCalls\(\);/.test(src));
 check('...one pass at a time, so slow passes cannot stack up',
   /if\(_pollBusy\)return;\s*\n?\s*_pollBusy=true;/.test(src));
 check('...and a pass that throws still releases the flag',
