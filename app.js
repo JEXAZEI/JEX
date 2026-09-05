@@ -9323,11 +9323,25 @@ function renderStudentOrders(){
   </div>`:'';
   return slSection+ahSection+`<div class="card"><div class="section-title">Open limit orders</div>
     ${open.length?`<table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>Limit price</th><th>Current price</th><th>Placed</th><th></th></tr></thead>
-    <tbody>${open.map(o=>{const co=getCo(o.ticker);return`<tr>
+    <tbody>${open.map(o=>{const co=getCo(o.ticker);
+      // An order can be resting at a price the band no longer allows -- the
+      // band is measured from session_open_prices, which is re-recorded every
+      // session, so a GTC order placed on Monday can be outside Tuesday's
+      // band. After-hours orders reach the book without ever being measured
+      // against a band at all, since placement returns before that check.
+      //
+      // Both server paths refuse to fill outside the band, which is right, but
+      // from the student's side that is an order sitting there doing nothing
+      // with no explanation. Same condition the server uses, including the
+      // half that lets an already-out-of-band price move back toward the band.
+      const b=co?bandLimits(o.ticker):null;
+      const stuck=b&&co&&((o.limit_price>b.upper&&o.limit_price>co.price)
+                        ||(o.limit_price<b.lower&&o.limit_price<co.price));
+      return`<tr>
       <td><span class="badge b-gray" style="font-family:var(--mono)">${o.ticker}</span></td>
       <td><span class="badge ${o.side==='buy'?'b-teal':'b-red'}">${o.side}</span></td>
       <td>${o.qty}</td>
-      <td style="font-family:var(--mono);font-weight:500">${fmt(o.limit_price)}</td>
+      <td style="font-family:var(--mono);font-weight:500">${fmt(o.limit_price)}${stuck?'<br><span class="badge b-amber" style="font-size:10px">outside today\u2019s band'+infoBubble('This price is outside the allowed range for today ('+fmt(b.lower)+' \u2013 '+fmt(b.upper)+', \u00b1'+b.pct+'% from the session open). It will not fill while that is true \u2014 cancel it and place a new one inside the range, or leave it in case the range moves.')+'</span>':''}</td>
       <td style="font-family:var(--mono)">${co?fmt(co.price):'—'}</td>
       <td style="color:var(--text2)">${o.ts||'—'}</td>
       <td><button class="btn btn-sm btn-danger" onclick="cancelLimitOrder('${o.id}')">Cancel</button></td>
