@@ -162,5 +162,53 @@ const aboveHtml=impactPreview({ticker:'ACME', price:15.00, shares:1000, is_index
 check('a buy pushing further above the ceiling is still warned',
       /will be refused/.test(aboveHtml), aboveHtml.slice(0,240));
 
+// ── an order the band will not let fill has to SAY so ──
+//
+// Two ways an open order can be resting at a price the band forbids:
+//
+//   * the band is measured from session_open_prices, which is re-recorded
+//     every session, so a GTC order placed on Monday can be outside Tuesday's
+//     band without anyone touching it;
+//   * an after-hours order reaches the book without ever being measured
+//     against a band at all -- rpc_place_limit_order inserts it and RETURNS
+//     before its band check is reached.
+//
+// Both server paths refuse to fill outside the band, which is correct. But
+// from the student's side that is an order sitting in the book doing nothing,
+// with no explanation, possibly for the rest of the term.
+const ordersSrc=(/const open=myOrders\.filter[\s\S]*?No open limit orders/.exec(src)||[''])[0];
+check('the open-orders table was found', ordersSrc.length>0);
+check('an unfillable order is flagged in the orders list',
+      /outside today/.test(ordersSrc), ordersSrc.slice(0,200));
+check('...using the same condition the server refuses on',
+      /o\.limit_price>b\.upper&&o\.limit_price>co\.price/.test(ordersSrc)
+      &&/o\.limit_price<b\.lower&&o\.limit_price<co\.price/.test(ordersSrc), ordersSrc);
+// The half that matters: a price already outside the band is NOT blocked from
+// moving back toward it. A flag that ignored that would light up on orders
+// that can still fill.
+check('...including the half that allows a move back toward the band',
+      /&&o\.limit_price>co\.price/.test(ordersSrc)&&/&&o\.limit_price<co\.price/.test(ordersSrc));
+check('...and tells them the range and what to do about it',
+      /cancel it and place a new one inside the range/.test(ordersSrc), ordersSrc);
+check('...reading the band from bandLimits, not a second copy of the maths',
+      /bandLimits\(o\.ticker\)/.test(ordersSrc));
+// No band configured means no flag, not a flag on everything.
+check('a disabled band flags nothing', /const b=co\?bandLimits\(o\.ticker\):null;/.test(ordersSrc)
+      &&/const stuck=b&&co&&/.test(ordersSrc), ordersSrc);
+
+// Exercise the condition itself against the real bandLimits().
+// ACME: session open 10, band 30% -> 7.00 to 13.00, current price 10.
+const stuckAt=(limit,current)=>{
+  const b=bandLimits('ACME');
+  return !!(b&&((limit>b.upper&&limit>current)||(limit<b.lower&&limit<current)));
+};
+check('an order inside the band is not flagged', !stuckAt(12,10));
+check('...at the very edge, not flagged', !stuckAt(13,10));
+check('an order above the band IS flagged', stuckAt(14,10));
+check('an order below the band IS flagged', stuckAt(6,10));
+// The asymmetry, with the stock already trading above the band at 20:
+check('a high order is not flagged when the stock is already higher', !stuckAt(14,20));
+check('...but a low one still is', stuckAt(6,20));
+
 console.log(fails?('\n'+fails+' FAILURE(S)'):'\nAll price-band checks passed.');
 process.exit(fails?1:0);
