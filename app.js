@@ -1189,6 +1189,34 @@ function getPreMarketPrice(ticker){
   return bestBid||bestAsk||null;
 }
 const shareholders=ticker=>DB.users.filter(u=>['student','company'].includes(u.role)&&(holdings(u)[ticker]||0)>0&&!isHiddenTestEntity(u.id));
+// The shareholders table, rendered twice: once from the local cache and again
+// when the fresh fetch lands. It used to be written out twice, character for
+// character, in two places forty lines apart -- so a fix to one silently did
+// not apply to the other. One function now.
+//
+// The Total column is the reason this needed touching at all. Summing raw share
+// counts across classes is a mixed unit the moment a conversion ratio is
+// anything but 1: ten ACME plus ten ACME.B at ratio 5 is not "20 shares", it is
+// sixty base shares' worth of claim, and the dividend pays it as sixty. So when
+// any class here has a ratio, the column becomes base equivalents and says so.
+// With no ratios in play it is arithmetically identical to what it printed
+// before, and the header is unchanged.
+function shareholderTableHTML(list,tickers){
+  const weighted=tickers.some(t=>classRatio(t)!==1);
+  return '<table><thead><tr><th>Holder</th>'
+    +tickers.map(t=>'<th class="r">'+t+'</th>').join('')
+    +'<th class="r">'+(weighted?'Total (base equiv.)':'Total')+'</th>'
+    +'<th class="r">Voting power</th></tr></thead><tbody>'
+    +list.map(sh=>{
+      const total=tickers.reduce((s,t)=>s+(sh.shares[t]||0)*(weighted?classRatio(t):1),0);
+      const vp=tickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);
+      return '<tr><td style="font-weight:500">'+esc(sh.name)+'</td>'
+        +tickers.map(t=>'<td class="r" style="font-family:var(--mono)">'+(sh.shares[t]||0)+'</td>').join('')
+        +'<td class="r" style="font-weight:500">'+total+'</td>'
+        +'<td class="r" style="color:var(--amber)">'+vp+'</td></tr>';
+    }).join('')
+    +'</tbody></table>';
+}
 // Direct student/company holders + shares (see fundBuy/fundSell) a
 // student-run fund holds directly for its depositors + whatever's left
 // over once every known holder is accounted for, attributed to index
@@ -5163,9 +5191,18 @@ async function issueDividend(ticker,perShare,note){
   // rpc_pay_dividend does it. Rounding per ticker and then summing gave a
   // different answer by a few cents for a multi-class company, and the number
   // this produces is compared against the Treasurer threshold.
+  //
+  // And weighted by each class's conversion ratio, which the server does NOT do
+  // yet. A dividend is paid per unit of economic claim, and one ACME.B at ratio
+  // 5 IS five ACME -- that is the whole meaning of the ratio. Paying it flat per
+  // share is the exploit: list a class at a fifth of the parent and collect five
+  // times the yield for the same claim. classRatio() answers 1 for the base
+  // class and for every class without a ratio, so until a ratio other than 1
+  // exists this is arithmetically identical to what it computed before, and
+  // identical to what the server computes.
   const directTotal=sh.reduce((s,u)=>{
-    const shares=allT.reduce((n,t)=>n+(((u.holdings&&u.holdings[t])||0)),0);
-    return s+Math.round(shares*perShare*100)/100;
+    const equiv=baseEquivalent(u,allT);
+    return s+Math.round(equiv*perShare*100)/100;
   },0);
   // Shares the company's own stock held INSIDE an index fund pay out too --
   // rpc_pay_dividend passes them through to the fund's unit-holders. Leaving
@@ -5212,8 +5249,7 @@ async function issueDividend(ticker,perShare,note){
       +' approval threshold and needs a Treasurer to approve it — but no Treasurer has been appointed yet. '
       +'Ask an admin to appoint one, or pay a smaller amount per share.');
   }
-  const sharesAcrossClasses=s=>allT.reduce((sum,t)=>sum+((s.holdings&&s.holdings[t])||0),0);
-  if(!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(sharesAcrossClasses(s)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
+  if(!confirm('Pay '+fmt(perShare)+'/share to '+sh.length+' shareholder'+(sh.length!==1?'s':'')+' ('+sh.map(s=>s.name+': '+fmt(baseEquivalent(s,allT)*perShare)).join(', ')+')? Total: '+fmt(total)))return;
   // After the confirm(), so cancelling costs nothing. rpc_pay_dividend is the
   // single heaviest call in the app -- it locks the company and then every
   // shareholder row -- so a double-click here is the most expensive one a
@@ -5909,6 +5945,37 @@ function dilPreview(co,ns){if(!ns||ns<=0)return'';const ta=co.shares+ns,np=Math.
 
 // Helper: get class metadata for a ticker (or null if base class)
 function getClassMeta(ticker){return DB.shareClasses.find(c=>c.ticker===ticker)||null;}
+// A share class's CONVERSION RATIO: how many base shares one class share is
+// worth. One ACME.B at ratio 5 has the economic claim of five ACME, so it lists
+// at five times the base price, collects five times the dividend, and can be
+// converted into five ACME by whoever holds it.
+//
+// Defaults to 1 in every direction it can be missing: the base class has no row
+// at all, and every class issued before conversion rights existed was listed at
+// whatever price was typed -- for the one class that exists, TCO1.B, that price
+// was exactly the parent's, which IS a ratio of 1. So this reads correctly both
+// before and after the migration, and a null, a 0, a string or a NaN in the
+// column can never silently zero out a dividend or a conversion.
+function classRatio(tickerOrMeta){
+  const meta=typeof tickerOrMeta==='string'?getClassMeta(tickerOrMeta):tickerOrMeta;
+  if(!meta)return 1;                       // base class, or unknown ticker
+  const r=Number(meta.conversion_ratio);
+  return r>0?r:1;
+}
+// What a holding is worth in BASE shares -- the unit dividends are actually
+// paid in. Two ACME.B at ratio 5 is ten base-share equivalents, not two.
+function baseEquivalent(user,tickers){
+  const h=holdings(user)||{};
+  return tickers.reduce((n,t)=>n+((h[t]||0)*classRatio(t)),0);
+}
+// "5 BWV" / "1 BWV (1:1)". Reads the same on a class row, an application row,
+// the Chairman's queue and the admin list, so a ratio never appears as a bare
+// number with nothing to multiply against.
+function ratioLabel(metaOrRatio,parentTicker){
+  const r=typeof metaOrRatio==='number'?(metaOrRatio>0?metaOrRatio:1):classRatio(metaOrRatio);
+  const t=parentTicker||(metaOrRatio&&metaOrRatio.parent_ticker)||'base';
+  return r+' '+t+(r===1?' (1:1)':'');
+}
 // Helper: get all tickers for a company (base + classes)
 function getCompanyTickers(parentTicker){
   const base=[parentTicker];
@@ -5963,30 +6030,147 @@ function getVotingPower(userId,parentTicker){
 }
 
 // ── Submit new share class application ───────────────────
-async function submitClassApplication(parentTicker,classType,votesPerShare,shares,price,restricted,whitelistIds,reason){
+// The IPO price is no longer typed. A new class is issued at a CONVERSION
+// RATIO against its parent -- one ACME.B is worth N ACME -- and the listing
+// price is derived from that, server-side, at the moment the Chairman approves
+// it rather than the moment the form was filled in.
+//
+// Two things were wrong with a typed price. It could be anything, including a
+// number with no relationship to the company it is a class of; and
+// rpc_pay_dividend pays parent and classes the same cash per share, so a class
+// listed cheap collected the same dividend as the parent for a fraction of the
+// cost. The ratio is the number that makes both correct at once, and it gives
+// the class a real ceiling: a holder can always convert and sell into the base.
+async function submitClassApplication(parentTicker,classType,votesPerShare,shares,ratio,restricted,whitelistIds,reason){
   const co=getCo(parentTicker);if(!co)return;
   const u=cu();
   if(!canManageCompany(co))return toast('Only this company\'s owner or founders can apply for a new share class');
   if(!classType)return toast('Select a class type');
   votesPerShare=parseInt(votesPerShare);
   if(isNaN(votesPerShare)||votesPerShare<0)return toast('Enter valid votes per share');
-  shares=parseInt(shares);price=parseFloat(price);
+  shares=parseInt(shares);ratio=parseFloat(ratio);
   if(isNaN(shares)||shares<=0)return toast('Enter valid share count');
-  if(isNaN(price)||price<=0)return toast('Enter valid price');
+  // Whole numbers only: a fractional ratio makes conversion produce fractional
+  // shares, which nothing in this app can hold. Same rule server-side.
+  if(isNaN(ratio)||ratio<1||ratio>100||ratio!==Math.floor(ratio))
+    return toast('Conversion ratio must be a whole number from 1 to 100 base shares per class share');
+  if(!(co.price>0))return toast(co.ticker+' has no price to anchor a share class to');
   const proposedTicker=parentTicker+'.'+classType;
   if(DB.companies.find(c=>c.ticker===proposedTicker)||DB.classApps.find(a=>a.proposed_ticker===proposedTicker&&a.status==='pending'))
     return toast('A '+classType+' class already exists or is pending for this company');
   // Runs server-side (rpc_submit_class_application), which derives owner_id
-  // from the caller and re-checks they actually manage the parent company.
+  // from the caller, re-checks they actually manage the parent company, and
+  // derives the price from the parent rather than trusting a number from here.
   let app;
   try{app=await sb.rpc('rpc_submit_class_application',{p_parent_ticker:parentTicker,p_class:classType,
-    p_votes_per_share:votesPerShare,p_shares:shares,p_price:price,p_restricted:!!restricted,
+    p_votes_per_share:votesPerShare,p_shares:shares,p_conversion_ratio:ratio,p_restricted:!!restricted,
     p_whitelist:whitelistIds||[],p_reason:reason||'',p_convert:false});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.classApps.push(app);
   await logActivity('class_app',u.name+' applied for '+co.name+' Class '+classType+' ('+proposedTicker+')',{ticker:parentTicker,userId:u.id,userName:u.name});
   clearDraft('cls-reason');toast('Class '+classType+' application submitted — awaiting Chairman approval');
   UI.companyTab='classes';render();
+}
+
+// ── Conversion rights ────────────────────────────────────
+//
+// The right that makes a ratio mean something. A holder can turn N class shares
+// into N x ratio base shares, one way, at any time. Two reasons it exists:
+//
+//   * it is what puts a ceiling on the class price. If ACME.B at ratio 5 ever
+//     trades above 5 x ACME, anyone holding it converts and sells into ACME for
+//     free money, and the gap closes. That is the mechanism holding GOOG and
+//     GOOGL within about a percent of each other, and it is a far better thing
+//     for a student to discover than a rule that forbids the price from moving.
+//   * it is what makes the ratio honest. A number that only ever showed up in a
+//     dividend calculation would be a house rule; a number you can act on is a
+//     property of the share.
+//
+// It is deliberately one way. Base -> class would let anyone mint votes.
+function renderConversionPanel(co,u){
+  if(!u||!(u.role==='student'||u.role==='company'))return'';
+  // Two ways to arrive here, and both have to work. A class is a listed company
+  // in its own right, so a student can open BWV.B's page directly from the
+  // market table -- where getCompanyTickers('BWV.B') is just ['BWV.B'] and
+  // nothing has BWV.B as a parent. Looking only for children would have shown
+  // the button on the parent's page and nowhere else, which is the page they
+  // are least likely to be on when they want it.
+  const rows=DB.shareClasses.filter(c=>c.ticker!==c.parent_ticker
+    &&(c.parent_ticker===co.ticker||c.ticker===co.ticker)
+    &&((holdings(u)[c.ticker])||0)>0);
+  if(!rows.length)return'';
+  return '<div style="padding:12px 0 2px">'
+    +'<div style="font-size:12px;font-weight:500;margin-bottom:6px">Conversion rights'
+    +infoBubble('A class share carries the economic claim of its conversion ratio in the company\'s base shares. Converting swaps them at that ratio: the class shares are retired and the base shares are created. No money changes hands and neither price moves — but if the class is trading below its ratio, the base shares you get back are worth more than what you gave up. It is one way: base shares cannot be converted into a class.')
+    +'</div>'
+    +rows.map(c=>{
+      const qty=(holdings(u)[c.ticker])||0, r=classRatio(c);
+      const cls=getCo(c.ticker), parent=getCo(c.parent_ticker);
+      const halted=isHalted(c.ticker)||isHalted(c.parent_ticker);
+      const parentGone=!parent||parent.status!=='listed';
+      // What the swap is worth right now, at both marks. Positive means the
+      // class is trading below its ratio and converting is the better side.
+      const edge=cls&&parent&&parent.price>0?(r*parent.price)-cls.price:0;
+      return '<div class="app-row" style="margin-bottom:4px"><div class="app-info">'
+        +'<div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">'+esc(c.ticker)+'</span> '
+        +qty.toLocaleString()+' held → up to '+(qty*r).toLocaleString()+' '+esc(c.parent_ticker)+'</div>'
+        +'<div class="app-meta">1 '+esc(c.ticker)+' = '+r+' '+esc(c.parent_ticker)
+        +(cls&&parent?' · '+fmt(cls.price)+' vs '+fmt(r*parent.price)+' of '+esc(c.parent_ticker):'')
+        // fmt() renders a negative as "$-10.00". Sign first, magnitude after.
+        +(cls&&parent&&Math.abs(edge)>=0.01?' · <span style="color:var(--'+(edge>0?'green':'red')+')">'
+            +(edge>0?'+':'-')+fmt(Math.abs(edge))+' per share converted</span>':'')
+        +(halted?' · <span style="color:var(--amber)">paused while trading is halted</span>':'')
+        +(parentGone?' · <span style="color:var(--amber)">'+esc(c.parent_ticker)+' is not trading</span>':'')
+        +'</div></div>'
+        +'<div style="display:flex;gap:6px;align-items:center">'
+        +'<input type="number" id="conv-qty-'+esc(c.ticker)+'" min="1" max="'+qty+'" step="1" value="'+qty+'" style="width:90px;font-size:12px;padding:5px 8px">'
+        +'<button class="btn btn-sm btn-primary"'+(halted||parentGone?' disabled':'')
+        // Raw ticker, not esc()'d: inside an inline handler the browser decodes
+        // the entities before the JS parser sees them, so HTML-escaping here
+        // would break the call rather than protect it. Tickers are [A-Z0-9.]
+        // and server-validated -- same as every other handler in this file.
+        +' onclick="busy(this,&quot;Converting…&quot;,()=>convertShareClassForm(&quot;'+c.ticker+'&quot;))">Convert</button>'
+        +'</div></div>';
+    }).join('')
+    +'</div>';
+}
+function convertShareClassForm(ticker){
+  const el=document.getElementById('conv-qty-'+ticker);
+  return convertShareClass(ticker,el?el.value:0); // returned for busy()
+}
+async function convertShareClass(ticker,qty){
+  const u=cu();if(!u)return;
+  const meta=getClassMeta(ticker);
+  if(!meta||meta.ticker===meta.parent_ticker)return toast(ticker+' is not a convertible share class');
+  const parent=getCo(meta.parent_ticker);if(!parent)return toast('Company not found');
+  if(parent.status!=='listed')return toast(meta.parent_ticker+' is not trading — there is nothing to convert into right now');
+  qty=parseInt(qty);
+  const held=(holdings(u)[ticker])||0;
+  if(isNaN(qty)||qty<=0)return toast('Enter how many '+ticker+' shares to convert');
+  if(qty>held)return toast('You only hold '+held+' share'+(held===1?'':'s')+' of '+ticker);
+  const r=classRatio(meta);
+  // Whole shares only, both here and server-side. With integer ratios this
+  // cannot trigger -- it exists because the column is numeric and a fractional
+  // ratio set by any other route would otherwise mint a fraction of a share.
+  if(qty*r!==Math.floor(qty*r))return toast('Converting '+qty+' '+ticker+' would produce a fractional share');
+  if(isHalted(ticker)||isHalted(meta.parent_ticker))return toast('Conversions are paused while trading is halted');
+  if(!confirm('Convert '+qty+' '+ticker+' into '+(qty*r)+' '+meta.parent_ticker+'?\n\nThis is one way — you cannot convert '+meta.parent_ticker+' back into '+ticker+'.'))return;
+  if(!checkRateLimit(u.id,'trades'))return;
+  // Runs server-side (rpc_convert_share_class): it derives the holder from the
+  // caller, locks both companies before the user row (the lock order every
+  // other RPC here uses), re-checks the holding, and retires/issues the shares
+  // in the same transaction. Nothing below is the security boundary.
+  let r2;
+  try{r2=await sb.rpc('rpc_convert_share_class',{p_ticker:ticker,p_qty:qty});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  const holder=getUser(r2.user_id)||u;
+  if(r2.holdings)holder.holdings=r2.holdings;
+  const cls=getCo(r2.class_ticker);if(cls&&r2.class_shares!=null)cls.shares=r2.class_shares;
+  if(r2.parent_shares!=null)parent.shares=r2.parent_shares;
+  await logActivity('class_convert',u.name+' converted '+r2.converted+' '+r2.class_ticker+' into '+r2.received+' '+r2.parent_ticker,
+    {ticker:r2.parent_ticker,userId:u.id,userName:u.name});
+  toast('Converted '+r2.converted+' '+r2.class_ticker+' into '+r2.received+' '+r2.parent_ticker);
+  pushBalances();render();
 }
 
 // ── Chairman: approve / reject class application ─────────
@@ -6844,13 +7028,15 @@ function renderCompanyPage(parentTicker){
       const classColor=meta?(meta.class==='A'?'b-blue':meta.class==='B'?'b-amber':'b-teal'):'b-gray';
       html+='<div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">'
         +'<div><div style="display:flex;align-items:center;gap:6px;margin-bottom:2px"><span style="font-family:var(--mono);font-weight:500">'+ticker+'</span><span class="badge '+classColor+'">'+classLabel+'</span>'+(meta&&meta.restricted?'<span class="badge b-red">Restricted</span>':'')+'</div>'
-        +'<div style="font-size:11px;color:var(--text2)">'+(meta?meta.votes_per_share+' vote'+(meta.votes_per_share!==1?'s':'')+'/share':'1 vote/share')+'</div></div>'
+        +'<div style="font-size:11px;color:var(--text2)">'+(meta?meta.votes_per_share+' vote'+(meta.votes_per_share!==1?'s':'')+'/share':'1 vote/share')
+        +(meta&&meta.ticker!==meta.parent_ticker?' · converts to '+ratioLabel(meta,meta.parent_ticker):'')+'</div></div>'
         +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Price</div><div style="font-family:var(--mono);font-weight:500">'+fmt(stock.price)+'</div></div>'
         +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Change</div><div id="chg-badge-'+chartId+'" class="'+tickerChgClass(chartId,stock)+'" style="font-family:var(--mono)">'+tickerChgBadgeHtml(chartId,stock)+'</div></div>'
         +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Available</div><div style="font-size:13px">'+stock.shares_avail.toLocaleString()+' / '+stock.shares.toLocaleString()+'</div></div>'
         +'<div><div style="font-size:11px;color:var(--text2);margin-bottom:2px">Mkt cap</div><div style="font-family:var(--mono);font-size:13px">'+fmt(stock.price*stock.shares)+'</div></div>'
         +'</div>';
     });
+    html+=renderConversionPanel(co,u);
     html+='</div>';
   }
   if(tab==='overview'){
@@ -7053,18 +7239,7 @@ function renderCompanyPage(parentTicker){
     html+='<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Shareholders <span id="shareholder-loading" style="font-size:11px;font-weight:400;color:var(--text2)">Loading fresh data...</span></div><div id="shareholder-table">';
     if(!shareholders.length){html+='<div class="empty">No shareholders yet.</div>';}
     else{
-      html+='<table><thead><tr><th>Holder</th>'
-        +allTickers.map(t=>'<th class="r">'+t+'</th>').join('')
-        +'<th class="r">Total</th><th class="r">Voting power</th></tr></thead><tbody>'
-        +shareholders.map(sh=>{
-          const total=Object.values(sh.shares).reduce((s,q)=>s+q,0);
-          const vp=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);
-          return '<tr><td style="font-weight:500">'+esc(sh.name)+'</td>'
-            +allTickers.map(t=>'<td class="r" style="font-family:var(--mono)">'+(sh.shares[t]||0)+'</td>').join('')
-            +'<td class="r" style="font-weight:500">'+total+'</td>'
-            +'<td class="r" style="color:var(--amber)">'+vp+'</td></tr>';
-        }).join('')
-        +'</tbody></table>';
+      html+=shareholderTableHTML(shareholders,allTickers);
     }
     // Also trigger async fresh fetch
     sb.get('jex_users','role=in.(student,company)&status=eq.approved&select='+JEX_USERS_SAFE_SELECT).then(freshUsers=>{
@@ -7074,10 +7249,7 @@ function renderCompanyPage(parentTicker){
       const el=document.getElementById('shareholder-table');if(!el)return;
       const freshSh=Object.values(freshMap);
       if(!freshSh.length){el.innerHTML='<div class="empty">No shareholders yet.</div>';return;}
-      el.innerHTML='<table><thead><tr><th>Holder</th>'
-        +allTickers.map(t=>'<th class="r">'+t+'</th>').join('')
-        +'<th class="r">Total</th><th class="r">Voting power</th></tr></thead><tbody>'
-        +freshSh.map(sh=>{const total=Object.values(sh.shares).reduce((s,q)=>s+q,0);const vp=allTickers.reduce((s,t)=>{const meta=getClassMeta(t);const vps=meta?meta.votes_per_share:1;return s+(sh.shares[t]||0)*vps;},0);return '<tr><td style="font-weight:500">'+esc(sh.name)+'</td>'+allTickers.map(t=>'<td class="r" style="font-family:var(--mono)">'+(sh.shares[t]||0)+'</td>').join('')+'<td class="r" style="font-weight:500">'+total+'</td><td class="r" style="color:var(--amber)">'+vp+'</td></tr>';}).join('')+'</tbody></table>';
+      el.innerHTML=shareholderTableHTML(freshSh,allTickers);
     }).catch(()=>{const loadingLabel=document.getElementById('shareholder-loading');if(loadingLabel)loadingLabel.remove();});
     html+='</div></div>';
   }
@@ -7975,8 +8147,10 @@ async function convertBaseClass(parentTicker,classType,votesPerShare,restricted,
   // the form, so a conversion can no longer be filed claiming any numbers
   // at all.
   let app;
+  // Ratio 1, and the server forces it to 1 regardless: a conversion
+  // reclassifies the SAME shares, so one of them is still one of them.
   try{app=await sb.rpc('rpc_submit_class_application',{p_parent_ticker:parentTicker,p_class:classType,
-    p_votes_per_share:votesPerShare,p_shares:null,p_price:null,p_restricted:!!restricted,
+    p_votes_per_share:votesPerShare,p_shares:null,p_conversion_ratio:1,p_restricted:!!restricted,
     p_whitelist:whitelistIds||[],p_reason:reason||'',p_convert:true});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.classApps.push(app);
@@ -8193,6 +8367,7 @@ function renderClassesTab(co){
         +'<div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">'+c.ticker+'</span> <span class="badge b-amber">Class '+c.class+'</span>'
         +(c.restricted?'<span class="badge b-red" style="margin-left:4px">Restricted</span>':'')+'</div>'
         +'<div class="app-meta">'+c.votes_per_share+' vote'+(c.votes_per_share!==1?'s':'')+'/share'
+        +' · converts to '+ratioLabel(c,co.ticker)
         +(co2?' · '+co2.shares.toLocaleString()+' shares · '+fmt(co2.price):'')
         +(c.restricted?' · Whitelist: '+classWhitelist(c).map(id=>getUser(id)?.name||id).join(', '):'')+'</div>'
         +'</div></div>';
@@ -8233,8 +8408,10 @@ function renderClassesTab(co){
     +'</select></div>'
     +'<div class="grid2" style="margin-bottom:12px">'
     +'<div class="frow" style="margin-bottom:0"><label class="flabel">Votes per share</label><input type="number" id="cls-votes" value="1" min="0" placeholder="e.g. 10"></div>'
-    +'<div class="frow" style="margin-bottom:0"><label class="flabel">IPO price ($)</label><input type="number" id="cls-price" placeholder="25.00" min="0.01" step="0.01"></div>'
+    +'<div class="frow" style="margin-bottom:0"><label class="flabel">Conversion ratio '+infoBubble('One '+co.ticker+' Class share is worth this many '+co.ticker+'. It sets the listing price ('+co.ticker+'’s price × the ratio, derived when the Chairman approves), it sets the dividend (a class share is paid as that many base shares), and it is a right: whoever holds a class share can convert it into that many '+co.ticker+' at any time. That last part is what stops the class trading far above its ratio — anyone could convert and sell into '+co.ticker+'.')+'</label>'
+    +'<input type="number" id="cls-ratio" value="1" min="1" max="100" step="1" oninput="updateClassPricePreview(&quot;'+co.ticker+'&quot;)"></div>'
     +'</div>'
+    +'<div id="cls-price-preview" style="font-size:12px;color:var(--text2);margin:-4px 0 12px">'+classPricePreview(co,1)+'</div>'
     +'<div class="frow"><label class="flabel">Total shares to issue</label><input type="number" id="cls-shares" placeholder="1000" min="1"></div>'
     +'<div class="frow"><label class="flabel">Restrict to specific students? (optional)</label>'
     +'<select id="cls-restricted"><option value="">No restriction — open to all</option><option value="yes">Yes — restricted to selected students</option></select></div>'
@@ -8251,24 +8428,42 @@ function renderClassesTab(co){
       const isConv=a.reason&&a.reason.startsWith('[CONVERT]');
       return '<div class="app-row"><div class="app-info">'
         +'<div class="app-name">'+(isConv?'Convert ':'New class ')+'<span class="badge b-gray" style="font-family:var(--mono)">'+a.proposed_ticker+'</span> Class '+a.class+'</div>'
-        +'<div class="app-meta">'+a.votes_per_share+' vote'+(a.votes_per_share!==1?'s':'')+'/share'+(isConv?'':' · '+a.shares.toLocaleString()+' shares @ '+fmt(a.price))+(a.restricted?' · Restricted':'')+'</div>'
+        +'<div class="app-meta">'+a.votes_per_share+' vote'+(a.votes_per_share!==1?'s':'')+'/share'
+        +(isConv?'':' · converts to '+ratioLabel(Number(a.conversion_ratio)||1,a.parent_ticker)+' · '+a.shares.toLocaleString()+' shares @ ~'+fmt(a.price))
+        +(a.restricted?' · Restricted':'')+'</div>'
         +'<div class="app-meta">'+a.ts+'</div></div>'
         +'<span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-amber')+'">'+a.status+'</span></div>';
     }).join('')+'</div>';
   }
   return html;
 }
+// What the class will list at, spelled out before it is applied for. The number
+// the server actually uses is derived again at approval from the parent price
+// at THAT moment, so this says so rather than presenting it as fixed.
+function classPricePreview(co,ratio){
+  const r=Number(ratio);
+  if(!(r>=1)||r!==Math.floor(r)||r>100)return '<span style="color:var(--amber)">Enter a whole number from 1 to 100.</span>';
+  if(!(co&&co.price>0))return '<span style="color:var(--amber)">'+esc(co?co.ticker:'This stock')+' has no price to anchor a class to yet.</span>';
+  return 'Lists at <strong style="font-family:var(--mono)">'+fmt(co.price*r)+'</strong> — '+esc(co.ticker)+' at '+fmt(co.price)
+    +(r===1?'':' × '+r)+'. Recalculated from '+esc(co.ticker)+'’s price when the Chairman approves it.'
+    +(r===1?'':' Each class share is paid '+r+'× the dividend, and converts into '+r+' '+esc(co.ticker)+'.');
+}
+function updateClassPricePreview(parentTicker){
+  const el=document.getElementById('cls-price-preview');if(!el)return;
+  const co=getCo(parentTicker);if(!co)return;
+  el.innerHTML=classPricePreview(co,document.getElementById('cls-ratio')?.value);
+}
 function submitClassAppForm(parentTicker){
   const clsType=document.getElementById('cls-type')?.value;
   const votes=document.getElementById('cls-votes')?.value;
-  const price=document.getElementById('cls-price')?.value;
+  const ratio=document.getElementById('cls-ratio')?.value;
   const shares=document.getElementById('cls-shares')?.value;
   const restrictedVal=document.getElementById('cls-restricted')?.value;
   const restricted=restrictedVal==='yes';
   const whitelistEl=document.getElementById('cls-whitelist');
   const whitelist=restricted&&whitelistEl?Array.from(whitelistEl.selectedOptions).map(o=>o.value):[];
   const reason=document.getElementById('cls-reason')?.value;
-  return submitClassApplication(parentTicker,clsType,votes,shares,price,restricted,whitelist,reason); // returned for busy()
+  return submitClassApplication(parentTicker,clsType,votes,shares,ratio,restricted,whitelist,reason); // returned for busy()
 }
 // Toggle whitelist UI
 function previewLogo(input){
@@ -8880,7 +9075,16 @@ function renderAdminClasses(){
     +(pending.length?'<span class="badge b-amber" style="margin-left:4px">'+pending.length+'</span>':'')+'</div>'
     +(pending.length?pending.map(a=>'<div class="app-row"><div class="app-info">'
       +'<div class="app-name">'+esc(a.company_name)+' — <span class="badge b-gray" style="font-family:var(--mono)">'+a.proposed_ticker+'</span> Class '+a.class+'</div>'
-      +'<div class="app-meta">'+a.votes_per_share+' vote'+(a.votes_per_share!==1?'s':'')+'/share · '+a.shares.toLocaleString()+' shares @ '+fmt(a.price)
+      +'<div class="app-meta">'+a.votes_per_share+' vote'+(a.votes_per_share!==1?'s':'')+'/share · '+a.shares.toLocaleString()+' shares'
+      // The price is derived from the parent at the moment of approval, so what
+      // this row shows is what approving RIGHT NOW would list it at -- not the
+      // number filed when the application was written, which may be days stale.
+      +(a.reason&&a.reason.startsWith('[CONVERT]')?'':(()=>{
+        const parent=getCo(a.parent_ticker),r=Number(a.conversion_ratio)||1;
+        const at=parent&&parent.price>0?fmt(parent.price*r):fmt(a.price);
+        return ' · converts to '+ratioLabel(r,a.parent_ticker)+' · lists at '+at
+          +(parent&&parent.price>0?' ('+a.parent_ticker+' '+fmt(parent.price)+(r===1?'':' × '+r)+', as of now)':'');
+      })())
       +(a.restricted?' · <span class="badge b-red">Restricted</span> to: '+esc(classWhitelist(a).map(id=>getUser(id)?.name||id).join(', ')):'')+'</div>'
       +(a.reason?'<div class="app-meta">Reason: '+esc(a.reason.replace('[CONVERT]','[Conversion]'))+'</div>':'')
       +'</div><div class="btn-row">'
@@ -8900,7 +9104,9 @@ function renderAdminClasses(){
               +'<div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">'+c.ticker+'</span> <span class="badge b-amber">Class '+c.class+'</span>'
               +(isConv?'<span class="badge b-blue" style="margin-left:4px">Conversion</span>':'<span class="badge b-teal" style="margin-left:4px">New class</span>')
               +(c.restricted?'<span class="badge b-red" style="margin-left:4px">Restricted</span>':'')+'</div>'
-              +'<div class="app-meta">'+c.votes_per_share+' vote'+(c.votes_per_share!==1?'s':'')+'/share'+(c.restricted?' · '+classWhitelist(c).length+' whitelisted':'')+'</div>'
+              +'<div class="app-meta">'+c.votes_per_share+' vote'+(c.votes_per_share!==1?'s':'')+'/share'
+              +(isConv?'':' · converts to '+ratioLabel(c,c.parent_ticker))
+              +(c.restricted?' · '+classWhitelist(c).length+' whitelisted':'')+'</div>'
               +'</div>'
               +'<button class="btn btn-sm btn-danger" onclick="removeShareClass(&quot;'+c.ticker+'&quot;)">Remove</button>'
               +'</div>';
@@ -9812,7 +10018,7 @@ function renderTreasurerBudgetWarnings(){
 
 function renderActivityLog(){
   const f=UI.activityFilter||{};
-  const typeIcon={trade:'↔',ipo:'🏢',dividend:'💰',news:'📰',announcement:'📢',limit_fill:'⚡',balance_adj:'💵',session:'🕐',registration:'✓',limit_order:'📋',flag:'🚩',cofound:'👥',founder_alloc:'🎁'};
+  const typeIcon={trade:'↔',ipo:'🏢',dividend:'💰',news:'📰',announcement:'📢',limit_fill:'⚡',balance_adj:'💵',session:'🕐',registration:'✓',limit_order:'📋',flag:'🚩',cofound:'👥',founder_alloc:'🎁',class_app:'📄',class_approved:'📄',class_convert:'🔁'};
   const typeBadge={trade:'b-gray',ipo:'b-green',dividend:'b-teal',news:'b-amber',announcement:'b-blue',limit_fill:'b-purple',balance_adj:'b-coral',session:'b-gray',registration:'b-blue',limit_order:'b-gray'};
   const types=[...new Set(DB.activity.map(a=>a.type))].sort();
   const filtered=DB.activity.filter(a=>{

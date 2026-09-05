@@ -129,7 +129,71 @@ check('...and refuses on the combined total, like the server',
 check('...and no longer refuses just because nobody holds it directly',
       !/if\(!sh\.length\)return toast\('No shareholders yet'\)/.test(src));
 check('the direct half rounds once per holder, not once per ticker',
-      /const shares=allT\.reduce[\s\S]{0,120}?Math\.round\(shares\*perShare\*100\)\/100/.test(src));
+      /const equiv=baseEquivalent\(u,allT\);[\s\S]{0,120}?Math\.round\(equiv\*perShare\*100\)\/100/.test(src));
+
+// ── conversion ratios ──
+//
+// A dividend is paid per unit of ECONOMIC CLAIM. One ACME.B at ratio 5 is five
+// ACME, so it is paid five times, not once. Paying it flat per share -- which
+// is what the code did, and what the server still does until the dividend
+// migration lands -- is a live exploit: list a class at a fifth of the parent's
+// price and collect five times the yield for the same claim.
+//
+// classRatio() has to answer 1 for every shape that is not a real ratio,
+// because it multiplies a payout. A 0, a null, a missing column or a string
+// that does not parse must not silently zero out somebody's dividend.
+eval(grabFn('classRatio').replace('function classRatio','global.classRatio=function'));
+eval(grabFn('baseEquivalent').replace('function baseEquivalent','global.baseEquivalent=function'));
+eval(grabFn('getClassMeta').replace('function getClassMeta','global.getClassMeta=function'));
+global.holdings=u=>u.holdings||{};
+
+const withClasses=classes=>{global.DB={shareClasses:classes,users:[],companies:[]};};
+
+withClasses([{ticker:'ACME.B',parent_ticker:'ACME',conversion_ratio:5}]);
+check('a class share is worth its ratio in base shares', classRatio('ACME.B')===5);
+check('the base class is 1', classRatio('ACME')===1);
+check('an unknown ticker is 1', classRatio('NOPE')===1);
+
+// Every shape the column can arrive in. All of them must be 1, never 0.
+for(const [v,label] of [[null,'null'],[undefined,'missing'],[0,'zero'],[-3,'negative'],
+                        ['','empty string'],['abc','unparseable'],[NaN,'NaN']]){
+  withClasses([{ticker:'X.B',parent_ticker:'X',conversion_ratio:v}]);
+  check('a '+label+' ratio reads as 1, not 0', classRatio('X.B')===1, String(classRatio('X.B')));
+}
+// A ratio that arrives as a numeric string (which is how Postgres numeric
+// comes back over PostgREST for some clients) still has to work.
+withClasses([{ticker:'X.B',parent_ticker:'X',conversion_ratio:'5'}]);
+check('a numeric string ratio still reads as 5', classRatio('X.B')===5);
+// And the pre-migration world, where the column does not exist at all.
+withClasses([{ticker:'X.B',parent_ticker:'X'}]);
+check('a row with no ratio column at all reads as 1', classRatio('X.B')===1);
+
+withClasses([{ticker:'ACME.B',parent_ticker:'ACME',conversion_ratio:5},
+             {ticker:'ACME.C',parent_ticker:'ACME',conversion_ratio:1}]);
+const holder={holdings:{ACME:10,'ACME.B':4,'ACME.C':7}};
+check('base equivalents weight each class by its ratio',
+      baseEquivalent(holder,['ACME','ACME.B','ACME.C'])===37, // 10 + 20 + 7
+      String(baseEquivalent(holder,['ACME','ACME.B','ACME.C'])));
+check('a holder of nothing is zero, not NaN',
+      baseEquivalent({holdings:null},['ACME','ACME.B'])===0);
+check('a ticker the holder does not own contributes nothing',
+      baseEquivalent({holdings:{ACME:1}},['ACME','ACME.B'])===1);
+
+// The whole point, stated as the exploit it closes: a class listed at a fifth
+// of the parent must not collect the same dividend per share.
+withClasses([{ticker:'ACME.B',parent_ticker:'ACME',conversion_ratio:5}]);
+const cheat={holdings:{'ACME.B':100}};      // 100 shares, listed at parent/5
+const honest={holdings:{ACME:500}};         // the same economic claim
+check('a cheap class and the base shares it converts to are paid the same',
+      baseEquivalent(cheat,['ACME','ACME.B'])===baseEquivalent(honest,['ACME','ACME.B']),
+      baseEquivalent(cheat,['ACME','ACME.B'])+' vs '+baseEquivalent(honest,['ACME','ACME.B']));
+
+// And the caller actually uses the weighted number in BOTH places it decides
+// something -- the threshold total and the per-holder line in the confirm().
+check('the confirm() line quotes base-equivalent amounts too',
+      /sh\.map\(s=>s\.name\+': '\+fmt\(baseEquivalent\(s,allT\)\*perShare\)\)/.test(src));
+check('the old flat per-share sum is gone',
+      !/const shares=allT\.reduce\(\(n,t\)=>n\+\(\(\(u\.holdings&&u\.holdings\[t\]\)\|\|0\)\),0\)/.test(src));
 
 console.log(fails?('\n'+fails+' FAILURE(S)'):('\nAll dividend-total checks passed.'));
 process.exit(fails?1:0);
