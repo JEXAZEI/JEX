@@ -43,11 +43,12 @@ function grabFn(name){
   for(;i<src.length;i++){ if(src[i]==='{')d++; else if(src[i]==='}'){d--;if(!d)return src.slice(m.index,i+1);} }
   throw new Error('unterminated: '+name);
 }
-eval(grabFn('dividendPassThrough').replace('function dividendPassThrough','global.dividendPassThrough=function'));
+const bind=n=>eval(grabFn(n).replace('function '+n,'global.'+n+'=function'));
+bind('dividendPassThrough');bind('getClassMeta');bind('classRatio');bind('getCompanyTickers');
 
 const stu=(id,holdings,extra)=>Object.assign({id,name:id,role:'student',status:'approved',holdings},extra||{});
-const setup=(fundHoldings,fundUnits,users)=>{
-  global.DB={users,companies:[
+const setup=(fundHoldings,fundUnits,users,shareClasses)=>{
+  global.DB={users,shareClasses:shareClasses||[],companies:[
     {ticker:'JXI',is_index_fund:true,shares:fundUnits,fund_holdings:fundHoldings},
     {ticker:'ACME',is_index_fund:false,shares:1000,price:10}]};
 };
@@ -130,6 +131,46 @@ check('...and no longer refuses just because nobody holds it directly',
       !/if\(!sh\.length\)return toast\('No shareholders yet'\)/.test(src));
 check('the direct half rounds once per holder, not once per ticker',
       /const equiv=baseEquivalent\(u,allT\);[\s\S]{0,120}?Math\.round\(equiv\*perShare\*100\)\/100/.test(src));
+
+// ── the index fund holds the CLASSES too ──
+//
+// A separate bug, found reading rpc_pay_dividend's real source. Both the RPC
+// and this preview looked at the parent ticker alone:
+//
+//     where is_index_fund and coalesce((fund_holdings->>p_ticker)::numeric,0) > 0
+//
+// But computeIndex() counts every listed ticker as its own constituent, base
+// class and share classes alike -- only a RESTRICTED class is excluded -- so an
+// index fund can hold ACME.B. Its class shares were passed over entirely: the
+// unit-holders under-paid and the company under-charged by the same amount. It
+// is the conservative direction, and it predates conversion rights, but a ratio
+// makes it bigger.
+//
+// These numbers are the same ones the migration was tested against on a real
+// PostgreSQL: a fund holding 100 ACME + 20 ACME.B at ratio 5 is 200 base
+// equivalents, so $1.00/share passes $200 through, not $100.
+const withClass=[{ticker:'ACME.B',parent_ticker:'ACME',conversion_ratio:5}];
+setup({ACME:100,'ACME.B':20},100,[stu('a',{JXI:100})],withClass);
+let f=dividendPassThrough('ACME',1);
+check('a fund holding a share class passes that through too', f.total===200, String(f.total));
+setup({'ACME.B':20},100,[stu('a',{JXI:100})],withClass);
+check('...even when the fund holds ONLY the class',
+      dividendPassThrough('ACME',1).total===100, String(dividendPassThrough('ACME',1).total));
+setup({ACME:100,'ACME.B':20},100,[stu('a',{JXI:100})],
+      [{ticker:'ACME.B',parent_ticker:'ACME',conversion_ratio:1}]);
+check('a 1:1 class is worth its face count', dividendPassThrough('ACME',1).total===120);
+// A class of a DIFFERENT company must not be swept in.
+setup({ACME:100,'BETA.B':50},100,[stu('a',{JXI:100})],
+      [{ticker:'ACME.B',parent_ticker:'ACME',conversion_ratio:5},
+       {ticker:'BETA.B',parent_ticker:'BETA',conversion_ratio:5}]);
+check('another company\'s class is not counted', dividendPassThrough('ACME',1).total===100,
+      String(dividendPassThrough('ACME',1).total));
+// A reclassified base stock has a share-class row whose ticker IS the parent.
+// It must be counted once, at weight 1 -- not doubled and not re-weighted.
+setup({ACME:100},100,[stu('a',{JXI:100})],
+      [{ticker:'ACME',parent_ticker:'ACME',conversion_ratio:1}]);
+check('a reclassified base stock is counted once, at face',
+      dividendPassThrough('ACME',1).total===100, String(dividendPassThrough('ACME',1).total));
 
 // ── conversion ratios ──
 //

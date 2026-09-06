@@ -5160,10 +5160,21 @@ async function doBuyback(ticker,qty){
 // were working from a number smaller than the one the server would compute, so
 // a dividend could look payable here and be refused there.
 function dividendPassThrough(ticker,perShare){
+  // Every ticker of the company, weighted by claim -- not just the parent.
+  //
+  // computeIndex() counts each listed ticker as its own constituent, base class
+  // and share classes alike (only a RESTRICTED class is excluded), so an index
+  // fund can and does hold ACME.B. This looked at p_ticker alone, and so did
+  // the server: the fund's class shares were passed over entirely, so its
+  // unit-holders were under-paid and the company under-charged by the same
+  // amount. A ratio makes it bigger -- a ratio-5 class was five times the claim
+  // being skipped.
+  const tickers=getCompanyTickers(ticker);
   let total=0;const cuts=[];
   for(const f of DB.companies||[]){
     if(!f.is_index_fund)continue;
-    const fundShares=Number((f.fund_holdings||{})[ticker]||0);
+    const fh=f.fund_holdings||{};
+    const fundShares=tickers.reduce((n,t)=>n+(Number(fh[t])||0)*classRatio(t),0);
     if(!(fundShares>0))continue;
     const totalUnits=Number(f.shares||0);
     let eligible=0;
@@ -5944,7 +5955,7 @@ function dilPreview(co,ns){if(!ns||ns<=0)return'';const ta=co.shares+ns,np=Math.
 // ═══════════════════════════════════════════════
 
 // Helper: get class metadata for a ticker (or null if base class)
-function getClassMeta(ticker){return DB.shareClasses.find(c=>c.ticker===ticker)||null;}
+function getClassMeta(ticker){return (DB.shareClasses||[]).find(c=>c.ticker===ticker)||null;}
 // A share class's CONVERSION RATIO: how many base shares one class share is
 // worth. One ACME.B at ratio 5 has the economic claim of five ACME, so it lists
 // at five times the base price, collects five times the dividend, and can be
@@ -5981,7 +5992,7 @@ function getCompanyTickers(parentTicker){
   const base=[parentTicker];
   // Classes whose ticker differs from the parent (new classes like BWV.B)
   // Conversions share the same ticker as parent so we exclude duplicates
-  const classes=DB.shareClasses
+  const classes=(DB.shareClasses||[])
     .filter(c=>c.parent_ticker===parentTicker&&c.ticker!==parentTicker)
     .map(c=>c.ticker);
   return [...base,...classes];
