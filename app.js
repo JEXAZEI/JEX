@@ -988,10 +988,10 @@ function indexSeries(co){
       if(j>=0&&bases[i]>0){sum+=h[j].p/bases[i];n++;}
     }
     if(!n)continue;
-    // The index level is avg(ratio) * 1000; a unit is a tenth of that, which
-    // is what jex_companies.price holds for an index row and what every
-    // display path already expects. So a unit is avg * 100.
-    out.push({t,p:Math.round((sum/n)*100*100)/100});
+    // The index level is avg(ratio) * 1000. A unit is that divided by the
+    // session's index_unit_divisor -- see indexUnitDivisor() above for why that
+    // is a setting and not a 10.
+    out.push({t,p:Math.round((sum/n)*(1000/indexUnitDivisor())*100)/100});
   }
   return out;
 }
@@ -1013,6 +1013,30 @@ function indexSeries(co){
 // constituent has moved, and that stale price is the whole reason this
 // function exists.
 const _indexSeriesCache=new Map();
+// ── What one index unit costs ─────────────────────────────
+//
+// The index LEVEL is avg(ratio) * 1000, the standard base-1000 convention. A
+// tradeable unit is a fraction of that, and the fraction is the only thing that
+// decides whether students can actually buy the index.
+//
+// It was hardcoded to a tenth, which put a JXI unit at $119.64. The richest
+// participant in this classroom has about $600 -- one unit was a fifth of
+// everything they owned, so the one instrument that teaches diversification was
+// the one nobody could use. That is a denomination problem, not a pricing one:
+// the unit price is arbitrary, and what matters is the fraction of the basket
+// you own. SPY trades near a tenth of the S&P 500 for exactly this reason, and
+// ETFs split their units when the price drifts out of retail reach.
+//
+// So it is a session setting now, read by the client AND by every RPC that
+// prices a unit, because there are ten of those and a hardcoded copy in each is
+// how a student ends up buying at one price and selling at another.
+//
+// Falls back to 10 -- the pre-migration value -- so this is correct before and
+// after the column exists.
+const indexUnitDivisor=()=>{
+  const d=Number(DB.session&&DB.session.index_unit_divisor);
+  return d>0?d:10;
+};
 function syncIndexRows(){
   for(const co of DB.companies||[]){
     if(!co.is_index_fund)continue;
@@ -1077,7 +1101,7 @@ async function snapshotJXI(){
       // poll/reload, even though the underlying data was already updated.
       const jxiCo=getCo('JXI');
       if(jxiCo&&rec.value!=null){
-        const etfPrice=Math.round(rec.value/10*100)/100;
+        const etfPrice=Math.round(rec.value/indexUnitDivisor()*100)/100;
         jxiCo.price=etfPrice;
         jxiCo.price_history=[...(jxiCo.price_history||[]),{p:etfPrice,t:rec.ts||new Date().toISOString()}];
       }

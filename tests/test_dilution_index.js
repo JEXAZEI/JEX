@@ -26,6 +26,7 @@ const fs=require('fs'),path=require('path');
 const src=fs.readFileSync(path.join(__dirname,'..','app.js'),'utf8');
 let fails=0;
 const check=(l,c,e)=>{if(c)console.log('PASS: '+l);else{fails++;console.log('FAIL: '+l+(e?' -- '+e:''));}};
+global.indexUnitDivisor=()=>{const d=Number(global.DB&&global.DB.session&&global.DB.session.index_unit_divisor);return d>0?d:10;};
 
 function grabFn(name){
   const m=new RegExp('^(?:async )?function '+name+'\\(','m').exec(src);
