@@ -2176,6 +2176,11 @@ setInterval(()=>{sessionAutoTick();if(DB.session.ends_at&&DB.session.status==='o
 
 // ── Auto-refresh: pull latest data every 20 seconds ──────
 let _lastRefresh=0;
+// Set while a manually-requested refresh (the M key) is in flight. autoRefresh
+// rate-limits itself with _lastRefresh, but a manual refresh deliberately
+// bypasses that -- and key repeat means a held-down M fires continuously, which
+// without this would stack 15-query sweeps on top of each other.
+let _manualRefreshing=false;
 // Returns a short reason string when a realtime/auto-refresh re-render
 // should be skipped, or '' (falsy, so existing `if(!userIsFillingForm())`
 // call sites keep working unchanged) when it's safe to render. Returning
@@ -2490,7 +2495,36 @@ document.addEventListener('keydown',function(e){
   }
   const u=cu();
   if(u?.role==='student'||u?.role==='company'){
-    if(key==='m'){setTab('market');return;}
+    // M opens the Market and pulls fresh data.
+    //
+    // It used to only switch tabs. "The prices look stale" is the reason a
+    // student reaches for a refresh key at all, and the background sweep backs
+    // off to 60s whenever realtime is healthy -- so on a quiet socket, waiting
+    // for it genuinely does feel like nothing is happening.
+    //
+    // _lastRefresh=0 is the same idiom the visibilitychange handler uses to
+    // force a sweep past that rate limit. The refresh is a read: it fetches and
+    // repaints, and moves nothing. tests/test_shortcuts.js holds the whole
+    // handler to that rule.
+    //
+    // The toast fires when the data is actually back, not when the key is
+    // pressed, so it reports what happened rather than what was requested.
+    if(key==='m'){
+      setTab('market');
+      if(!_manualRefreshing){
+        _manualRefreshing=true;
+        _lastRefresh=0;
+        Promise.resolve(autoRefresh()).then(()=>{
+          toast('Market refreshed');
+        },()=>{
+          // autoRefresh swallows its own errors, so this is belt-and-braces --
+          // but a refresh that silently did nothing is worse than one that says
+          // it could not.
+          toast('Could not refresh the market — check your connection');
+        }).then(()=>{_manualRefreshing=false;});
+      }
+      return;
+    }
     if(key==='e'){setTab('exchange');return;}
     if(key==='p'){setTab('portfolio');return;}
     if(key==='f'){setTab('funds');return;}
@@ -10482,7 +10516,7 @@ function setTab(t){UI.navTab=t;UI.panelTicker=null;destroyCharts();render();}
 // keypress must never move money, because on a shared Chromebook that is a
 // stray elbow away.
 const SHORTCUTS=[
-  {keys:'M',      what:'Market'},
+  {keys:'M',      what:'Market — and refreshes prices'},
   {keys:'E',      what:'Exchange'},
   {keys:'P',      what:'Portfolio'},
   {keys:'F',      what:'Funds'},
