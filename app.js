@@ -2447,6 +2447,60 @@ if(typeof document!=='undefined'){
   });
 }
 
+// ── Navigating with a shortcut also pulls fresh data ──────
+//
+// Every navigation key goes through here. The reason applies to all of them,
+// not just the Market: the background sweep backs off to 60s while realtime is
+// healthy, so on a quiet room any tab can sit on minute-old numbers while
+// everything is working perfectly -- and "nothing is happening" is
+// indistinguishable from "nothing has happened".
+//
+// _lastRefresh=0 is the same idiom the visibilitychange handler uses to force a
+// sweep past autoRefresh's own rate limit. Calling autoRefresh() plainly would
+// return immediately almost every time, so the keys would appear dead in
+// exactly the situation that makes someone press them.
+//
+// Two things this must NOT do, both learned the hard way from M:
+//
+//   Repaint twice. setTab does destroyCharts() then render(), and charts
+//   rebuild with an animation. Calling it while you are ALREADY on the tab
+//   tears the chart down and re-animates it with the data already on screen,
+//   then does it again when the fetch lands -- the graph visibly moves twice
+//   for one keypress, and the first move shows nothing new. So navigate only
+//   when actually navigating.
+//
+//   Stack sweeps. autoRefresh is a 15-query fan-out and key repeat fires
+//   continuously. _manualRefreshing keeps one in flight at a time, and it is
+//   deliberately shared across every key: pressing M then P in quick
+//   succession is one sweep, not two.
+//
+// This only ever reads. tests/test_shortcuts.js holds the whole handler to
+// "a keypress never moves money", and a refresh is a fetch and a repaint.
+const TAB_LABELS={market:'Market',exchange:'Exchange',portfolio:'Portfolio',
+  funds:'Funds',leaderboard:'Leaderboard',trades:'Trades',orders:'Orders',
+  notifications:'Notifications'};
+function navRefresh(tab){
+  if(UI.navTab!==tab||UI.companyPage){
+    // Notifications has never gone through setTab, which also destroys charts
+    // and clears the panel ticker. Switching it over here would be an
+    // unrelated behaviour change smuggled in behind a refresh feature.
+    if(tab==='notifications'){UI.navTab=tab;render();}
+    else setTab(tab);
+  }
+  if(_manualRefreshing)return;
+  _manualRefreshing=true;
+  _lastRefresh=0;
+  // The toast fires when the data is actually back, not when the key goes
+  // down, so it reports what happened rather than what was asked for.
+  Promise.resolve(autoRefresh()).then(()=>{
+    toast((TAB_LABELS[tab]||'Data')+' refreshed');
+  },()=>{
+    // autoRefresh swallows its own errors, so this is belt-and-braces -- but a
+    // refresh that silently did nothing is worse than one that says it could not.
+    toast('Could not refresh — check your connection');
+  }).then(()=>{_manualRefreshing=false;});
+}
+
 // ── Keyboard shortcuts ────────────────────────────────────
 document.addEventListener('keydown',function(e){
   // Not every keydown carries a key.
@@ -2495,42 +2549,13 @@ document.addEventListener('keydown',function(e){
   }
   const u=cu();
   if(u?.role==='student'||u?.role==='company'){
-    // M opens the Market and pulls fresh data.
-    //
-    // It used to only switch tabs. "The prices look stale" is the reason a
-    // student reaches for a refresh key at all, and the background sweep backs
-    // off to 60s whenever realtime is healthy -- so on a quiet socket, waiting
-    // for it genuinely does feel like nothing is happening.
-    //
-    // _lastRefresh=0 is the same idiom the visibilitychange handler uses to
-    // force a sweep past that rate limit. The refresh is a read: it fetches and
-    // repaints, and moves nothing. tests/test_shortcuts.js holds the whole
-    // handler to that rule.
-    //
-    // The toast fires when the data is actually back, not when the key is
-    // pressed, so it reports what happened rather than what was requested.
-    if(key==='m'){
-      setTab('market');
-      if(!_manualRefreshing){
-        _manualRefreshing=true;
-        _lastRefresh=0;
-        Promise.resolve(autoRefresh()).then(()=>{
-          toast('Market refreshed');
-        },()=>{
-          // autoRefresh swallows its own errors, so this is belt-and-braces --
-          // but a refresh that silently did nothing is worse than one that says
-          // it could not.
-          toast('Could not refresh the market — check your connection');
-        }).then(()=>{_manualRefreshing=false;});
-      }
-      return;
-    }
-    if(key==='e'){setTab('exchange');return;}
-    if(key==='p'){setTab('portfolio');return;}
-    if(key==='f'){setTab('funds');return;}
-    if(key==='l'){setTab('leaderboard');return;}
-    if(key==='t'){setTab('trades');return;}
-    if(key==='n'){UI.navTab='notifications';render();return;}
+    if(key==='m'){navRefresh('market');return;}
+    if(key==='e'){navRefresh('exchange');return;}
+    if(key==='p'){navRefresh('portfolio');return;}
+    if(key==='f'){navRefresh('funds');return;}
+    if(key==='l'){navRefresh('leaderboard');return;}
+    if(key==='t'){navRefresh('trades');return;}
+    if(key==='n'){navRefresh('notifications');return;}
     // Focus the market search. Switches to the Market tab first if needed,
     // since the box only exists there. The focus is deferred because the tab
     // switch re-renders and destroys the element this would otherwise grab.
@@ -2566,7 +2591,7 @@ document.addEventListener('keydown',function(e){
       }
       if(key==='o'){UI.companyPageTab='overview';render();return;}
     } else {
-      if(key==='o'){setTab('orders');return;}
+      if(key==='o'){navRefresh('orders');return;}
     }
   }
 });
@@ -10516,7 +10541,7 @@ function setTab(t){UI.navTab=t;UI.panelTicker=null;destroyCharts();render();}
 // keypress must never move money, because on a shared Chromebook that is a
 // stray elbow away.
 const SHORTCUTS=[
-  {keys:'M',      what:'Market — and refreshes prices'},
+  {keys:'M',      what:'Market'},
   {keys:'E',      what:'Exchange'},
   {keys:'P',      what:'Portfolio'},
   {keys:'F',      what:'Funds'},
@@ -10549,6 +10574,9 @@ function renderShortcutHelp(){
         Shortcuts are ignored while you are typing in a box, so they never
         interrupt a quantity or a password. None of them place an order —
         buying and selling always needs the button.
+        <br><br>
+        The tab keys also refresh — press the one you are already on to pull
+        the latest prices without leaving the page.
       </div>
     </div>
   </div>`;

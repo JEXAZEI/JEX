@@ -226,13 +226,28 @@ check('the help key works for admins too, not just students',
 const fnSrc=handler.slice(handler.indexOf('function(e){'));
 let acted=[];
 global.document={activeElement:null,getElementById:()=>null};
-global.UI=Object.assign(global.UI||{},{userId:'u1',navTab:'market',companyPage:null,
+// Starts somewhere OTHER than the Market. M is this file's generic "did a real
+// keypress reach the handler" probe, and a tab key only navigates when it is
+// actually navigating -- pressing it while already there deliberately skips the
+// repaint, because setTab tears the chart down and re-animates it, which made
+// the graph move twice for one keypress. Starting on 'market' would leave this
+// file asserting that a no-op navigation navigates.
+global.UI=Object.assign(global.UI||{},{userId:'u1',navTab:'portfolio',companyPage:null,
   companyPageTab:'overview',panelMode:'buy',showShortcuts:false});
 global.cu=()=>({id:'u1',role:'student'});
 global.render=()=>{acted.push('render');};
 global.setTab=t=>{acted.push('tab:'+t);};
 global.closeCompanyPage=()=>{acted.push('closeCompanyPage');};
 global.isAdmin=()=>false;
+// Tab keys go through navRefresh now -- it navigates AND pulls fresh data,
+// and lives outside the handler, so it has to be stubbed here or every
+// tab-key check below throws a ReferenceError that press() swallows into
+// "nothing happened", hiding the real reason from whoever reads the failure.
+// What it does with the data is tests/test_nav_refresh.js's job; all this
+// file needs to know is that the key reached it.
+global.navRefresh=t=>{acted.push('tab:'+t);};
+global.autoRefresh=()=>{acted.push('refresh');return Promise.resolve();};
+global.toast=t=>{acted.push('toast:'+t);};
 global.setTimeout=(f)=>{try{f();}catch(e){}return 0;};
 const handle=eval('('+fnSrc+')');
 const press=(ev,active)=>{
