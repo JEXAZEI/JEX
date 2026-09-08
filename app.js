@@ -4569,6 +4569,18 @@ async function settleLimitOrder(order,cancelIfUnfilled){
         toast('Order resting — filling all '+order.qty+' × '+order.ticker+' at once would push the price past your limit of '+fmt(order.limit_price)
           +'. It fills if the market comes to you, or try a smaller quantity.');
       }
+      // Same reasoning for the other refusal that leaves an order resting. A
+      // sale into the unsold pool is paid for by the company, so a company
+      // short of cash cannot absorb it. Resting is correct -- another investor
+      // can take the shares -- but a student watching an order sit there needs
+      // to know it is the company's balance, not their price, that is stopping
+      // it. Only said here, on the order they just placed: checkLimitOrders()
+      // retries this every tick and would otherwise repeat itself forever.
+      else if(pr&&pr.reason==='company_cannot_pay'){
+        toast('Order resting — '+order.ticker+' does not have the cash to buy back '+order.qty+' shares right now'
+          +(pr.needed!=null?' (that costs '+fmt(pr.needed)+', the company holds '+fmt(pr.company_has)+')':'')
+          +'. It fills when the company can pay, or when another investor buys them from you.');
+      }
     }
   }
   mine=DB.limitOrders.find(o=>o.id===order.id);
