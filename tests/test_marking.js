@@ -189,6 +189,15 @@ check('it says how many that is', /219/.test(msgUnder));
 check('it says how many more they may buy', /200 more/.test(msgUnder), msgUnder);
 const msgAt=positionCapMsg(azei,holder(219));
 check('at the cap it says what to do instead', /Sell some before buying more/.test(msgAt), msgAt);
+// Two students were ALREADY above the cap when it shipped -- 373 and 344 of
+// AZEI's 1,099, which is 85% of the float between them. They are grandfathered:
+// nobody is forced to sell, they simply cannot add. The message has to say that
+// rather than telling someone holding 373 that 373 is the limit.
+const msgOver=positionCapMsg(azei,holder(373));
+check('a grandfathered holder is told they keep their shares',
+      /You keep them/.test(msgOver), msgOver);
+check('...and is not told 373 is the limit', !/373 shares of AZEI, exactly/.test(msgOver));
+check('...and still cannot buy more', positionHeadroom(azei,holder(373))===0);
 
 console.log('\n=== wired into the buy path ===');
 const buy=grabFn('placeBuy');

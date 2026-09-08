@@ -6046,8 +6046,17 @@ function positionHeadroom(co,user){
 }
 const positionCapMsg=(co,user)=>{
   const cap=positionCap(co),held=(holdings(user)[co.ticker])||0;
-  return held>=cap
-    ? 'You already hold '+held.toLocaleString()+' shares of '+co.ticker+', which is the '
+  // Two students were already ABOVE the cap when it shipped -- 33.9% and 31.3%
+  // of AZEI, 85% of the float between them. Nobody is forced to sell: they keep
+  // what they bought and simply cannot add. But the message has to say that,
+  // rather than telling someone holding 373 shares that 373 "is the limit".
+  return held>cap
+    ? 'You hold '+held.toLocaleString()+' shares of '+co.ticker+' — above the '
+      +Math.round(POSITION_CAP_PCT*100)+'% limit of '+cap.toLocaleString()+' of '
+      +(Number(co.shares)||0).toLocaleString()+' introduced after you bought them. '
+      +'You keep them, but you cannot buy more until you are back under.'
+    : held===cap
+    ? 'You hold '+held.toLocaleString()+' shares of '+co.ticker+', exactly the '
       +Math.round(POSITION_CAP_PCT*100)+'% limit one investor may own ('+cap.toLocaleString()
       +' of '+(Number(co.shares)||0).toLocaleString()+'). Sell some before buying more.'
     : 'One investor may hold at most '+Math.round(POSITION_CAP_PCT*100)+'% of '+co.ticker+' — '
