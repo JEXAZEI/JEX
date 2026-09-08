@@ -2509,8 +2509,17 @@ document.addEventListener('keydown',function(e){
     //
     // The toast fires when the data is actually back, not when the key is
     // pressed, so it reports what happened rather than what was requested.
+    // Only repaint for the NAVIGATION. setTab does destroyCharts() then
+    // render(), so pressing M while already on the Market tore the chart down
+    // and re-animated it with the data already on screen, then did it again
+    // when the fetch landed -- the graph visibly moved twice for one keypress,
+    // and the first move showed nothing new.
+    //
+    // Coming from another tab the immediate repaint is the tab appearing, so
+    // that one stays. Already there, the only repaint is the one carrying
+    // fresh prices.
     if(key==='m'){
-      setTab('market');
+      if(UI.navTab!=='market'||UI.companyPage)setTab('market');
       if(!_manualRefreshing){
         _manualRefreshing=true;
         _lastRefresh=0;

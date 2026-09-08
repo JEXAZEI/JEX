@@ -35,6 +35,9 @@ function branch(k){
 const m=branch('m');
 check("the 'm' branch was found at all", m.length>0, 'brace matching failed');
 check('...it still opens the Market tab', /setTab\('market'\)/.test(m), m);
+check('...but only when not already there',
+      /UI\.navTab!=='market'\|\|UI\.companyPage/.test(m),
+      'setTab is unconditional, so the chart repaints twice for one keypress');
 check('...it asks for a refresh', /autoRefresh\(\)/.test(m), m);
 check('...bypassing the rate limit, or it would usually no-op',
       /_lastRefresh=0/.test(m), m);
@@ -56,11 +59,15 @@ check('the shortcuts card mentions the refresh',
 //
 // Run the real branch with autoRefresh stubbed, and count the calls.
 let refreshCalls=0, tabs=[], toasts=[], resolveIt=null;
-global.setTab=t=>{tabs.push(t);};
+// Faithful enough to matter: the real setTab moves UI.navTab, which is exactly
+// what the "am I already there?" guard reads.
+global.setTab=t=>{tabs.push(t);global.UI.navTab=t;global.UI.companyPage=null;};
 global.toast=t=>{toasts.push(String(t));};
 global.autoRefresh=()=>{refreshCalls++;return new Promise(r=>{resolveIt=r;});};
 global._lastRefresh=12345;
 global._manualRefreshing=false;
+// Somewhere other than the Market to begin with.
+global.UI={navTab:'portfolio',companyPage:null};
 
 // `let` at top level of an eval binds inside the eval, so the branch is
 // rewritten to touch the globals the stubs above installed.
@@ -83,7 +90,12 @@ const runnable=m
   eval(runnable); eval(runnable); eval(runnable);
   check('holding M does not stack sweeps', refreshCalls===1,
         refreshCalls+' sweeps were launched');
-  check('...though it still re-selects the tab each time', tabs.length===4, String(tabs.length));
+  // The chart is torn down and re-animated by setTab. Calling it again when
+  // already on the Market made the graph move once with stale data and again
+  // when the fetch landed -- two movements for one keypress, the first showing
+  // nothing new.
+  check('...and does not repaint the tab again once already there',
+        tabs.length===1, tabs.length+' setTab calls -> that many chart redraws');
 
   // Let the first one land.
   resolveIt();
@@ -96,6 +108,26 @@ const runnable=m
   // A press after it completes refreshes again.
   eval(runnable);
   check('a later press refreshes again', refreshCalls===2, String(refreshCalls));
+
+  // ── the reported bug, directly ──
+  // Already on the Market: exactly one repaint, and it is the one carrying
+  // fresh prices. Zero setTab calls means zero extra chart animations.
+  resolveIt();
+  await new Promise(r=>setTimeout(r,0));
+  refreshCalls=0; tabs=[]; toasts=[];
+  global.UI={navTab:'market',companyPage:null};
+  global._manualRefreshing=false;
+  eval(runnable);
+  check('pressing M while already on the Market does not re-select the tab',
+        tabs.length===0, tabs.join(',')+' -> each one re-animates the chart');
+  check('...but still fetches', refreshCalls===1, String(refreshCalls));
+
+  // An open company page counts as "not on the Market", so M still navigates
+  // out of it.
+  refreshCalls=0; tabs=[]; global._manualRefreshing=false;
+  global.UI={navTab:'market',companyPage:'AZEI'};
+  eval(runnable);
+  check('M still leaves an open company page', tabs.join(',')==='market', tabs.join(','));
 
   // A failed refresh must say so rather than claim success.
   refreshCalls=0; toasts=[]; global._manualRefreshing=false;
