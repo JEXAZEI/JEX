@@ -238,3 +238,37 @@ check('the old flat per-share sum is gone',
 
 console.log(fails?('\n'+fails+' FAILURE(S)'):('\nAll dividend-total checks passed.'));
 process.exit(fails?1:0);
+
+// ── the ex-dividend drop ──
+//
+// A dividend is not free money: on the ex-date the price falls by roughly the
+// dividend, so a shareholder trades a dollar of share price for a dollar of
+// cash. Without that, holding over a dividend is a risk-free gain — which on a
+// GRADED leaderboard is not a quirk, it is a way to hand somebody a mark.
+//
+// The drop is computed server-side and sent back, rather than re-derived here,
+// so the number on the chart and the number in the payout can never disagree.
+eval(grabFn('applyExDividend').replace('function applyExDividend','global.applyExDividend=function'));
+global.getCo=t=>(DB.companies||[]).find(c=>c.ticker===t)||null;
+
+global.DB={companies:[{ticker:'ACME',price:20,price_history:[{p:20,t:'x'}]},
+                      {ticker:'ACME.B',price:100,price_history:[]}]};
+applyExDividend({ACME:19.50,'ACME.B':97.50});
+check('the parent price drops to what the server said', getCo('ACME').price===19.50);
+check('a ratio-5 class drops five times as far, because it was paid five times',
+      getCo('ACME.B').price===97.50);
+check('the chart records the step so it is not an unexplained gap',
+      getCo('ACME').price_history.slice(-1)[0].t==='ex-dividend');
+check('a company with no history array does not throw',
+      (()=>{global.DB={companies:[{ticker:'X',price:5}]};applyExDividend({X:4});return getCo('X').price===4;})());
+check('an unknown ticker is ignored rather than throwing',
+      (()=>{applyExDividend({NOPE:1});return true;})());
+check('a zero or negative price is refused -- never mark a stock to nothing',
+      (()=>{global.DB={companies:[{ticker:'X',price:5}]};applyExDividend({X:0});return getCo('X').price===5;})());
+check('null input does not throw', (()=>{applyExDividend(null);return true;})());
+
+// The caller has to survive a server that has not been migrated yet.
+check('issueDividend only applies a drop when the server sends one',
+      /const drops=r\.new_prices\|\|null;[\s\S]{0,60}if\(drops\)applyExDividend\(drops\)/.test(src));
+check('...and the holder notification explains the drop when there is one',
+      /that is what a dividend is/i.test(src));

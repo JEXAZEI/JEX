@@ -830,6 +830,13 @@ ${PRELUDE}
       // stop the order before it ever reached the band and make this step
       // pass for entirely the wrong reason -- it did, on the first run.
       sbeta.shares_avail=Math.max(sbeta.shares_avail, 2000);
+      // Same trap, second door: the 20% position cap now also refuses locally,
+      // and it caught this step the moment it shipped. 400 shares has to sit
+      // under a fifth of the issued count or the order never leaves the
+      // browser and this proves nothing again. 4,000 issued puts the order at
+      // 10%, and still leaves impact ((400/(4000*0.05))*0.015 = 3%) far more
+      // than the 0.02 needed to breach the ceiling this step sets up.
+      sbeta.shares=Math.max(sbeta.shares, 4000);
       DB.companies=JSON.parse(JSON.stringify(stub.data.jex_companies));
       const sent=()=>stub.rpcCalls.filter(c=>c.fn==='rpc_trade_buy').length;
       const before=sent(), price0=sbeta.price;

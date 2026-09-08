@@ -601,7 +601,10 @@ async function loadAll(){
     ()=>sb.get('jex_news','order=created_at.desc&limit=50'),
     ()=>sb.get('jex_ipo_applications','order=created_at.asc'),
     ()=>sb.get('jex_dilution_applications','order=created_at.asc'),
-    ()=>sb.get('jex_trades','order=created_at.desc&limit=200&select=id,ticker,qty,price,buyer_id,seller_id,type,ts'),  // only last 200 trades
+    // created_at is fetched because markPrice() needs to know which prints
+    // belong to THIS session -- ts is a formatted Arizona string with no year
+    // and cannot be compared to session_started_at.
+    ()=>sb.get('jex_trades','order=created_at.desc&limit=200&select=id,ticker,qty,price,buyer_id,seller_id,type,ts,created_at'),  // only last 200 trades
     ()=>sb.get('jex_dividends','order=created_at.asc'),
     ()=>sb.get('jex_buybacks','order=created_at.asc'),
     // Split deliberately. Open/after-hours orders drive the order book,
@@ -1117,6 +1120,86 @@ const fundValue=u=>Object.entries(u.fund_units||{}).reduce((s,[fid,pos])=>{
   return f?s+currentFundNav(f)*pos.units:s;
 },0);
 const nw=u=>Math.round((u.cash+pv(u)+sPnl(u)+shortCollateral(u)+fundValue(u))*100)/100;
+
+// ── Marking, for the number that is graded ───────────────
+//
+// nw() above marks every holding at co.price -- the last print. That is the
+// right number for a student's own live portfolio and the wrong one for a
+// grade, because in a market this thin the last print is trivially chosen.
+//
+// The arithmetic, on real numbers from this exchange: AZEI has 1,099 shares
+// issued and its liquidity term is shares*0.05 = 54.95, so a 257-share buy
+// moves the price 7%. A student can do that in one click, take the snapshot,
+// and have their entire position revalued 7% higher. Real exchanges settle the
+// official mark through a closing auction for exactly this reason, and
+// "marking the close" is a prosecuted offence rather than a clever trick.
+//
+// So the graded mark is a VOLUME-WEIGHTED average of the session's trades. To
+// move it you have to be most of the day's volume, not the last trade of it --
+// which is the real property, and it costs you the price impact on every one
+// of those trades.
+//
+// Falls back deliberately, never to nothing: session VWAP if the session has
+// traded enough, else the last few prints, else co.price. A stock that has not
+// traded is marked where it stands.
+const MARK_MIN_TRADES=3;
+const MARK_RECENT_PRINTS=5;
+// No single trade may carry more than a quarter of the weight.
+//
+// A plain VWAP is not manipulation-resistant in a market this small, and I
+// measured that rather than assuming it: against a quiet session of 150 shares,
+// one 257-share buy is 63% of the day's volume, so it moved the average 4.45%
+// -- most of the way to the 7% it moved the last print. Being most of the
+// volume is exactly what a VWAP is supposed to follow, so the VWAP was not
+// wrong; it was the wrong tool on its own.
+//
+// Capping each trade's weight is the standard fix, and it closes both doors at
+// once: weighting by volume stops a flood of one-share prints from swamping the
+// average by count, and the cap stops one large print from swamping it by size.
+const MARK_MAX_TRADE_WEIGHT=0.25;
+function vwap(trades){
+  const rows=[];
+  let total=0;
+  for(const t of trades||[]){
+    const qty=Number(t.qty)||0,p=Number(t.price)||0;
+    if(qty>0&&p>0){rows.push([qty,p]);total+=qty;}
+  }
+  if(!total)return null;
+  // The cap is measured against the raw volume of the window, so it does not
+  // depend on itself. At least 1, or a window of one trade would weigh nothing.
+  const cap=Math.max(1,Math.floor(total*MARK_MAX_TRADE_WEIGHT));
+  let w=0,notional=0;
+  for(const [qty,p] of rows){const use=Math.min(qty,cap);w+=use;notional+=use*p;}
+  return w>0?Math.round((notional/w)*100)/100:null;
+}
+function sessionTrades(ticker){
+  const raw=DB.session&&DB.session.session_started_at;
+  const start=raw?new Date(raw).getTime():NaN;
+  const out=[];
+  for(const t of DB.trades||[]){
+    if(t.ticker!==ticker)continue;
+    if(!isNaN(start)){
+      const ms=new Date(t.created_at||0).getTime();
+      if(isNaN(ms)||ms<start)continue;
+    }
+    out.push(t);
+  }
+  return out;
+}
+function markPrice(co){
+  if(!co)return 0;
+  // An index unit's price is already derived from its constituents rather than
+  // from its own prints, so its own trade tape is not the right input.
+  if(co.is_index_fund)return co.price;
+  const sess=sessionTrades(co.ticker);
+  if(sess.length>=MARK_MIN_TRADES){const v=vwap(sess);if(v!=null)return v;}
+  const recent=(DB.trades||[]).filter(t=>t.ticker===co.ticker).slice(0,MARK_RECENT_PRINTS);
+  if(recent.length>=MARK_MIN_TRADES){const v=vwap(recent);if(v!=null)return v;}
+  return co.price;
+}
+const pvMark=u=>Object.entries(holdings(u)).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?markPrice(c)*q:0);},0);
+const sPnlMark=u=>Object.entries(shorts(u)).reduce((s,[t,pos])=>{const c=getCo(t);if(!c)return s;return s+Math.round((pos.avgPrice-markPrice(c))*pos.qty*100)/100;},0);
+const nwMark=u=>Math.round((u.cash+pvMark(u)+sPnlMark(u)+shortCollateral(u)+fundValue(u))*100)/100;
 const isAdmin=u=>(['chairman','president','secretary','treasurer','compliance_officer'].includes(u?.role));
 const isChairman=u=>u?.role==='chairman'||u?.role==='president';
 const isPresident=u=>u?.role==='president';
@@ -4801,6 +4884,10 @@ async function placeBuy(ticker,qty){
   // fast local check doesn't apply. The server enforces the real limits
   // (funds, session status, halts) either way.
   if(!co.is_index_fund&&co.shares_avail<qty)return toast('Only '+co.shares_avail+' shares available');
+  // Before the rate limiter, so a refused order does not also burn a cooldown
+  // -- same reasoning as the comment just below.
+  const headroom=positionHeadroom(co,u);
+  if(headroom!=null&&qty>headroom)return toast(positionCapMsg(co,u));
   // Counted LAST, after every local check has passed. It used to run first,
   // which meant a rejected order -- a typo'd quantity, a restricted ticker --
   // still burned a slot and its 0.8s cooldown, so correcting the typo was met
@@ -5277,8 +5364,25 @@ async function issueDividend(ticker,perShare,note){
   const jxiPayouts=(r.jxi_pass_through||[]).flatMap(f=>f.payouts);
   await refreshDividendPayoutBalances([...(r.payouts||[]),...jxiPayouts]);
   if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker,company_name:co.name,per_share:perShare,total:r.total,note:note.trim(),payouts:r.payouts,jxi_pass_through:r.jxi_pass_through||[],ts:ts()});
+  // The ex-dividend drop. rpc_pay_dividend lowers each price by the dividend,
+  // because that is what happens on the ex-date in a real market and it is the
+  // reason a dividend is not free money -- you trade a dollar of share price
+  // for a dollar of cash.
+  //
+  // Which means a student is about to watch their portfolio fall by exactly
+  // what they were just paid, and will reasonably conclude the app is broken.
+  // So the message says both numbers. This is the one second in the whole
+  // course when everyone is looking, and the sentence IS the lesson.
+  //
+  // Guarded on r.new_prices so the client is correct whether or not the
+  // dividend migration has been applied yet.
+  const drops=r.new_prices||null;
+  if(drops)applyExDividend(drops);
+  const exNote=drops&&drops[ticker]!=null
+    ? ' '+ticker+' fell '+fmt(perShare)+' to '+fmt(drops[ticker])+' — the cash came out of the company, so your total is unchanged. That is what a dividend is.'
+    : '';
   await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(r.total),{ticker,userId:owner.id,userName:owner.name,amount:r.total});
-  await pushNotificationToHolders(ticker,'dividend','💰 '+co.name+' paid a dividend of '+fmt(perShare)+'/share');
+  await pushNotificationToHolders(ticker,'dividend','💰 '+co.name+' paid a dividend of '+fmt(perShare)+'/share.'+exNote);
   pushBalances();
   toast(co.name+' paid '+fmt(perShare)+'/share');UI.companyTab='dividends';render();
 }
@@ -5286,6 +5390,21 @@ async function issueDividend(ticker,perShare,note){
 // just re-syncs the client's local cache from the authoritative DB rather
 // than re-deriving cash += payout locally (which could drift if the local
 // copy was ever stale).
+// The parent and every class drop on the ex-date, each by the dividend its own
+// shares are entitled to -- so a class with a conversion ratio of 5 drops five
+// times as far, because one of its shares was paid as five base shares. The
+// server sends the new prices rather than the client re-deriving them, so the
+// two can never disagree about a number this visible.
+function applyExDividend(newPrices){
+  for(const [t,p] of Object.entries(newPrices||{})){
+    const c=getCo(t);
+    if(!c||!(Number(p)>0))continue;
+    c.price=Number(p);
+    // Keep the chart honest: an unexplained step down invites "the app lost my
+    // money" far more than a labelled one does.
+    if(Array.isArray(c.price_history))c.price_history.push({p:Number(p),t:'ex-dividend'});
+  }
+}
 async function refreshDividendPayoutBalances(payouts){
   if(!payouts||!payouts.length)return;
   try{
@@ -5887,6 +6006,54 @@ function borrowable(co){
 const borrowMsg=co=>'Only '+borrowable(co)+' share'+(borrowable(co)===1?'':'s')+' of '+co.ticker
   +' can be borrowed right now — you can only short shares somebody actually holds, '
   +'and the rest are already on loan to other short positions.';
+
+// ── Position limit ───────────────────────────────────────
+//
+// Nothing capped how much of one company a single person could own, and at
+// classroom scale that is not a theoretical gap. On this exchange today:
+//
+//   AZEI, 1,099 shares issued, 257 unsold, $27.19.
+//   Buying all 257 moves the price 7.0%, so it fills near $29.10.
+//   Total: about $7,478, against $10,000 of starting cash.
+//
+// One student, on day one, can buy every available share of a company and have
+// $2,500 left over. After that nobody else can buy it at all and that student
+// alone sets its price. In a market with thousands of participants this cannot
+// happen; in a room of fifteen it is a Tuesday.
+//
+// 20% is the cap. It is not arbitrary: it is the neighbourhood of the
+// thresholds real markets use to say "you are now big enough that this is
+// everyone's business" -- a 13D filing at 5%, exchange concentration rules
+// above that. It leaves room for a real conviction position while making a
+// corner impossible.
+//
+// Index funds are exempt. A fund IS a basket by definition, and JXI mints
+// units on demand rather than holding a fixed float.
+//
+// Returns null for "no limit", never 0 -- same discipline as borrowable(),
+// because a 0 that should have been null silently blocks every trade.
+const POSITION_CAP_PCT=0.20;
+function positionCap(co){
+  if(!co||co.is_index_fund)return null;
+  const issued=Number(co.shares)||0;
+  if(!(issued>0))return null;
+  return Math.floor(issued*POSITION_CAP_PCT);
+}
+function positionHeadroom(co,user){
+  const cap=positionCap(co);
+  if(cap==null||!user)return null;
+  return Math.max(0,cap-((holdings(user)[co.ticker])||0));
+}
+const positionCapMsg=(co,user)=>{
+  const cap=positionCap(co),held=(holdings(user)[co.ticker])||0;
+  return held>=cap
+    ? 'You already hold '+held.toLocaleString()+' shares of '+co.ticker+', which is the '
+      +Math.round(POSITION_CAP_PCT*100)+'% limit one investor may own ('+cap.toLocaleString()
+      +' of '+(Number(co.shares)||0).toLocaleString()+'). Sell some before buying more.'
+    : 'One investor may hold at most '+Math.round(POSITION_CAP_PCT*100)+'% of '+co.ticker+' — '
+      +cap.toLocaleString()+' of '+(Number(co.shares)||0).toLocaleString()+' shares. You hold '
+      +held.toLocaleString()+', so you can buy '+(cap-held).toLocaleString()+' more.';
+};
 function shortPrev(co,qty){
   if(!qty||qty<=0)return'';
   const c=Math.round(co.price*qty*1.5*100)/100;
@@ -7650,7 +7817,7 @@ function renderLeaderboard(){
   // students stored an empty snapshot that froze the leaderboard BLANK until
   // some later close happened to overwrite it. Fall back to live standings.
   const isFrozen=lbSnap&&lbSnap.length>0&&DB.session.status!=='open';
-  let ranked=isFrozen?lbSnap:DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nw(u),_divs:divRec(u),name:u.name,id:u.id,classroom_id:u.classroom_id})).sort((a,b)=>b._nw-a._nw);
+  let ranked=isFrozen?lbSnap:DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nwMark(u),_divs:divRec(u),name:u.name,id:u.id,classroom_id:u.classroom_id})).sort((a,b)=>b._nw-a._nw);
   ranked=ranked.filter(u=>!isHiddenTestEntity(u.id));
   // The frozen snapshot is a copy of the standings taken by setSession() at
   // session close and stored on jex_session. Removing a student updates
@@ -7670,7 +7837,7 @@ function renderLeaderboard(){
       <option value="">All classrooms</option>
       ${DB.classrooms.map(c=>`<option value="${c.id}" ${UI.lbClassroom===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
     </select>`:'';
-  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard</span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${esc(u.name)}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${getClassroomName(u.classroom_id)}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=10000?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
+  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard<span class="info-bubble" tabindex="0">?<span class="info-tip">Each holding is valued at that stock&#39;s volume-weighted average price for the session, not its last trade. The last trade is one order and easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Your Portfolio page shows the live value at the current price, so the two can differ during a session — that difference is the same one between a fund&#39;s live marks and its official NAV.</span></span></span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${esc(u.name)}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${getClassroomName(u.classroom_id)}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=10000?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
 }
 function renderFundLeaderboard(){
   const ranked=(DB.funds||[]).filter(f=>!isHiddenTestEntity(f.manager_id)).map(f=>{
@@ -8961,13 +9128,17 @@ function renderAdminDilution(pDil,rDil){
   return`<div class="card"><div class="section-title">Pending dilution requests</div>${pDil.length?pDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span> <span class="badge b-coral">+${d.pct_increase}%</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares — "${esc(d.reason)}"</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewDilution('${d.id}',true))">Approve</button><button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewDilution('${d.id}',false))">Reject</button></div></div>`).join(''):'<div class="empty">No pending dilution requests</div>'}${rDil.length?`<hr class="divider">${rDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares</div></div><span class="badge ${d.status==='approved'?'b-green':'b-red'}">${d.status}</span></div>`).join('')}`:''}`;
 }
 function renderAdminBalances(students){
-  const rows=students.map(u=>({name:u.name,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pv(u)*100)/100,divs:Math.round(divRec(u)*100)/100,nw:nw(u)})).sort((a,b)=>b.nw-a.nw);
+  // Marked, not last-print. This table and the CSV it exports are the graded
+  // artifact, so they use the session VWAP -- see markPrice(). A student who
+  // walks a thin stock up in the last minute of a session moves the last print
+  // and barely moves this.
+  const rows=students.map(u=>({name:u.name,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pvMark(u)*100)/100,divs:Math.round(divRec(u)*100)/100,nw:nwMark(u)})).sort((a,b)=>b.nw-a.nw);
   const csvEscape=v=>{if(v==null)return'';const s=String(v).replace(/\n/g,' ');return s.includes(',')||s.includes('"')?'"'+s.replace(/"/g,'""')+'"':s;};
-  const csv=[['Rank','Name','Cash','Portfolio','Dividends','Net worth','vs Start'],...rows.map((r,i)=>[i+1,r.name,r.cash.toFixed(2),r.portfolio.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),(r.nw-10000).toFixed(2)])].map(r=>r.map(csvEscape).join(',')).join('\n');
+  const csv=[['Rank','Name','Cash','Portfolio (VWAP)','Dividends','Net worth (VWAP)','vs Start'],...rows.map((r,i)=>[i+1,r.name,r.cash.toFixed(2),r.portfolio.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),(r.nw-10000).toFixed(2)])].map(r=>r.map(csvEscape).join(',')).join('\n');
   window._jexCSV=csv;
   return`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><span style="font-size:12px;color:var(--text2)">Live student balances</span><div style="display:flex;gap:8px"><button class="btn btn-sm" style="background:var(--purple);color:white;border-color:var(--purple)" onclick="generatePDFReport()">📄 Full PDF report</button><button class="btn btn-sm btn-success" onclick="downloadCSV()">Download CSV</button><button class="btn btn-sm btn-primary" onclick="const p=get('csv-panel');p.style.display=p.style.display==='none'?'block':'none'">Show CSV to copy</button></div></div>
   <div class="grid4" style="margin-bottom:14px"><div class="mcard"><div class="mlabel">Students</div><div class="mval">${rows.length}</div></div><div class="mcard"><div class="mlabel">Avg net worth</div><div class="mval ${rows.length&&rows.reduce((s,r)=>s+r.nw,0)/rows.length>=10000?'green':''}" style="font-family:var(--mono)">${rows.length?fmt(rows.reduce((s,r)=>s+r.nw,0)/rows.length):'—'}</div></div><div class="mcard"><div class="mlabel">Leader</div><div class="mval" style="font-size:15px;margin-top:4px">${esc(rows[0]?.name||'—')}</div></div><div class="mcard"><div class="mlabel">Total dividends paid</div><div class="mval green" style="font-family:var(--mono)">${fmt(rows.reduce((s,r)=>s+r.divs,0))}</div></div></div>
-  <div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th style="padding-left:14px">Rank</th><th>Student</th><th class="r">Cash</th><th class="r">Portfolio</th><th class="r">Dividends</th><th class="r">Net worth</th><th class="r">vs Start</th></tr></thead>
+  <div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th style="padding-left:14px">Rank</th><th>Student</th><th class="r">Cash</th><th class="r">Portfolio</th><th class="r">Dividends</th><th class="r">Net worth <span class="info-bubble" tabindex="0">?<span class="info-tip">Marked at each stock&#39;s volume-weighted average price for the session, not its last trade. A single trade sets the last price and is easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Real funds strike their official NAV the same way, and for the same reason.</span></span></th><th class="r">vs Start</th></tr></thead>
   <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-10000,vc=vs>=0?'price-up':'price-down';return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${i===0?'var(--amber)':i===1?'var(--text2)':i===2?'#993C1D':'var(--text3)'}">#${i+1}</td><td style="font-weight:500">${esc(r.name)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="7"><div class="empty">No approved students yet</div></td></tr>`}
   </tbody></table></div>
   <div id="csv-panel" style="display:none;margin-top:12px"><div class="ibox ibox-teal">Click inside the box, press <strong>Ctrl+A</strong> (Cmd+A) to select all, then <strong>Ctrl+C</strong> to copy.</div><textarea readonly onclick="this.select()" style="width:100%;font-family:var(--mono);font-size:12px;padding:10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);resize:vertical;min-height:160px;line-height:1.5">${csv}</textarea></div>`;
