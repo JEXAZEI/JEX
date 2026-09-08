@@ -49,6 +49,7 @@ global.applyFundShortResult=()=>{};
 // Shares available to borrow. null means "no limit", which is what an index
 // fund returns -- it mints and burns units rather than lending a fixed float.
 global.borrowable=()=>null;
+global.positionHeadroom=()=>null;   // the position cap has its own suite
 global.borrowMsg=co=>'Only 0 shares of '+co.ticker+' can be borrowed right now';
 global.snapshotNW=()=>{};
 global.pushBalances=()=>{};

@@ -164,8 +164,17 @@ check('nw() includes a fund term', /const nw=u=>Math\.round\(\(u\.cash\+pv\(u\)\
 check('fundValue marks units at the live NAV', /const fundValue=[\s\S]{0,300}currentFundNav\(f\)\*pos\.units/.test(src));
 check('fundValue guards a missing fund', /const fundValue=[\s\S]{0,300}return f\?/.test(src));
 check('fundValue guards a zero/absent unit count', /const fundValue=[\s\S]{0,300}!\(pos\.units>0\)/.test(src));
-// Whatever renders the leaderboard must use the same nw(), not its own sum.
-check('the leaderboard ranks on nw()', /function renderLeaderboard[\s\S]{0,3000}nw\(/.test(src));
+// Whatever renders the leaderboard must use a shared net-worth function, not
+// its own sum. It ranks on nwMark() rather than nw() because the leaderboard is
+// GRADED: nw() marks every holding at the last print, and in a market this thin
+// the last print is one order away from being whatever a student wants. See
+// markPrice() and test_marking.js.
+check('the leaderboard ranks on nwMark(), the graded mark',
+      /function renderLeaderboard[\s\S]{0,3000}_nw:nwMark\(u\)/.test(src));
+check('...and nwMark is nw with marked prices, not a second definition',
+      /const nwMark=u=>Math\.round\(\(u\.cash\+pvMark\(u\)\+sPnlMark\(u\)\+shortCollateral\(u\)\+fundValue\(u\)\)\*100\)\/100/.test(src));
+check('the graded CSV export is marked too, not last-print',
+      /portfolio:Math\.round\(pvMark\(u\)\*100\)\/100[\s\S]{0,80}nw:nwMark\(u\)/.test(src));
 
 console.log(fails?('\n'+fails+' FAILURES'):'\nAll passed');
 process.exit(fails?1:0);
