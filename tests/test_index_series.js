@@ -26,6 +26,7 @@ const fs=require('fs'),path=require('path');
 const src=fs.readFileSync(path.join(__dirname,'..','app.js'),'utf8');
 let fails=0;
 const check=(l,c,e)=>{if(c)console.log('PASS: '+l);else{fails++;console.log('FAIL: '+l+(e?' -- '+e:''));}};
+global.indexUnitDivisor=()=>{const d=Number(global.DB&&global.DB.session&&global.DB.session.index_unit_divisor);return d>0?d:10;};
 
 function grabFn(name){
   const m=new RegExp('^(?:async )?function '+name+'\\(','m').exec(src);
@@ -323,3 +324,54 @@ check('an index with no series reads 0, not NaN',
 
 console.log(fails?('\n'+fails+' FAILURE(S)'):('\nAll index-series checks passed.'));
 process.exit(fails?1:0);
+
+// ── the unit divisor ──
+//
+// The index LEVEL is avg(ratio) * 1000, the base-1000 convention. A tradeable
+// unit is a fraction of that, and the fraction decides whether students can
+// buy the index at all.
+//
+// It was hardcoded to a tenth, putting a JXI unit at $119.64 when the richest
+// person in the classroom has about $600 -- one unit was a fifth of everything
+// they owned. That is a denomination problem, not a pricing one: the unit price
+// is arbitrary and what matters is the fraction of the basket you own. SPY sits
+// near a tenth of the S&P for the same reason, and ETFs split units when the
+// price drifts out of reach.
+//
+// Ten server functions and two client sites each had their own copy of that
+// /10. A setting is the only way they cannot drift apart, which is the bug
+// class that has bitten this project repeatedly.
+{
+  const base=[{p:10,t:'2026-01-01T00:00:00Z'}];
+  const mk=div=>({session:{index_unit_divisor:div},companies:[
+    {ticker:'IDX',is_index_fund:true,index_classroom_id:null},
+    {ticker:'A',status:'listed',price:20,price_history:base.concat([{p:20,t:'2026-01-02T00:00:00Z'}])}]});
+
+  // A at 20 against a base of 10 is a ratio of 2, so the index level is 2000.
+  global.DB=mk(10);
+  const at10=indexSeries(DB.companies[0]);
+  check('unit divisor 10 gives the old price', at10[at10.length-1].p===200,
+        String(at10[at10.length-1].p));
+  global.DB=mk(100);
+  const at100=indexSeries(DB.companies[0]);
+  check('unit divisor 100 makes a unit a tenth of that', at100[at100.length-1].p===20,
+        String(at100[at100.length-1].p));
+  check('...which is the whole point: same basket, reachable price',
+        at10[at10.length-1].p === at100[at100.length-1].p*10);
+
+  // Before the column exists the client must behave exactly as it did.
+  global.DB={session:{},companies:mk(10).companies};
+  const noSetting=indexSeries(DB.companies[0]);
+  check('a missing setting falls back to 10, not to 0 or NaN',
+        noSetting[noSetting.length-1].p===200, String(noSetting[noSetting.length-1].p));
+  for(const bad of [0,-5,null,'abc',undefined]){
+    global.DB={session:{index_unit_divisor:bad},companies:mk(10).companies};
+    const r=indexSeries(DB.companies[0]);
+    check('a '+String(bad)+' divisor falls back to 10 rather than dividing by nothing',
+          r[r.length-1].p===200, String(r[r.length-1].p));
+  }
+}
+check('snapshotJXI uses the same setting, not its own /10',
+      /const etfPrice=Math\.round\(rec\.value\/indexUnitDivisor\(\)\*100\)\/100/.test(src));
+check('no hardcoded /10 is left in the client index path',
+      !/rec\.value\/10/.test(src)&&!/\(sum\/n\)\*100\*100/.test(src));
