@@ -294,7 +294,7 @@ async function hashPw(pw){
 // ═══════════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════════
-let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],trades:[],dividends:[],buybacks:[],
+let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],delistApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
   companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],indexHistory:[],snapshots:[],clientErrors:[],retentionCandidates:[],
@@ -593,7 +593,7 @@ async function loadAll(){
   console.log('JEX boot: loadAll phase 1 done, phase 2 starting');
 
   // ── Phase 2: everything else in parallel ───────────────
-  const [pending,news,ipoApps,dilApps,trades,dividends,buybacks,limitOrders,
+  const [pending,news,ipoApps,dilApps,delistApps,trades,dividends,buybacks,limitOrders,
     shareClasses,classApps,votes,ballots,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
     priceAdjustments,classrooms,stopLossOrders,minutes,divApprovals,funds,indexHistory,snapshots]=await batchedAll([
@@ -601,6 +601,7 @@ async function loadAll(){
     ()=>sb.get('jex_news','order=created_at.desc&limit=50'),
     ()=>sb.get('jex_ipo_applications','order=created_at.asc'),
     ()=>sb.get('jex_dilution_applications','order=created_at.asc'),
+    ()=>sb.get('jex_delist_applications','order=created_at.asc'),
     // created_at is fetched because markPrice() needs to know which prints
     // belong to THIS session -- ts is a formatted Arizona string with no year
     // and cannot be compared to session_started_at.
@@ -657,7 +658,7 @@ async function loadAll(){
     // and doRestoreSnapshot -- those four fields are the only ones used.
     ()=>sb.get('jex_snapshots','order=created_at.desc&limit=50&select=id,label,created_by,ts,created_at'),
   ],6);
-  Object.assign(DB,{pending,news,ipoApps,dilApps,
+  Object.assign(DB,{pending,news,ipoApps,dilApps,delistApps,
     trades,dividends,buybacks,limitOrders,
     shareClasses,classApps,votes,ballots,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
@@ -4453,7 +4454,7 @@ async function resetExchange(){
     DB.minutes=[];DB.flags=[];DB.pending=[];DB.ipoApps=[];DB.bugReports=[];
     DB.funds=DB.funds.filter(f=>getUser(f.manager_id)?.is_test_account);
     DB.indexHistory=[];
-    DB.dilApps=[];DB.shareClasses=DB.shareClasses.filter(sc=>DB.companies.some(c=>c.ticker===sc.parent_ticker));DB.classApps=[];
+    DB.dilApps=[];DB.delistApps=[];DB.shareClasses=DB.shareClasses.filter(sc=>DB.companies.some(c=>c.ticker===sc.parent_ticker));DB.classApps=[];
     DB.founderAllocations=[];DB.companyMembers=[];
     DB.priceAdjustments=[];DB.priceAlerts=[];
     DB.nwHistory=[];DB.votes=[];DB.ballots=[];
@@ -6718,9 +6719,13 @@ const TOS_HTML=`
   </ul>
   <h4>3.5 Delisting</h4>
   <ul>
-    <li>Companies may voluntarily apply for delisting. If approved, a buyback window will open for shareholders.</li>
-    <li>Involuntary delisting may be imposed by the Chairman or President for compliance violations, insolvency, or fraudulent conduct.</li>
-    <li>Shares held in a delisted company become worthless after delisting is finalised.</li>
+    <li>A company leaves the exchange by applying to delist. The application must state whether the company is <strong>going private</strong> or is <strong>bankrupt</strong>, and must give a reason. The reason is published: shareholders are notified the moment it is filed, and can read it on the company&#39;s page.</li>
+    <li>The President or Chairman reviews the application and sets what shareholders are paid per share. They may reject it, or approve it at a different price than the company proposed.</li>
+    <li><strong>Going private:</strong> every outside shareholder is bought out in full at the settlement price, paid by the company. An application the company cannot afford in full cannot be approved.</li>
+    <li><strong>Bankruptcy:</strong> the President sets what is left for shareholders, which may be nothing. If the company&#39;s cash will not cover it, every shareholder receives the same reduced fraction and the remainder is unpaid — as in a real insolvency, shareholders rank last.</li>
+    <li>On settlement, open orders and stop-losses on the stock are cancelled, and any short position in it is closed at the settlement price.</li>
+    <li>A company may withdraw its own application at any time before it is reviewed.</li>
+    <li>The Chairman or President may also delist a company directly for compliance violations or fraudulent conduct. This is an enforcement action, not a settlement, and pays nothing.</li>
   </ul>
 
   <h3>4. Exchange Governance</h3>
@@ -7209,6 +7214,7 @@ function renderCompanyPage(parentTicker){
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-size:18px;font-weight:500">${esc(co.name)}</span>
         ${isHalted(parentTicker)?`<span class="badge b-red">⚠️ Trading halted${esc((()=>{const h=DB.halts.find(x=>x.ticker===parentTicker);return h?' — '+h.reason:'';})())}</span>`:''}
+        ${pendingDelisting(parentTicker)?`<span class="badge b-red">📋 Applying to delist — ${esc(DELIST_KIND_LABEL[pendingDelisting(parentTicker).kind]||pendingDelisting(parentTicker).kind)}</span>`:''}
         ${baseMeta?'<span class="badge b-amber">Class '+baseMeta.class+' · '+baseMeta.votes_per_share+'v</span>':''}
         <span class="badge b-gray" style="font-family:var(--mono)">${parentTicker}</span>
         ${canTrade?'<button class="wstar '+(isWatched(parentTicker)?'on':'')+'" onclick="toggleWatchAndRefresh(&quot;'+parentTicker+'&quot;)">'+(isWatched(parentTicker)?'★':'☆')+'</button>':''}
@@ -8400,6 +8406,7 @@ function renderMyStock(){
     <button class="tab ${UI.companyTab==='financials'?'active':''}" onclick="UI.companyTab='financials';render()">Financials</button>
     <button class="tab ${UI.companyTab==='dividends'?'active':''}" onclick="UI.companyTab='dividends';render()">Dividends</button>
     <button class="tab ${UI.companyTab==='buyback'?'active':''}" onclick="UI.companyTab='buyback';render()">Buyback</button>
+    <button class="tab ${UI.companyTab==='delisting'?'active':''}" onclick="UI.companyTab='delisting';render()">Delisting ${pendingDelisting(co.ticker)?'<span class="badge b-red" style="margin-left:4px">1</span>':''}</button>
     <button class="tab ${UI.companyTab==='dilution'?'active':''}" onclick="UI.companyTab='dilution';render()">Dilution ${DB.dilApps.filter(d=>getCompanyTickers(co.ticker).includes(d.ticker)&&d.status==='pending').length?'<span class="badge b-amber" style="margin-left:4px">'+DB.dilApps.filter(d=>getCompanyTickers(co.ticker).includes(d.ticker)&&d.status==='pending').length+'</span>':''}</button>
   </div>
   ${UI.companyTab==='stock'?renderStockOverview(co,u)
@@ -8410,6 +8417,7 @@ function renderMyStock(){
   :UI.companyTab==='financials'?renderFinancialsMgmtTab(co,co.financials)
   :UI.companyTab==='dividends'?renderDivTab(co,myDivs)
   :UI.companyTab==='buyback'?renderBBTab(co,myBBs)
+  :UI.companyTab==='delisting'?renderDelistTab(co)
   :renderDilTab(co)}`;
 }
 
@@ -8971,18 +8979,19 @@ function renderAdmin(){
   // and President are the only roles that reach chairmanTabs (see the
   // `tabs=` line), so this keeps the data-retention panel restricted to
   // exactly those two roles without a separate permission check here.
-  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['bug_reports',openBugReports?'Bug reports <span class="badge b-red">'+openBugReports+'</span>':'Bug reports'],retentionTabEntry,['snapshots','Snapshots'],clientErrorsTabEntry];
+  const chairmanTabs=[['dashboard','Dashboard'],['session','Session'],['announcements','Announcements'],['registrations','Registrations'],['passwords','Reset passwords'],['ipo','IPO'],['dilution','Dilution'],['delisting','Delisting'],['classes','Share classes'],['founder_allocs','Founder shares'],['balances','Balances'],['users','Users'],['listed','Listed'],['news','News'],['activity','Activity log'],['flags',openFlags?'Flags <span class="badge b-red">'+openFlags+'</span>':'Flags'],['bug_reports',openBugReports?'Bug reports <span class="badge b-red">'+openBugReports+'</span>':'Bug reports'],retentionTabEntry,['snapshots','Snapshots'],clientErrorsTabEntry];
   const treasurerTabs=[['balances','Balances'],['cashflow','Cash flow'],['dividends_audit','Dividend audit'],['price_adj_log','Price adjustments'],['budget_warnings','Budget warnings'],['activity','Activity log'],clientErrorsTabEntry];
   const tabs=(chair||isPresident(u))?chairmanTabs:u.role==='compliance_officer'?complianceTabs:u.role==='treasurer'?treasurerTabs:sectreTabs;
   const allowedTabs=tabs.map(([k])=>k);
   if(!allowedTabs.includes(UI.adminTab))UI.adminTab=tabs[0][0];
 
-  return`<div class="tab-row">${tabs.map(([k,v])=>`<button class="tab ${UI.adminTab===k?'active':''}" onclick="UI.adminTab='${k}';render()">${v}${k==='registrations'&&DB.pending.length?` <span class="badge b-blue" style="margin-left:4px">${DB.pending.length}</span>`:''} ${k==='ipo'&&pIPO.length?`<span class="badge b-amber" style="margin-left:4px">${pIPO.length}</span>`:''} ${k==='dilution'&&pDil.length?`<span class="badge b-coral" style="margin-left:4px">${pDil.length}</span>`:''}</button>`).join('')}</div>
+  return`<div class="tab-row">${tabs.map(([k,v])=>`<button class="tab ${UI.adminTab===k?'active':''}" onclick="UI.adminTab='${k}';render()">${v}${k==='registrations'&&DB.pending.length?` <span class="badge b-blue" style="margin-left:4px">${DB.pending.length}</span>`:''} ${k==='ipo'&&pIPO.length?`<span class="badge b-amber" style="margin-left:4px">${pIPO.length}</span>`:''} ${k==='dilution'&&pDil.length?`<span class="badge b-coral" style="margin-left:4px">${pDil.length}</span>`:''} ${k==='delisting'&&pendingDelistings().length?`<span class="badge b-red" style="margin-left:4px">${pendingDelistings().length}</span>`:''}</button>`).join('')}</div>
   ${UI.adminTab==='session'?renderAdminSession(students)
   :UI.adminTab==='registrations'?renderAdminRegs(pS,pC,students,companies)
   :UI.adminTab==='passwords'?renderAdminPasswords(students,companies)
   :UI.adminTab==='ipo'?renderAdminIPO(pIPO,rIPO)
   :UI.adminTab==='dilution'?renderAdminDilution(pDil,rDil)
+  :UI.adminTab==='delisting'?renderAdminDelisting()
   :UI.adminTab==='balances'?renderAdminBalances(students)
   :UI.adminTab==='users'?renderAdminUsers(students,companies,DB.users.filter(u2=>['secretary','treasurer','compliance_officer'].includes(u2.role)&&u2.status==='approved'),DB.users.filter(u2=>['chairman','president'].includes(u2.role)&&u2.status==='approved'))
   :UI.adminTab==='dashboard'?renderAdminDashboard()
@@ -9227,6 +9236,245 @@ function renderAdminResetForm(){
 }
 function renderAdminIPO(pIPO,rIPO){
   return`<div class="card"><div class="section-title">Pending IPO applications</div>${pIPO.length?pIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div><div class="app-meta">${a.shares.toLocaleString()} shares @ ${fmt(a.price)} — ${esc(a.description||'no desc')}</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewIPO('${a.id}',true))">Approve</button><button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewIPO('${a.id}',false))">Reject</button></div></div>`).join(''):'<div class="empty">No pending IPO applications</div>'}${rIPO.length?`<hr class="divider">${rIPO.map(a=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(a.name)} <span class="badge b-gray" style="font-family:var(--mono)">${esc(a.ticker)}</span></div></div><span class="badge ${a.status==='approved'?'b-green':'b-red'}">${a.status}</span></div>`).join('')}`:''}`;
+}
+// ── Delisting ─────────────────────────────────────────────
+//
+// Leaving the exchange is a process, not a button. A company applies, gives a
+// reason that everyone can read, and the President (or Chairman) decides what
+// shareholders are paid before the stock stops trading.
+//
+// The two kinds are genuinely different events, which is the point of asking:
+//
+//   going private  the company buys its investors out and carries on privately.
+//                  It must be able to afford the whole buyout; the server
+//                  refuses the approval and names the shortfall if it cannot.
+//   bankruptcy     the company is winding up. The President sets what is left
+//                  for shareholders -- possibly nothing -- and if the cash will
+//                  not stretch, everyone takes the same proportional haircut.
+//
+// Every number here is decided server-side by rpc_review_delisting. The client
+// shows the arithmetic so nobody is surprised by it, but never computes the
+// settlement itself.
+const pendingDelisting=ticker=>(DB.delistApps||[]).find(a=>a.ticker===ticker&&a.status==='pending');
+const pendingDelistings=()=>(DB.delistApps||[]).filter(a=>a.status==='pending');
+const DELIST_KIND_LABEL={going_private:'Going private',bankruptcy:'Bankruptcy'};
+
+// What a buyout would cost, from the client's own copy of who holds what. Only
+// ever shown as guidance -- the server recomputes it under a lock, and its
+// answer is the one that counts.
+function delistExposure(ticker){
+  let shares=0,holders=0;
+  const co=getCo(ticker);
+  for(const u of DB.users||[]){
+    if(co&&u.id===co.owner_id)continue; // the company is not bought out from itself
+    const q=Number((u.holdings||{})[ticker])||0;
+    if(q>0){shares+=q;holders++;}
+  }
+  for(const f of DB.funds||[]){
+    const q=Number((f.holdings||{})[ticker])||0;
+    if(q>0){shares+=q;holders++;}
+  }
+  let shorts=0;
+  for(const u of DB.users||[]){
+    const q=Number(((u.shorts||{})[ticker]||{}).qty)||0;
+    if(q>0)shorts++;
+  }
+  return{shares,holders,shorts};
+}
+function companyCash(ticker){
+  const co=getCo(ticker);if(!co)return 0;
+  const owner=getUser(co.owner_id);
+  return owner?Number(owner.cash)||0:0;
+}
+async function submitDelisting(ticker){
+  const co=getCo(ticker);if(!co)return;
+  if(!canManageCompany(co))return toast('Only this company\'s owner or founders can apply to delist it');
+  const kind=get('delist-kind-'+ticker)?.value;
+  const reason=(get('delist-reason-'+ticker)?.value||'').trim();
+  const price=get('delist-price-'+ticker)?.value;
+  if(!kind)return toast('Choose going private or bankruptcy');
+  if(reason.length<20)return toast('Give shareholders a real reason — at least 20 characters. It is published to everyone.');
+  if(kind==='going_private'&&!(parseFloat(price)>0))return toast('Going private means buying your shareholders out — propose a price per share');
+  let app;
+  try{app=await sb.rpc('rpc_request_delisting',{p_ticker:ticker,p_kind:kind,p_reason:reason,
+    p_proposed_price:kind==='going_private'?parseFloat(price):null});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  DB.delistApps.push(app);
+  clearDraft('delist-reason-'+ticker);
+  // Shareholders are told immediately. Finding out only once the stock has
+  // stopped trading is exactly the surprise this feature exists to prevent.
+  await pushNotificationToHolders(ticker,'halt','📋 '+co.name+' ('+ticker+') has applied to delist — '+(DELIST_KIND_LABEL[kind]||kind)+'. Reason: '+reason);
+  await logActivity('ipo',co.name+' ('+ticker+') applied to delist ('+(DELIST_KIND_LABEL[kind]||kind)+')',{ticker});
+  toast('Delisting application submitted — the President will review it');
+  render();
+}
+async function withdrawDelisting(id){
+  const app=(DB.delistApps||[]).find(a=>a.id===id);if(!app)return;
+  if(!confirm('Withdraw the delisting application for '+app.ticker+'?'))return;
+  try{await sb.rpc('rpc_cancel_delisting',{p_app_id:id});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  app.status='cancelled';
+  toast('Application withdrawn');render();
+}
+// The President's decision. The settlement price is read from the form; for a
+// going-private it defaults to whatever the company proposed.
+async function reviewDelisting(id,approve){
+  const app=(DB.delistApps||[]).find(a=>a.id===id);if(!app)return;
+  const priceEl=get('delist-settle-'+id);
+  const noteEl=get('delist-note-'+id);
+  const raw=priceEl?priceEl.value:'';
+  // '' and 0 are different answers: blank means "not filled in", 0 means
+  // "they get nothing", which is a legitimate bankruptcy outcome.
+  const price=(raw===''||raw===null||raw===undefined)?null:parseFloat(raw);
+  if(approve){
+    if(price===null||isNaN(price))return toast('Set what shareholders are paid per share — enter 0 if they are wiped out');
+    if(price<0)return toast('A settlement price cannot be negative');
+    if(app.kind==='going_private'&&!(price>0))return toast('Going private means buying shareholders out. Reject it and let them refile as bankruptcy if they are to get nothing.');
+    const ex=delistExposure(app.ticker);
+    if(!confirm('Approve delisting of '+app.ticker+' at '+fmt(price)+' per share?\n\n'
+      +ex.holders+' holder(s), '+ex.shares.toLocaleString()+' shares, '+ex.shorts+' short position(s) will be settled.\n\n'
+      +'This cannot be undone.'))return;
+  }
+  let r;
+  try{r=await sb.rpc('rpc_review_delisting',{p_app_id:id,p_approve:!!approve,
+    p_settlement_price:approve?price:null,p_note:noteEl?noteEl.value:null});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  if(!r.approved){
+    app.status='rejected';
+    toast('Delisting rejected — '+app.ticker+' stays listed');render();return;
+  }
+  // Apply exactly what the server reported. Nothing is recomputed locally.
+  Object.assign(app,{status:'approved',settlement_price:r.settlement_price,
+    shareholders_paid:r.shareholders_paid,shares_settled:r.shares_settled,
+    total_paid:r.total_paid,shortfall:r.shortfall,payout_ratio:r.payout_ratio,
+    shorts_closed:r.shorts_closed});
+  const co=getCo(app.ticker);
+  if(co){co.status='delisted';co.shares_avail=co.shares;}
+  for(const p of r.payouts||[]){
+    if(!p.id)continue;
+    const holder=getUser(p.id);
+    if(holder){holder.cash=Math.round((Number(holder.cash)+Number(p.paid))*100)/100;delete holder.holdings[app.ticker];}
+  }
+  const owner=getUser(r.owner_id);
+  if(owner){owner.cash=r.owner_cash;if(owner.holdings)delete owner.holdings[app.ticker];}
+  for(const {id:oid,user_id} of r.cancelled_orders||[]){
+    const o=DB.limitOrders.find(x=>x.id===oid);if(o)o.status='cancelled';
+    await pushNotification(user_id,'halt','📋 Limit order cancelled — '+app.ticker+' has been delisted.',app.ticker);
+  }
+  for(const sid of r.cancelled_stop_loss||[]){
+    const st=(DB.stopLossOrders||[]).find(x=>x.id===sid);if(st)st.status='cancelled';
+  }
+  for(const p of r.payouts||[]){
+    if(!p.id)continue;
+    await pushNotification(p.id,'halt','💵 '+app.ticker+' delisted — you were paid '+fmt(p.paid)+' for '+p.qty+' share'+(p.qty===1?'':'s')+'.',app.ticker);
+  }
+  await logActivity('ipo',app.ticker+' delisted — '+(DELIST_KIND_LABEL[app.kind]||app.kind)+' at '+fmt(r.settlement_price)+' per share',{ticker:app.ticker});
+  toast(app.ticker+' delisted — '+fmt(r.total_paid)+' paid to '+r.shareholders_paid+' holder(s)'
+    +(Number(r.shortfall)>0?', '+fmt(r.shortfall)+' unpaid':''));
+  render();
+}
+// A settled application, shown the same way wherever it appears.
+function delistOutcomeHTML(a){
+  if(a.status!=='approved')return'';
+  const ratio=Number(a.payout_ratio);
+  return '<div class="app-meta">Settled at '+fmt(a.settlement_price)+' per share — '
+    +fmt(a.total_paid)+' paid to '+a.shareholders_paid+' holder(s) for '
+    +Number(a.shares_settled).toLocaleString()+' shares'
+    +(a.shorts_closed?', '+a.shorts_closed+' short position(s) closed':'')
+    +(ratio<1?' — only '+Math.round(ratio*1000)/10+'% of the promised amount could be paid, '+fmt(a.shortfall)+' went unpaid':'')
+    +'</div>'
+    +(a.settlement_note?'<div class="app-meta" style="font-style:italic">"'+esc(a.settlement_note)+'"</div>':'');
+}
+function renderDelistTab(co){
+  const u=cu(),app=pendingDelisting(co.ticker);
+  const history=(DB.delistApps||[]).filter(a=>a.ticker===co.ticker).slice().reverse();
+  const ex=delistExposure(co.ticker),cash=companyCash(co.ticker);
+  let html='<div class="card"><div class="section-title">Delisting — leaving the exchange</div>';
+  if(co.status!=='listed'){
+    html+='<div class="ibox ibox-amber">'+esc(co.name)+' is not currently listed, so there is nothing to delist.</div>';
+  } else if(app){
+    html+='<div class="ibox ibox-amber"><strong>'+(DELIST_KIND_LABEL[app.kind]||app.kind)+'</strong> application filed '+esc(app.ts||'')
+      +' and awaiting the President.<br><br>"'+esc(app.reason)+'"'
+      +(app.proposed_price!=null?'<br><br>Proposed buyout: <strong>'+fmt(app.proposed_price)+'</strong> per share.':'')
+      +'</div>'
+      +'<button class="btn btn-sm" onclick="withdrawDelisting(&quot;'+app.id+'&quot;)">Withdraw application</button>';
+  } else {
+    html+='<div class="ibox ibox-teal">Applying to delist is public. Your shareholders are told immediately, and see your reason.</div>'
+      +'<div class="grid2" style="margin-bottom:12px">'
+      +'<div class="mcard"><div class="mlabel">Held by others</div><div class="mval">'+ex.shares.toLocaleString()+'</div><div style="font-size:10px;color:var(--text2);margin-top:2px">'+ex.holders+' holder'+(ex.holders===1?'':'s')+(ex.shorts?', '+ex.shorts+' short':'')+'</div></div>'
+      +'<div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">'+fmt(cash)+'</div></div>'
+      +'</div>'
+      +'<div class="frow"><label class="flabel">Why are you leaving?</label>'
+      +'<select id="delist-kind-'+co.ticker+'" onchange="updateDelistPreview(&quot;'+co.ticker+'&quot;)">'
+      +'<option value="">— Select —</option>'
+      +'<option value="going_private">Going private — buy our investors out</option>'
+      +'<option value="bankruptcy">Bankruptcy — we are winding up</option>'
+      +'</select></div>'
+      +'<div class="frow"><label class="flabel">Offer per share (going private only)</label>'
+      +'<input type="number" step="0.01" min="0.01" id="delist-price-'+co.ticker+'" placeholder="'+Number(co.price).toFixed(2)+'" oninput="updateDelistPreview(&quot;'+co.ticker+'&quot;)"></div>'
+      +'<div id="delist-prev-'+co.ticker+'"></div>'
+      +'<div class="frow" style="margin-top:10px"><label class="flabel">Reason (published to everyone)</label>'
+      +'<textarea id="delist-reason-'+co.ticker+'" rows="3" placeholder="e.g. We are buying out our investors to continue as a private company."></textarea></div>'
+      +'<button class="btn btn-danger" onclick="busy(this,&quot;Filing…&quot;,()=>submitDelisting(&quot;'+co.ticker+'&quot;))">File delisting application</button>';
+  }
+  if(history.length){
+    html+='<hr class="divider"><div class="section-title" style="font-size:13px;margin-bottom:8px">History</div>'
+      +history.map(a=>'<div class="app-row"><div class="app-info"><div class="app-name">'+(DELIST_KIND_LABEL[a.kind]||a.kind)
+        +' <span style="color:var(--text2);font-size:12px">'+esc(a.ts||'')+'</span></div>'
+        +'<div class="app-meta">"'+esc(a.reason)+'"</div>'+delistOutcomeHTML(a)+'</div>'
+        +'<span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':a.status==='cancelled'?'b-gray':'b-amber')+'">'+a.status+'</span></div>').join('');
+  }
+  return html+'</div>';
+}
+function updateDelistPreview(ticker){
+  const el=get('delist-prev-'+ticker);if(!el)return;
+  const kind=get('delist-kind-'+ticker)?.value;
+  const price=parseFloat(get('delist-price-'+ticker)?.value);
+  const ex=delistExposure(ticker),cash=companyCash(ticker);
+  if(kind==='going_private'){
+    if(!(price>0)){el.innerHTML='';return;}
+    const cost=Math.round(ex.shares*price*100)/100;
+    el.innerHTML=cost<=cash
+      ? '<div class="ibox ibox-teal">Buying out '+ex.shares.toLocaleString()+' shares at '+fmt(price)+' costs <strong>'+fmt(cost)+'</strong>. The company holds '+fmt(cash)+'.</div>'
+      : '<div class="ibox ibox-red">Buying out '+ex.shares.toLocaleString()+' shares at '+fmt(price)+' costs <strong>'+fmt(cost)+'</strong>, but the company only holds '+fmt(cash)+'. The President cannot approve this — lower the offer, or file as bankruptcy.</div>';
+  } else if(kind==='bankruptcy'){
+    el.innerHTML='<div class="ibox ibox-amber">The President decides what shareholders receive, which may be nothing. If the company cannot cover it, everyone is paid the same reduced share of what is left.</div>';
+  } else el.innerHTML='';
+}
+function renderAdminDelisting(){
+  const pend=pendingDelistings();
+  const done=(DB.delistApps||[]).filter(a=>a.status!=='pending').slice().reverse();
+  const card=a=>{
+    const ex=delistExposure(a.ticker),cash=companyCash(a.ticker);
+    const suggested=a.kind==='going_private'?Number(a.proposed_price):0;
+    const cost=Math.round(ex.shares*suggested*100)/100;
+    return '<div class="app-row" style="align-items:flex-start"><div class="app-info" style="flex:1">'
+      +'<div class="app-name">'+esc(a.company_name)+' <span class="badge b-gray" style="font-family:var(--mono)">'+a.ticker+'</span> '
+      +'<span class="badge '+(a.kind==='bankruptcy'?'b-red':'b-blue')+'">'+(DELIST_KIND_LABEL[a.kind]||a.kind)+'</span></div>'
+      +'<div class="app-meta">"'+esc(a.reason)+'"</div>'
+      +'<div class="app-meta">'+ex.holders+' holder(s) · '+ex.shares.toLocaleString()+' shares held by others · '
+      +ex.shorts+' short position(s) · company cash '+fmt(cash)
+      +(a.kind==='going_private'?' · proposed '+fmt(a.proposed_price)+' = '+fmt(cost)+(cost>cash?' (MORE than it holds)':''):'')+'</div>'
+      +'<div class="grid2" style="margin-top:8px">'
+      +'<div><label class="flabel">Settlement per share</label>'
+      +'<input type="number" step="0.01" min="0" id="delist-settle-'+a.id+'" value="'+(a.kind==='going_private'?Number(a.proposed_price).toFixed(2):'0.00')+'"></div>'
+      +'<div><label class="flabel">Note (public)</label><input type="text" id="delist-note-'+a.id+'" placeholder="Reasoning for the record"></div>'
+      +'</div></div>'
+      +'<div class="btn-row" style="margin-left:10px"><button class="btn btn-success btn-sm" onclick="busy(this,&quot;Settling…&quot;,()=>reviewDelisting(&quot;'+a.id+'&quot;,true))">Approve &amp; settle</button>'
+      +'<button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewDelisting(&quot;'+a.id+'&quot;,false))">Reject</button></div></div>';
+  };
+  return '<div class="card"><div class="section-title">Delisting applications</div>'
+    +'<div class="ibox ibox-teal">A company that files to leave the exchange must say why, and that reason is public. '
+    +'<strong>Going private</strong> buys every outside shareholder out and can only be approved if the company can afford it in full. '
+    +'<strong>Bankruptcy</strong> pays whatever you decide, possibly nothing — and if the cash will not stretch, every shareholder takes the same proportional cut.</div>'
+    +(pend.length?pend.map(card).join(''):'<div class="empty">No pending delisting applications</div>')
+    +(done.length?'<hr class="divider">'+done.map(a=>'<div class="app-row"><div class="app-info">'
+      +'<div class="app-name">'+esc(a.company_name)+' <span class="badge b-gray" style="font-family:var(--mono)">'+a.ticker+'</span> '
+      +'<span class="badge b-gray">'+(DELIST_KIND_LABEL[a.kind]||a.kind)+'</span></div>'
+      +'<div class="app-meta">"'+esc(a.reason)+'"</div>'+delistOutcomeHTML(a)
+      +(a.reviewed_by_name?'<div class="app-meta" style="color:var(--text3)">reviewed by '+esc(a.reviewed_by_name)+'</div>':'')
+      +'</div><span class="badge '+(a.status==='approved'?'b-green':a.status==='rejected'?'b-red':'b-gray')+'">'+a.status+'</span></div>').join(''):'')
+    +'</div>';
 }
 function renderAdminDilution(pDil,rDil){
   return`<div class="card"><div class="section-title">Pending dilution requests</div>${pDil.length?pDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span> <span class="badge b-coral">+${d.pct_increase}%</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares — "${esc(d.reason)}"</div></div><div class="btn-row"><button class="btn btn-success btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewDilution('${d.id}',true))">Approve</button><button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewDilution('${d.id}',false))">Reject</button></div></div>`).join(''):'<div class="empty">No pending dilution requests</div>'}${rDil.length?`<hr class="divider">${rDil.map(d=>`<div class="app-row"><div class="app-info"><div class="app-name">${esc(d.company_name)} <span class="badge b-gray" style="font-family:var(--mono)">${d.ticker}</span></div><div class="app-meta">+${d.new_shares.toLocaleString()} shares</div></div><span class="badge ${d.status==='approved'?'b-green':'b-red'}">${d.status}</span></div>`).join('')}`:''}`;
