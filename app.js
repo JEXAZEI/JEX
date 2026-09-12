@@ -1225,6 +1225,18 @@ function markPrice(co){
 const pvMark=u=>Object.entries(holdings(u)).reduce((s,[t,q])=>{const c=getCo(t);return s+(c?markPrice(c)*q:0);},0);
 const sPnlMark=u=>Object.entries(shorts(u)).reduce((s,[t,pos])=>{const c=getCo(t);if(!c)return s;return s+Math.round((pos.avgPrice-markPrice(c))*pos.qty*100)/100;},0);
 const nwMark=u=>Math.round((u.cash+pvMark(u)+sPnlMark(u)+shortCollateral(u)+fundValue(u))*100)/100;
+// What a student was given to start with. The Chairman sets this per session
+// and it is passed to approve_registration, so it is NOT always 10000 -- but
+// every "vs Start" figure in the app used to hardcode 10000 anyway. With the
+// session set to, say, 600, every one of those columns was wrong by 9400,
+// including the Balances CSV that gets exported for grading.
+//
+// Falls back to 10000 only when the setting is missing or unusable, which is
+// what the rest of the app already assumed.
+const startingCash=()=>{
+  const v=Number(DB.session&&DB.session.starting_cash);
+  return v>0?v:10000;
+};
 const isAdmin=u=>(['chairman','president','secretary','treasurer','compliance_officer'].includes(u?.role));
 const isChairman=u=>u?.role==='chairman'||u?.role==='president';
 const isPresident=u=>u?.role==='president';
@@ -1956,7 +1968,7 @@ async function pushBalances(){
     cash:Math.round(u.cash*100)/100,
     portfolio:Math.round(pv(u)*100)/100,
     divs:Math.round(divRec(u)*100)/100,
-    nw:nw(u),vsStart:Math.round((nw(u)-10000)*100)/100
+    nw:nw(u),vsStart:Math.round((nw(u)-startingCash())*100)/100
   })).sort((a,b)=>b.nw-a.nw).map((r,i)=>({...r,rank:i+1}));
   await pushToSheets('balances',{rows});
   // Listed companies -- was never actually pushed, so a "Companies" tab a
@@ -7947,7 +7959,7 @@ function renderLeaderboard(){
       <option value="">All classrooms</option>
       ${DB.classrooms.map(c=>`<option value="${c.id}" ${UI.lbClassroom===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
     </select>`:'';
-  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard<span class="info-bubble" tabindex="0">?<span class="info-tip">Each holding is valued at that stock&#39;s volume-weighted average price for the session, not its last trade. The last trade is one order and easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Your Portfolio page shows the live value at the current price, so the two can differ during a session — that difference is the same one between a fund&#39;s live marks and its official NAV.</span></span></span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${esc(u.name)}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${getClassroomName(u.classroom_id)}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=10000?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
+  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard<span class="info-bubble" tabindex="0">?<span class="info-tip">Each holding is valued at that stock&#39;s volume-weighted average price for the session, not its last trade. The last trade is one order and easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Your Portfolio page shows the live value at the current price, so the two can differ during a session — that difference is the same one between a fund&#39;s live marks and its official NAV.</span></span></span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${esc(u.name)}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${getClassroomName(u.classroom_id)}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=startingCash()?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
 }
 function renderFundLeaderboard(){
   const ranked=(DB.funds||[]).filter(f=>!isHiddenTestEntity(f.manager_id)).map(f=>{
@@ -9486,12 +9498,12 @@ function renderAdminBalances(students){
   // and barely moves this.
   const rows=students.map(u=>({name:u.name,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pvMark(u)*100)/100,divs:Math.round(divRec(u)*100)/100,nw:nwMark(u)})).sort((a,b)=>b.nw-a.nw);
   const csvEscape=v=>{if(v==null)return'';const s=String(v).replace(/\n/g,' ');return s.includes(',')||s.includes('"')?'"'+s.replace(/"/g,'""')+'"':s;};
-  const csv=[['Rank','Name','Cash','Portfolio (VWAP)','Dividends','Net worth (VWAP)','vs Start'],...rows.map((r,i)=>[i+1,r.name,r.cash.toFixed(2),r.portfolio.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),(r.nw-10000).toFixed(2)])].map(r=>r.map(csvEscape).join(',')).join('\n');
+  const csv=[['Rank','Name','Cash','Portfolio (VWAP)','Dividends','Net worth (VWAP)','vs Start ('+fmt(startingCash())+')'],...rows.map((r,i)=>[i+1,r.name,r.cash.toFixed(2),r.portfolio.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),(r.nw-startingCash()).toFixed(2)])].map(r=>r.map(csvEscape).join(',')).join('\n');
   window._jexCSV=csv;
   return`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><span style="font-size:12px;color:var(--text2)">Live student balances</span><div style="display:flex;gap:8px"><button class="btn btn-sm" style="background:var(--purple);color:white;border-color:var(--purple)" onclick="generatePDFReport()">📄 Full PDF report</button><button class="btn btn-sm btn-success" onclick="downloadCSV()">Download CSV</button><button class="btn btn-sm btn-primary" onclick="const p=get('csv-panel');p.style.display=p.style.display==='none'?'block':'none'">Show CSV to copy</button></div></div>
-  <div class="grid4" style="margin-bottom:14px"><div class="mcard"><div class="mlabel">Students</div><div class="mval">${rows.length}</div></div><div class="mcard"><div class="mlabel">Avg net worth</div><div class="mval ${rows.length&&rows.reduce((s,r)=>s+r.nw,0)/rows.length>=10000?'green':''}" style="font-family:var(--mono)">${rows.length?fmt(rows.reduce((s,r)=>s+r.nw,0)/rows.length):'—'}</div></div><div class="mcard"><div class="mlabel">Leader</div><div class="mval" style="font-size:15px;margin-top:4px">${esc(rows[0]?.name||'—')}</div></div><div class="mcard"><div class="mlabel">Total dividends paid</div><div class="mval green" style="font-family:var(--mono)">${fmt(rows.reduce((s,r)=>s+r.divs,0))}</div></div></div>
+  <div class="grid4" style="margin-bottom:14px"><div class="mcard"><div class="mlabel">Students</div><div class="mval">${rows.length}</div></div><div class="mcard"><div class="mlabel">Avg net worth</div><div class="mval ${rows.length&&rows.reduce((s,r)=>s+r.nw,0)/rows.length>=startingCash()?'green':''}" style="font-family:var(--mono)">${rows.length?fmt(rows.reduce((s,r)=>s+r.nw,0)/rows.length):'—'}</div></div><div class="mcard"><div class="mlabel">Leader</div><div class="mval" style="font-size:15px;margin-top:4px">${esc(rows[0]?.name||'—')}</div></div><div class="mcard"><div class="mlabel">Total dividends paid</div><div class="mval green" style="font-family:var(--mono)">${fmt(rows.reduce((s,r)=>s+r.divs,0))}</div></div></div>
   <div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th style="padding-left:14px">Rank</th><th>Student</th><th class="r">Cash</th><th class="r">Portfolio</th><th class="r">Dividends</th><th class="r">Net worth <span class="info-bubble" tabindex="0">?<span class="info-tip">Marked at each stock&#39;s volume-weighted average price for the session, not its last trade. A single trade sets the last price and is easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Real funds strike their official NAV the same way, and for the same reason.</span></span></th><th class="r">vs Start</th></tr></thead>
-  <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-10000,vc=vs>=0?'price-up':'price-down';return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${i===0?'var(--amber)':i===1?'var(--text2)':i===2?'#993C1D':'var(--text3)'}">#${i+1}</td><td style="font-weight:500">${esc(r.name)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="7"><div class="empty">No approved students yet</div></td></tr>`}
+  <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-startingCash(),vc=vs>=0?'price-up':'price-down';return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${i===0?'var(--amber)':i===1?'var(--text2)':i===2?'#993C1D':'var(--text3)'}">#${i+1}</td><td style="font-weight:500">${esc(r.name)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="7"><div class="empty">No approved students yet</div></td></tr>`}
   </tbody></table></div>
   <div id="csv-panel" style="display:none;margin-top:12px"><div class="ibox ibox-teal">Click inside the box, press <strong>Ctrl+A</strong> (Cmd+A) to select all, then <strong>Ctrl+C</strong> to copy.</div><textarea readonly onclick="this.select()" style="width:100%;font-family:var(--mono);font-size:12px;padding:10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);resize:vertical;min-height:160px;line-height:1.5">${csv}</textarea></div>`;
 }
@@ -10203,7 +10215,7 @@ function exportStudentPDF(){
   <div class="grid" style="grid-template-columns:repeat(3,1fr)">
     <div class="card"><div class="label">Dividends received</div><div class="val mono green">${fmt(_divs)}</div></div>
     <div class="card"><div class="label">Total trades</div><div class="val">${myTrades.length}</div></div>
-    <div class="card"><div class="label">vs Starting cash</div><div class="val mono ${_nw-10000>=0?'green':'red'}">${_nw-10000>=0?'+':''}${fmt(_nw-10000)}</div></div>
+    <div class="card"><div class="label">vs Starting cash</div><div class="val mono ${_nw-startingCash()>=0?'green':'red'}">${_nw-startingCash()>=0?'+':''}${fmt(_nw-startingCash())}</div></div>
   </div>
   <h2>Holdings</h2>
   ${myHoldings.length?`<table><thead><tr><th>Ticker</th><th>Shares</th><th>Current price</th><th>Value</th></tr></thead><tbody>
@@ -10659,7 +10671,7 @@ function generatePDFReport(){
   </div>
   <h2>Leaderboard</h2>
   <table><thead><tr><th>Rank</th><th>Student</th><th>Cash</th><th>Portfolio</th><th>Dividends</th><th>Net worth</th><th>vs Start</th></tr></thead><tbody>
-  ${students.map((u,i)=>{const vs=u._nw-10000;return`<tr><td>${i===0?'<span class="badge badge-gold">🥇 #1</span>':'#'+(i+1)}</td><td><strong>${esc(u.name)}</strong></td><td>$${u.cash.toFixed(2)}</td><td>$${pv(u).toFixed(2)}</td><td>$${u._divs.toFixed(2)}</td><td><strong class="${vs>=0?'up':'dn'}">$${u._nw.toFixed(2)}</strong></td><td class="${vs>=0?'up':'dn'}">${vs>=0?'+':''}$${vs.toFixed(2)}</td></tr>`;}).join('')}
+  ${students.map((u,i)=>{const vs=u._nw-startingCash();return`<tr><td>${i===0?'<span class="badge badge-gold">🥇 #1</span>':'#'+(i+1)}</td><td><strong>${esc(u.name)}</strong></td><td>$${u.cash.toFixed(2)}</td><td>$${pv(u).toFixed(2)}</td><td>$${u._divs.toFixed(2)}</td><td><strong class="${vs>=0?'up':'dn'}">$${u._nw.toFixed(2)}</strong></td><td class="${vs>=0?'up':'dn'}">${vs>=0?'+':''}$${vs.toFixed(2)}</td></tr>`;}).join('')}
   </tbody></table>
   <h2>Listed Companies</h2>
   <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Shares</th><th>Avail.</th><th>Market cap</th></tr></thead><tbody>
