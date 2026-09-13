@@ -4437,20 +4437,23 @@ async function resetExchange(){
 
   toast('Resetting... please wait');
   try{
-    // The entire wipe (every table below, officer cash reset, session
-    // reset) now runs server-side in one transaction (rpc_admin_full_reset)
-    // instead of ~28 separate direct client DELETEs -- those relied on
-    // table-level DELETE grants that were just as wide open as the UPDATE
-    // grants final_revoke_migration.sql closed, for every table:
-    // jex_trades, jex_dividends, jex_buybacks, jex_limit_orders,
-    // jex_stop_loss, jex_notifications, jex_halts, jex_activity, jex_news,
-    // jex_announcements, jex_minutes, jex_flags, jex_pending,
-    // jex_bug_reports, jex_email_verifications, jex_funds,
-    // jex_contact_messages, jex_index_history, jex_ipo_applications,
-    // jex_dilution_applications, jex_share_classes, jex_class_applications,
-    // jex_founder_allocations, jex_company_members, jex_price_adjustments,
-    // jex_price_alerts, jex_nw_history, jex_dividend_approvals, jex_votes,
-    // jex_vote_ballots, jex_companies, jex_users, jex_classrooms.
+    // The entire wipe (officer cash reset and session reset included) runs
+    // server-side in one transaction (rpc_admin_full_reset) instead of ~28
+    // separate direct client DELETEs -- those relied on table-level DELETE
+    // grants that were just as wide open as the UPDATE grants
+    // final_revoke_migration.sql closed.
+    //
+    // The list of tables it clears is NOT duplicated here any more. It used to
+    // be, and it drifted: this comment named 28 tables while the function
+    // actually named 35, and a reader checking whether a new table was covered
+    // would have got the wrong answer from it. rpc_admin_full_reset's own
+    // source is the only truth.
+    //
+    // ADDING A TABLE? It has to be taught to the reset too, and nothing
+    // enforces that -- jex_delist_applications survived a reset for two days
+    // because of exactly this. tools/reset_coverage.sql lists every table that
+    // currently survives one, derived from the function source rather than from
+    // any comment. Run it after adding a table.
     await sb.rpc('rpc_admin_full_reset',{});
     // Clear local DB state entirely -- test-flagged accounts, their listed
     // companies, share classes, and funds survive a reset server-side now
