@@ -123,8 +123,18 @@ check('the payout is rounded to cents', r.total===Math.round(r.total*100)/100, S
 check('...to the value the server computes', r.total===1, String(r.total));  // 3*0.333*1 = 0.999
 
 // ── and the caller uses it ──
+// Asserted on the expression itself rather than on how close it sits to the
+// dividendPassThrough call. The previous form allowed 200 characters between
+// the two and broke the moment a comment was written between them, which is a
+// test failing for a reason that has nothing to do with what it is checking.
 check('issueDividend adds the pass-through to its total',
-      /const pass=dividendPassThrough\(ticker,perShare\);[\s\S]{0,200}?directTotal\+pass\.total/.test(src));
+      /const pass=dividendPassThrough\(ticker,perShare\);/.test(src)
+      &&/directTotal\+pass\.total\+fundCut/.test(src));
+// The company is charged for shares held by student-run funds, so the preview
+// that decides "Insufficient funds" and whether the Treasurer threshold is
+// crossed has to count them too, or the server refuses what this offered.
+check('...and the funds\' share as well',
+      /const fundCut=fundDividendCut\(allT,perShare\);/.test(src));
 check('...and refuses on the combined total, like the server',
       /if\(total<=0\)return toast\('No shareholders yet'\)/.test(src));
 check('...and no longer refuses just because nobody holds it directly',

@@ -1616,11 +1616,21 @@ async function reviewDivApproval(id,approve){
   if(r.owner_id){const o=getUser(r.owner_id);if(o)o.cash=r.owner_cash;}
   const jxiPayoutsA=(r.jxi_pass_through||[]).flatMap(f=>f.payouts);
   await refreshDividendPayoutBalances([...(r.payouts||[]),...jxiPayoutsA]);
+  // The ex-dividend drop, on this path too. It was only ever applied on the
+  // direct path, so a Treasurer-approved dividend moved the price server-side
+  // and left every open browser showing the old one until the next poll. These
+  // are the BIG dividends -- crossing the approval threshold is what sends them
+  // through here -- so it was the largest drops that went unshown.
+  const dropsA=applyExDividend(r)?r.new_prices:null;
   if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker:da.ticker,company_name:da.company_name,per_share:da.per_share,total:r.total,note:da.note||'Treasurer-approved dividend',payouts:r.payouts,jxi_pass_through:r.jxi_pass_through||[],ts:ts()});
   await logActivity('dividend',da.company_name+' paid dividend '+fmt(da.per_share)+'/share — total '+fmt(r.total),{ticker:da.ticker,userId:r.owner_id,userName:u.name,amount:r.total});
   await pushNotificationToHolders(da.ticker,'dividend','💰 '+da.company_name+' paid a dividend of '+fmt(da.per_share)+'/share');
   pushBalances();
-  toast(da.company_name+' paid '+fmt(da.per_share)+'/share (Treasurer-approved)');
+  toast(da.company_name+' paid '+fmt(da.per_share)+'/share (Treasurer-approved)'
+    +(dropsA&&dropsA[da.ticker]!=null
+      ? ' — '+da.ticker+' fell '+fmt(da.per_share)+' to '+fmt(dropsA[da.ticker])
+        +', because the cash came out of the company. Shareholders are square.'
+      : ''));
   render();
 }
 // The whole promise of practice mode is that it can be undone. Two ordering
@@ -5357,6 +5367,18 @@ async function doBuyback(ticker,qty){
 // and whether the total crosses the Treasurer approval threshold. All three
 // were working from a number smaller than the one the server would compute, so
 // a dividend could look payable here and be refused there.
+// What the student-run funds are owed, mirroring rpc_pay_dividend's jex_funds
+// loop exactly: base-equivalent shares (so a class counts at its ratio), one
+// rounding per fund, paid into the fund's cash where its NAV picks it up.
+function fundDividendCut(tickers,perShare){
+  let total=0;
+  for(const f of DB.funds||[]){
+    const h=f.holdings||{};
+    const shares=tickers.reduce((n,t)=>n+(Number(h[t])||0)*classRatio(t),0);
+    if(shares>0)total+=Math.round(shares*perShare*100)/100;
+  }
+  return Math.round(total*100)/100;
+}
 function dividendPassThrough(ticker,perShare){
   // Every ticker of the company, weighted by claim -- not just the parent.
   //
@@ -5401,14 +5423,18 @@ async function issueDividend(ticker,perShare,note){
   // different answer by a few cents for a multi-class company, and the number
   // this produces is compared against the Treasurer threshold.
   //
-  // And weighted by each class's conversion ratio, which the server does NOT do
-  // yet. A dividend is paid per unit of economic claim, and one ACME.B at ratio
-  // 5 IS five ACME -- that is the whole meaning of the ratio. Paying it flat per
+  // And weighted by each class's conversion ratio, which the server does too --
+  // rpc_pay_dividend multiplies by coalesce(sc.conversion_ratio, 1) in both its
+  // shareholder loop and its index-fund loop. (This comment used to say the
+  // server did NOT; that stopped being true when the ratio went in, and a
+  // comment claiming the two halves disagree is worse than no comment, because
+  // the next person reconciles them in the wrong direction.)
+  //
+  // A dividend is paid per unit of economic claim, and one ACME.B at ratio 5 IS
+  // five ACME -- that is the whole meaning of the ratio. Paying it flat per
   // share is the exploit: list a class at a fifth of the parent and collect five
   // times the yield for the same claim. classRatio() answers 1 for the base
-  // class and for every class without a ratio, so until a ratio other than 1
-  // exists this is arithmetically identical to what it computed before, and
-  // identical to what the server computes.
+  // class and for every class without a ratio.
   const directTotal=sh.reduce((s,u)=>{
     const equiv=baseEquivalent(u,allT);
     return s+Math.round(equiv*perShare*100)/100;
@@ -5418,7 +5444,16 @@ async function issueDividend(ticker,perShare,note){
   // them out of this preview understated the cost of every dividend paid by a
   // company the index holds, which is every listed company.
   const pass=dividendPassThrough(ticker,perShare);
-  const total=Math.round((directTotal+pass.total)*100)/100;
+  // Student-run funds hold real shares of this company, in DB.funds rather than
+  // on a user row, and rpc_pay_dividend now pays them and charges the company
+  // for them. Leaving them out here is not a cosmetic gap: the three decisions
+  // immediately below -- "No shareholders yet", "Insufficient funds", and
+  // whether the total crosses the Treasurer threshold -- are all made from this
+  // number, so a preview that is short by the funds' share lets a dividend look
+  // payable here and get refused there, which is the exact complaint the
+  // comment above dividendPassThrough was written about.
+  const fundCut=fundDividendCut(allT,perShare);
+  const total=Math.round((directTotal+pass.total+fundCut)*100)/100;
   // The server refuses on its own total, after both loops. A company whose
   // shares are held only through the index has no direct shareholders and used
   // to be refused right here, even though the server would have paid it.
@@ -5488,7 +5523,7 @@ async function issueDividend(ticker,perShare,note){
   // Guarded on r.new_prices so the client is correct whether or not the
   // dividend migration has been applied yet.
   const drops=r.new_prices||null;
-  if(drops)applyExDividend(drops);
+  applyExDividend(r);
   const exNote=drops&&drops[ticker]!=null
     ? ' '+ticker+' fell '+fmt(perShare)+' to '+fmt(drops[ticker])+' — the cash came out of the company, so your total is unchanged. That is what a dividend is.'
     : '';
@@ -5506,15 +5541,38 @@ async function issueDividend(ticker,perShare,note){
 // times as far, because one of its shares was paid as five base shares. The
 // server sends the new prices rather than the client re-deriving them, so the
 // two can never disagree about a number this visible.
-function applyExDividend(newPrices){
-  for(const [t,p] of Object.entries(newPrices||{})){
+// Takes the whole rpc_pay_dividend result, because the price is only half of
+// what moves. Returns true if anything was applied, so callers can tell whether
+// the server is running the ex-dividend migration yet.
+function applyExDividend(r){
+  const newPrices=(r&&r.new_prices)||null;
+  if(!newPrices)return false;
+  const stamp=new Date().toISOString();
+  for(const [t,p] of Object.entries(newPrices)){
     const c=getCo(t);
     if(!c||!(Number(p)>0))continue;
     c.price=Number(p);
     // Keep the chart honest: an unexplained step down invites "the app lost my
     // money" far more than a labelled one does.
-    if(Array.isArray(c.price_history))c.price_history.push({p:Number(p),t:'ex-dividend'});
+    //
+    // Stamped with a real timestamp, not the word "ex-dividend". computeIndex
+    // builds one shared time axis out of every constituent's stamps, sorts it
+    // as strings and walks each history with `h[j+1].t <= t`. Any non-date
+    // sorts after every ISO date ('e' > '2'), so the label landed at the end of
+    // the axis as a phantom final point and dragged every other constituent's
+    // cursor to its end to meet it. The server writes an ISO stamp here; now
+    // the local point matches it and the chart does not jump when the next
+    // poll replaces one with the other.
+    if(Array.isArray(c.price_history))c.price_history.push({p:Number(p),t:stamp});
   }
+  // The price band and the day's percent change are both measured from
+  // session_open_prices, and the server moved it by the same amount so a big
+  // dividend cannot push a stock below its own band. Applying the price here
+  // and leaving the reference stale would show every shareholder an invented
+  // loss for the day, and wrong band limits on the trade ticket, until the
+  // next poll -- the precise misreading this whole feature exists to prevent.
+  if(r.session_open_prices)DB.session.session_open_prices=r.session_open_prices;
+  return true;
 }
 async function refreshDividendPayoutBalances(payouts){
   if(!payouts||!payouts.length)return;
