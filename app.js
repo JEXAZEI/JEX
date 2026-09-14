@@ -6457,7 +6457,11 @@ function renderConversionPanel(co,u){
   if(!rows.length)return'';
   return '<div style="padding:12px 0 2px">'
     +'<div style="font-size:12px;font-weight:500;margin-bottom:6px">Conversion rights'
-    +infoBubble('A class share carries the economic claim of its conversion ratio in the company\'s base shares. Converting swaps them at that ratio: the class shares are retired and the base shares are created. No money changes hands and neither price moves — but if the class is trading below its ratio, the base shares you get back are worth more than what you gave up. It is one way: base shares cannot be converted into a class.')
+    // This used to end "if the class is trading below its ratio, the base shares
+    // you get back are worth more than what you gave up" -- which was true, and
+    // was the app teaching students to run the arbitrage. It is refused now, so
+    // the bubble explains the rule instead of the trick.
+    +infoBubble('A class share carries the economic claim of its conversion ratio in the company\'s base shares. Converting swaps them at that ratio: the class shares are retired and the base shares are created, no money changes hands, and neither price moves. Because the two tickers trade separately, their prices can drift apart — and a swap that would hand you more value than you gave up is refused, since that value would have to come out of the company\'s pocket. In a real market this cannot happen: traders buying the cheap class is exactly what pushes it back to its conversion value. You can still convert at a loss if you want the voting rights. It is one way: base shares cannot be converted into a class.')
     +'</div>'
     +rows.map(c=>{
       const qty=(holdings(u)[c.ticker])||0, r=classRatio(c);
@@ -6465,22 +6469,34 @@ function renderConversionPanel(co,u){
       const halted=isHalted(c.ticker)||isHalted(c.parent_ticker);
       const parentGone=!parent||parent.status!=='listed';
       // What the swap is worth right now, at both marks. Positive means the
-      // class is trading below its ratio and converting is the better side.
+      // class is trading below its ratio -- which is no longer "the better
+      // side" but the case the server refuses, because that value would be
+      // created out of nothing at the company's expense. Shown as the blocking
+      // reason rather than as a green opportunity, which is how it used to read.
       const edge=cls&&parent&&parent.price>0?(r*parent.price)-cls.price:0;
+      const blocked=edge>=0.005;
       return '<div class="app-row" style="margin-bottom:4px"><div class="app-info">'
         +'<div class="app-name"><span class="badge b-gray" style="font-family:var(--mono)">'+esc(c.ticker)+'</span> '
         +qty.toLocaleString()+' held → up to '+(qty*r).toLocaleString()+' '+esc(c.parent_ticker)+'</div>'
         +'<div class="app-meta">1 '+esc(c.ticker)+' = '+r+' '+esc(c.parent_ticker)
         +(cls&&parent?' · '+fmt(cls.price)+' vs '+fmt(r*parent.price)+' of '+esc(c.parent_ticker):'')
         // fmt() renders a negative as "$-10.00". Sign first, magnitude after.
-        +(cls&&parent&&Math.abs(edge)>=0.01?' · <span style="color:var(--'+(edge>0?'green':'red')+')">'
-            +(edge>0?'+':'-')+fmt(Math.abs(edge))+' per share converted</span>':'')
+        //
+        // A positive edge is the refused case, so it is amber and says why. A
+        // negative one is a real choice the holder is allowed to make -- give
+        // up value for votes -- so it stays red and factual.
+        +(cls&&parent&&blocked
+          ? ' · <span style="color:var(--amber)">'+fmt(edge)+' per share more than you hold — refused, '
+            +esc(c.ticker)+' has to reach '+fmt(r*parent.price)+'</span>'
+          : (cls&&parent&&Math.abs(edge)>=0.01
+             ? ' · <span style="color:var(--red)">-'+fmt(Math.abs(edge))+' per share converted</span>'
+             : ''))
         +(halted?' · <span style="color:var(--amber)">paused while trading is halted</span>':'')
         +(parentGone?' · <span style="color:var(--amber)">'+esc(c.parent_ticker)+' is not trading</span>':'')
         +'</div></div>'
         +'<div style="display:flex;gap:6px;align-items:center">'
         +'<input type="number" id="conv-qty-'+esc(c.ticker)+'" min="1" max="'+qty+'" step="1" value="'+qty+'" style="width:90px;font-size:12px;padding:5px 8px">'
-        +'<button class="btn btn-sm btn-primary"'+(halted||parentGone?' disabled':'')
+        +'<button class="btn btn-sm btn-primary"'+(halted||parentGone||blocked?' disabled':'')
         // Raw ticker, not esc()'d: inside an inline handler the browser decodes
         // the entities before the JS parser sees them, so HTML-escaping here
         // would break the call rather than protect it. Tickers are [A-Z0-9.]
@@ -6510,6 +6526,28 @@ async function convertShareClass(ticker,qty){
   // ratio set by any other route would otherwise mint a fraction of a share.
   if(qty*r!==Math.floor(qty*r))return toast('Converting '+qty+' '+ticker+' would produce a fractional share');
   if(isHalted(ticker)||isHalted(meta.parent_ticker))return toast('Conversions are paused while trading is halted');
+  // A conversion must not create value out of nothing. The class and the parent
+  // are separate tickers with separate prices and the ratio between them is
+  // fixed, so while the class trades below ratio × parent the swap simply hands
+  // the holder the difference -- which comes out of the company owner's cash
+  // when the base shares are sold back. On a copy of production that was
+  // $2,754.60 of profit in one cycle from $10,000 of starting cash.
+  //
+  // In a real market the arbitrage is what bids the class back to parity, so it
+  // cannot persist. Converting here moves neither price, so nothing corrects it.
+  // rpc_convert_share_class refuses this now; this is the same refusal said
+  // earlier and in plainer words, so nobody has to read a server error to find
+  // out why the button did nothing. The server is the boundary, not this.
+  //
+  // Converting at a LOSS stays allowed -- giving up market value for voting
+  // rights is a real decision and it belongs to the holder.
+  const clsCo=getCo(ticker);
+  const parity=parent.price*r;
+  if(clsCo&&clsCo.price>0&&parent.price>0&&clsCo.price*qty<parity*qty-0.005)
+    return toast('Converting '+qty+' '+ticker+' ('+fmt(clsCo.price*qty)+') would return '
+      +(qty*r)+' '+meta.parent_ticker+' ('+fmt(parity*qty)+') — a gain of '
+      +fmt(parity*qty-clsCo.price*qty)+' out of nothing, so it is refused. '
+      +ticker+' has to be trading at or above '+fmt(parity)+' for this swap to be even.');
   if(!confirm('Convert '+qty+' '+ticker+' into '+(qty*r)+' '+meta.parent_ticker+'?\n\nThis is one way — you cannot convert '+meta.parent_ticker+' back into '+ticker+'.'))return;
   if(!checkRateLimit(u.id,'trades'))return;
   // Runs server-side (rpc_convert_share_class): it derives the holder from the

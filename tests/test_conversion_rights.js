@@ -155,9 +155,19 @@ check('a non-trading role sees no panel',
       renderConversionPanel(getCo('ACME'),{id:'a',role:'chairman',holdings:{'ACME.B':10}})==='');
 check('no user at all does not throw', renderConversionPanel(getCo('ACME'),null)==='');
 
-// The edge: class marked at 90, worth 5 x 20 = 100 converted. Converting is
-// +10/share, which is the arbitrage that enforces the ceiling.
-check('the panel shows what the swap is worth right now', /\+\$10\.00 per share/.test(onParent), onParent);
+// The edge: class marked at 90, worth 5 x 20 = 100 converted.
+//
+// This used to assert a green "+$10.00 per share" and call it "the arbitrage
+// that enforces the ceiling". It enforces nothing -- converting moves neither
+// price, so nothing pushes the class back toward parity and the same $10 can be
+// taken over and over, out of the company owner's cash. Measured end to end
+// against the real trade functions, that was $2,754.60 of profit in one cycle.
+// It is refused now, so the panel has to say so instead of advertising it.
+check('a swap that would create value is shown as refused, not as a gain',
+      /refused, ACME\.B has to reach \$100\.00/.test(onParent), onParent);
+check('...and the Convert button is disabled', /disabled/.test(onParent), onParent);
+check('...and no green gain is offered anywhere in the panel',
+      !/\+\$10\.00 per share/.test(onParent)&&!/green/.test(onParent), onParent);
 setup();DB.companies[1].price=110;   // class ABOVE its ratio
 check('...and shows it as negative when the class is above its ratio',
       /-\$10\.00 per share/.test(renderConversionPanel(getCo('ACME'),stu({'ACME.B':10}))));
