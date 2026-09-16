@@ -5079,6 +5079,11 @@ async function toggleWatch(ticker){
 // ═══════════════════════════════════════════════
 const fundUnits=u=>u.fund_units||{};
 const MAX_FUND_FEE_PCT=25;
+// The most a company may offer above the market to tempt shareholders into a
+// buyback. Mirrors the cap rpc_buyback enforces; the server also refuses any
+// premium that would put the bid above the session price band's ceiling, which
+// is usually the tighter of the two.
+const MAX_TENDER_PREMIUM_PCT=50;
 const getFund=id=>DB.funds.find(f=>f.id===id);
 const canManageFund=f=>{const u=cu();return !!u&&(u.id===f.manager_id||isChairman(u));};
 const fundShortPnl=f=>Object.entries(fundShorts(f)).reduce((s,[t,pos])=>{const c=getCo(t);if(!c)return s;return s+Math.round((pos.avgPrice-c.price)*pos.qty*100)/100;},0);
@@ -5323,13 +5328,21 @@ async function updateFundingGoal(ticker,goal,useOfFunds){
 // authenticated caller could previously invoke doBuyback() for ANY ticker
 // and spend their own cash to shrink a company they have no relationship
 // to's share count.
-async function doBuyback(ticker,qty){
+async function doBuyback(ticker,qty,premiumPct){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter valid quantity');
-  const sold=co.shares-co.shares_avail;if(qty>sold)return toast('Only '+sold+' shares in circulation');
+  // Capped at the whole issued count, not at what is in circulation. The
+  // cascade starts with the company's own UNSOLD float -- shares it never
+  // sold and already owns -- so a company holding most of its float can
+  // legitimately retire more than is circulating. The old cap made the
+  // cheapest rung of the cascade unreachable.
+  if(qty>co.shares)return toast('Only '+co.shares.toLocaleString()+' shares have been issued');
+  const prem=premiumPct===''||premiumPct==null?0:parseFloat(premiumPct);
+  if(isNaN(prem)||prem<0||prem>MAX_TENDER_PREMIUM_PCT)
+    return toast('Tender premium must be between 0 and '+MAX_TENDER_PREMIUM_PCT+'%');
   if(!checkRateLimit(u.id,'buybacks'))return;
   let r;
-  try{r=await sb.rpc('rpc_buyback',{p_ticker:ticker,p_qty:qty});}
+  try{r=await sb.rpc('rpc_buyback',{p_ticker:ticker,p_qty:qty,p_premium_pct:prem});}
   catch(e){return toast(rpcErrorMessage(e));}
   // The COMPANY funds a buyback, not whoever clicked -- this used to write
   // the returned balance onto cu(), which is only the same account when the
@@ -5339,8 +5352,28 @@ async function doBuyback(ticker,qty){
   const payer=getUser(r.owner_id||co.owner_id);
   if(payer)payer.cash=r.owner_cash!=null?r.owner_cash:r.cash;
   co.price=r.price;co.shares=r.shares;co.price_history=r.price_history;
+  if(r.shares_avail!=null)co.shares_avail=r.shares_avail;
   if(r.buyback)DB.buybacks.push(r.buyback);
-  toast('Bought back '+qty+' shares @ '+fmt(r.price));render();
+  // Sellers were paid out of the company's cash and lost the shares, so their
+  // rows are stale in this session until the next poll. Refreshed the same way
+  // a dividend refreshes the people it paid.
+  if(r.fills&&r.fills.length)
+    await refreshDividendPayoutBalances(r.fills.filter(f=>f.user_id).map(f=>({userId:f.user_id})));
+  if(r.tender)DB.limitOrders.push(r.tender);
+  // Three rungs, so the message has to say which one actually happened --
+  // "bought back 100 shares" would be a lie when 100 of the company's own
+  // unsold shares were simply cancelled and nobody was paid a cent.
+  const bits=[];
+  if(r.cancelled_from_float>0)
+    bits.push('cancelled '+r.cancelled_from_float+' unsold share'+(r.cancelled_from_float===1?'':'s')+' (no cost)');
+  if(r.bought_from_sellers>0)
+    bits.push('bought '+r.bought_from_sellers+' from sellers for '+fmt(r.spent));
+  if(r.tender)
+    bits.push('offering '+r.tender.qty+' at '+fmt(r.tender.limit_price)+' — the offer is on the book until someone takes it or you cancel it');
+  else if(r.still_wanted>0)
+    bits.push(r.still_wanted+' left over — nobody is selling, so set a premium to make an offer');
+  toast(co.ticker+': '+(bits.length?bits.join('; '):'nothing to do'));
+  render();
 }
 // Dividend payout itself runs server-side (rpc_pay_dividend) -- the RPC
 // re-derives the shareholder list and total, and now enforces the
@@ -9006,9 +9039,53 @@ function renderFinancialsMgmtTab(co,myFinancials){
 }
 function renderBBTab(co,myBBs){
   const sold=co.shares-co.shares_avail,owner=cu();
-  return`<div class="card"><div class="section-title">Share buyback${infoBubble('The company repurchases its own outstanding shares using its cash. This permanently retires the shares (they do not go back into the pool of shares available to buy) and reduces the total share count.')}</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">In circulation</div><div class="mval">${sold.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Current price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div></div>${sold>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Shares to buy back</label><input type="number" id="bb-qty" placeholder="50" min="1" max="${sold}" oninput="updateBBPrev('${co.ticker}')"></div><div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Buying back…&quot;,()=>doBuyback('${co.ticker}',get('bb-qty')?.value))">Buy back</button></div></div><div id="bb-prev"></div>`:'<div class="empty">No shares in circulation.</div>'}</div>${myBBs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${myBBs.map(b=>`<tr><td style="color:var(--text2)">${b.ts}</td><td>${b.qty}</td><td style="font-family:var(--mono)">${fmt(b.price)}</td><td style="font-weight:500;font-family:var(--mono)">${fmt(b.total)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
+  const asks=(DB.limitOrders||[]).filter(o=>o.ticker===co.ticker&&o.side==='sell'&&o.status==='open'&&o.user_id!==co.owner_id);
+  const askQty=asks.reduce((n,o)=>n+(Number(o.qty)||0),0);
+  const tender=(DB.limitOrders||[]).find(o=>o.ticker===co.ticker&&o.order_type==='buyback'&&o.status==='open');
+  return`<div class="card"><div class="section-title">Share buyback${infoBubble('A buyback works down three steps and stops as soon as it has enough. First it cancels shares the company never sold — those already belong to the company, so no money changes hands. Then it buys from anyone who has posted a sell order, paying them their own asking price. Anything still left over is posted as a public offer above the market price, which sits on the exchange until a shareholder decides to take it. The company can never take shares from someone who has not chosen to sell.')}</div><div class="grid3"><div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(owner.cash)}</div></div><div class="mcard"><div class="mlabel">Unsold (free to cancel)</div><div class="mval">${co.shares_avail.toLocaleString()}</div></div><div class="mcard"><div class="mlabel">Held by investors</div><div class="mval">${sold.toLocaleString()}</div></div></div>
+    <div class="ibox ibox-blue" style="margin:12px 0">${co.shares_avail>0?`Your first ${co.shares_avail.toLocaleString()} come out of unsold stock at no cost. `:''}${askQty>0?`${askQty.toLocaleString()} share${askQty===1?' is':'s are'} currently offered for sale and would be bought next.`:'Nobody is offering shares for sale right now, so anything beyond that needs a premium to tempt a seller.'}</div>
+    ${tender?`<div class="ibox ibox-amber" style="margin-bottom:12px">Open offer: <b>${tender.qty.toLocaleString()}</b> shares at <b>${fmt(tender.limit_price)}</b>. It stays on the exchange until a shareholder takes it. <button class="btn btn-sm btn-danger" style="margin-left:8px" onclick="busy(this,&quot;Cancelling…&quot;,()=>cancelLimitOrder(&quot;${tender.id}&quot;))">Cancel offer</button></div>`:''}
+    ${co.shares>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Shares to buy back</label><input type="number" id="bb-qty" placeholder="50" min="1" max="${co.shares}" oninput="updateBBPrev('${co.ticker}')"></div><div class="frow" style="flex:1"><label class="flabel">Offer premium (%, 0–${MAX_TENDER_PREMIUM_PCT})${infoBubble('Only used if there is nothing left to cancel and nobody is selling. The leftover shares are posted as a public offer at this much above the current price. A bigger premium is more tempting but costs more, and it is refused if it would push the price outside the day’s allowed range.')}</label><input type="number" id="bb-prem" placeholder="0" min="0" max="${MAX_TENDER_PREMIUM_PCT}" step="1" oninput="updateBBPrev('${co.ticker}')"></div><div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Buying back…&quot;,()=>doBuyback('${co.ticker}',get('bb-qty')?.value,get('bb-prem')?.value))">Buy back</button></div></div><div id="bb-prev"></div>`:'<div class="empty">No shares issued.</div>'}</div>${myBBs.length?`<div class="card"><div class="section-title">History</div><table><thead><tr><th>Time</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${myBBs.map(b=>`<tr><td style="color:var(--text2)">${b.ts}</td><td>${b.qty}</td><td style="font-family:var(--mono)">${fmt(b.price)}</td><td style="font-weight:500;font-family:var(--mono)">${fmt(b.total)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
 }
-function updateBBPrev(ticker){const co=getCo(ticker);if(!co)return;const q=parseInt(get('bb-qty')?.value)||0;const p=get('bb-prev');if(p)p.innerHTML=q>0?impactPreview(co,q,'buy'):'';}
+// Walks the same three rungs rpc_buyback walks, so the CEO sees which of them
+// their order actually lands on before they commit. It used to show
+// impactPreview(co,q,'buy') -- the price move of an ordinary market buy -- which
+// described neither the old behaviour nor the new one: cancelling unsold stock
+// moves no price at all, and the other two rungs trade at a counterparty's
+// price rather than at an impact-model price.
+function updateBBPrev(ticker){
+  const co=getCo(ticker);if(!co)return;
+  const p=get('bb-prev');if(!p)return;
+  const q=parseInt(get('bb-qty')?.value)||0;
+  const prem=parseFloat(get('bb-prem')?.value)||0;
+  if(!(q>0)){p.innerHTML='';return;}
+  let left=q,spend=0,bought=0;const rows=[];
+  const fromFloat=Math.min(left,Math.max(0,Number(co.shares_avail)||0));
+  if(fromFloat>0){rows.push(fromFloat.toLocaleString()+' cancelled from unsold stock — <b>no cost</b>');left-=fromFloat;}
+  if(left>0){
+    const asks=(DB.limitOrders||[]).filter(o=>o.ticker===ticker&&o.side==='sell'&&o.status==='open'&&o.user_id!==co.owner_id)
+      .sort((a,b)=>(a.limit_price-b.limit_price)||String(a.created_at||'').localeCompare(String(b.created_at||'')));
+    for(const a of asks){
+      if(left<=0)break;
+      const take=Math.min(Number(a.qty)||0,left);
+      if(take<=0)continue;
+      spend=Math.round((spend+take*a.limit_price)*100)/100;bought+=take;left-=take;
+    }
+    if(bought>0)rows.push(bought.toLocaleString()+' bought from sellers for <b>'+fmt(spend)+'</b>');
+  }
+  if(left>0){
+    if(prem>0){
+      const bid=Math.round(co.price*(1+prem/100)*100)/100;
+      rows.push(left.toLocaleString()+' offered at <b>'+fmt(bid)+'</b> ('+prem+'% above market) — '+fmt(Math.round(left*bid*100)/100)+' if it is all taken');
+    }else{
+      rows.push('<b>'+left.toLocaleString()+' with nowhere to go</b> — nobody is offering shares. Set a premium to make an offer.');
+    }
+  }
+  const owner=getUser(co.owner_id);
+  const short=owner&&spend>(Number(owner.cash)||0);
+  p.innerHTML='<div class="ibox '+(short?'ibox-red':'ibox-blue')+'" style="margin-top:8px">'+rows.join('<br>')
+    +(short?'<br><b>The company only holds '+fmt(owner.cash)+'</b>, so it would stop part-way.':'')+'</div>';
+}
 function renderDilTab(co){
   // Get all tickers for this company: base + classes
   const allTickers=getCompanyTickers(co.ticker);
