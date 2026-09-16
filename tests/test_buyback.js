@@ -14,7 +14,7 @@ let current, toasts, rpcCalls, rpcImpl;
 const OWNER='companyAcct', FOUNDER='studentFounder';
 function reset(){
   toasts=[];rpcCalls=[];current=OWNER;
-  global.DB={buybacks:[],users:[
+  global.DB={buybacks:[],limitOrders:[],users:[
     {id:OWNER,role:'company',cash:10000},
     {id:FOUNDER,role:'student',cash:250},
   ],companies:[{ticker:'ACME',owner_id:OWNER,price:20,shares:1000,shares_avail:400,price_history:[]}]};
@@ -32,11 +32,19 @@ global.requireOpen=()=>true;
 global.checkRateLimit=()=>true;
 global.rpcErrorMessage=e=>e.message;
 global.sb={rpc:async(fn,p)=>{rpcCalls.push({fn,p});return rpcImpl(p);}};
+global.MAX_TENDER_PREMIUM_PCT=50;
+// Sellers are paid out of the company's cash, so doBuyback refreshes their
+// rows the same way a dividend does. Not what this file is testing.
+global.refreshDividendPayoutBalances=async()=>{};
 
-// Server: company pays, returns owner_id/owner_cash.
-const serverOk=cost=>({cash:10000-cost,owner_id:OWNER,owner_cash:10000-cost,
+// Server: company pays, returns owner_id/owner_cash. Shaped like the cascade
+// rpc_buyback actually returns -- cancelled_from_float / bought_from_sellers /
+// spent / tender / still_wanted -- because the three rungs are the whole point
+// and a buyback that cancels unsold stock costs nothing and pays nobody.
+const serverOk=(cost,extra)=>Object.assign({cash:10000-cost,owner_id:OWNER,owner_cash:10000-cost,
   price:20.3,shares:900,shares_avail:400,price_history:[{p:20.3,t:'2026-08-20T00:00:00Z'}],
-  total:cost,buyback:{id:'bb1',qty:100,price:20.3,total:cost}});
+  cancelled_from_float:0,bought_from_sellers:100,spent:cost,fills:[],tender:null,still_wanted:0,
+  total:cost,buyback:{id:'bb1',qty:100,price:20.3,total:cost}},extra||{});
 
 (async()=>{
   console.log('=== the company is debited, not the clicker ===');
@@ -81,10 +89,58 @@ const serverOk=cost=>({cash:10000-cost,owner_id:OWNER,owner_cash:10000-cost,
   await doBuyback('ACME','abc');
   check('non-numeric qty rejected before any RPC', rpcCalls.length===0);
 
+  // The cap is the ISSUED count, not what is circulating. The cascade's first
+  // rung cancels the company's own unsold float, so a company holding most of
+  // its float can legitimately retire more than is in circulation -- the old
+  // cap of shares-shares_avail made the cheapest rung unreachable.
   reset(); rpcImpl=()=>serverOk(0);
-  await doBuyback('ACME',9999); // sold = 1000-400 = 600
-  check('qty above shares in circulation rejected before any RPC',
-    rpcCalls.length===0&&/in circulation/.test(toasts[0]||''), toasts[0]);
+  await doBuyback('ACME',9999); // issued = 1000
+  check('qty above the issued count rejected before any RPC',
+    rpcCalls.length===0&&/have been issued/.test(toasts[0]||''), toasts[0]);
+  reset(); rpcImpl=()=>serverOk(0);
+  await doBuyback('ACME',700); // above circulating 600, below issued 1000
+  check('qty above circulating but within issued is allowed through',
+    rpcCalls.length===1, JSON.stringify(toasts));
+
+  console.log('\n=== the premium ===');
+  reset(); rpcImpl=()=>serverOk(0);
+  await doBuyback('ACME',100,10);
+  check('premium is forwarded to the server', rpcCalls[0].p.p_premium_pct===10);
+  reset(); rpcImpl=()=>serverOk(0);
+  await doBuyback('ACME',100);
+  check('omitted premium becomes 0, not NaN', rpcCalls[0].p.p_premium_pct===0);
+  reset(); rpcImpl=()=>serverOk(0);
+  await doBuyback('ACME',100,'');
+  check('blank premium becomes 0', rpcCalls[0].p.p_premium_pct===0);
+  reset(); rpcImpl=()=>serverOk(0);
+  await doBuyback('ACME',100,80);
+  check('premium above the cap is refused before any RPC',
+    rpcCalls.length===0&&/between 0 and 50/.test(toasts[0]||''), toasts[0]);
+  reset(); rpcImpl=()=>serverOk(0);
+  await doBuyback('ACME',100,-5);
+  check('negative premium refused before any RPC', rpcCalls.length===0);
+
+  console.log('\n=== the message says which rung actually happened ===');
+  reset(); rpcImpl=()=>serverOk(0,{cancelled_from_float:100,bought_from_sellers:0,spent:0,buyback:null});
+  await doBuyback('ACME',100);
+  check('cancelling unsold stock does not claim anyone was paid',
+    /cancelled 100 unsold/.test(toasts[0]||'')&&/no cost/.test(toasts[0]||''), toasts[0]);
+  check('...and does not say "bought"', !/bought/.test(toasts[0]||''), toasts[0]);
+
+  reset(); rpcImpl=()=>serverOk(2030,{cancelled_from_float:0,bought_from_sellers:100,spent:2030});
+  await doBuyback('ACME',100);
+  check('buying from sellers reports what was spent', /bought 100 from sellers/.test(toasts[0]||''), toasts[0]);
+
+  reset(); rpcImpl=()=>serverOk(0,{cancelled_from_float:0,bought_from_sellers:0,spent:0,still_wanted:50,
+    tender:{id:'t1',ticker:'ACME',qty:50,limit_price:22,order_type:'buyback',status:'open',side:'buy'}});
+  await doBuyback('ACME',50,10);
+  check('a tender is reported as an open offer', /offering 50 at/.test(toasts[0]||''), toasts[0]);
+  check('...and lands in the local order book', (DB.limitOrders||[]).some(o=>o.id==='t1'));
+
+  reset(); rpcImpl=()=>serverOk(0,{cancelled_from_float:0,bought_from_sellers:0,spent:0,still_wanted:50,tender:null});
+  await doBuyback('ACME',50);
+  check('nothing available and no premium says so plainly',
+    /nobody is selling/.test(toasts[0]||''), toasts[0]);
 
   console.log(fails?('\n'+fails+' FAILURES'):'\nAll passed');
   process.exit(fails?1:0);
