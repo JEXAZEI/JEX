@@ -108,5 +108,24 @@ check('each fund is rounded once, the way the server rounds it',
 global.DB.funds=undefined;
 check('no funds loaded yet does not throw', fundDividendCut(['ACME'],1)===0);
 
+// ── the shared time axis must only carry real timestamps ──
+//
+// Four server functions write a caption into price_history's `t` where a date
+// belongs: 'Listing' (the reset re-seeding JXI), 'Re-IPO' (a relist),
+// 'Boost +10%' / 'Drop -5%' (an admin price adjustment) and 'Class B IPO' (a
+// share class approval). Every one sorts AFTER any ISO timestamp, so it became
+// a phantom point at the end of computeIndex's shared axis and dragged every
+// constituent's cursor to its end with it.
+check('computeIndex drops points whose stamp is not a real date',
+      /filter\(p=>p&&p\.t&&!isNaN\(Date\.parse\(p\.t\)\)\)/.test(src),
+      'a caption is no better than a missing timestamp on a time axis');
+for(const label of ['Listing','Re-IPO','Boost +10%','Drop -5%','Class B IPO','ex-dividend'])
+  check("'"+label+"' would have sorted after a real timestamp",
+        label>'2026-09-16T06:00:00.000Z');
+// And the index BASE is read from the raw array, so dropping a label point
+// from the axis must not change which price a company is indexed against.
+check('the index base is taken from the raw history, not the filtered one',
+      /const raw=\(c\.price_history&&c\.price_history\[0\]&&c\.price_history\[0\]\.p\)\|\|c\.price;/.test(src));
+
 console.log(fails?('\n'+fails+' check(s) failed'):'\nall checks passed');
 process.exit(fails?1:0);

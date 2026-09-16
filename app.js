@@ -968,7 +968,22 @@ function indexSeries(co){
     // Points with no timestamp cannot be placed on a shared time axis at all,
     // so they are dropped here rather than being allowed to halt the scan
     // partway through a history.
-    const h=(c.price_history||[]).filter(p=>p&&p.t);
+    //
+    // A LABEL is no better than a missing one. Four server functions write a
+    // caption into `t` where a date belongs -- 'Listing' when the reset
+    // re-seeds JXI, 'Re-IPO' on a relist, 'Boost +10%' / 'Drop -5%' on an
+    // admin price adjustment, and 'Class B IPO' when a share class is
+    // approved. Every one of those sorts AFTER any ISO timestamp, so it
+    // landed at the end of the shared axis as a phantom point, and because
+    // the scan advances on `h[j+1].t <= t` every other constituent's cursor
+    // jumped to its end to meet it -- producing flat duplicate points on the
+    // tail of the index chart, ordered alphabetically rather than in time.
+    //
+    // Dropped from the TIME axis only. The company's own chart still shows
+    // them, and the index base is read from price_history[0] on the raw array
+    // above, so a company whose first point is a 'Listing' label keeps its
+    // correct base.
+    const h=(c.price_history||[]).filter(p=>p&&p.t&&!isNaN(Date.parse(p.t)));
     hists.push(h);
     cursor.push(-1);                                 // -1 = not listed yet
     for(const p of h)stampSet.add(p.t);
