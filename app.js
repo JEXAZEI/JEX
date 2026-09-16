@@ -3555,6 +3555,22 @@ async function requestFounderAllocation(ticker,studentId,shares,reason){
 }
 async function reviewFounderAllocation(id,approve){
   const a=DB.founderAllocations.find(x=>x.id===id);if(!a)return;
+  // Approving is the company owner's call, or an exchange officer's, and never
+  // the beneficiary's own. Founders used to be able to do both halves, so one
+  // student could request the whole float for themselves and approve it in the
+  // same breath -- 1,400 shares and $8,595 out of the CEO's cash on the first
+  // sale, measured. The server refuses it now; this is here so the button says
+  // why instead of throwing a raw RPC error at them.
+  if(approve&&a.student_id===cu()?.id)
+    return toast('You can\'t approve your own founder share request — the company owner, or an exchange officer, has to review it.');
+  if(approve){
+    const fa=getCo(a.ticker);
+    const worth=fa&&fa.price>0?fa.price*a.shares:0;
+    if(!confirm('Grant '+a.shares.toLocaleString()+' '+a.ticker+' shares to '+a.student_name+'?'
+      +(worth?'\n\nThat is '+fmt(worth)+' of stock at today\'s price'
+        +(fa.shares>0?', '+(Math.round(a.shares/fa.shares*1000)/10)+'% of every share issued':'')+'.':'')
+      +'\n\nThe shares come out of the float for free, and '+a.student_name+' can sell them straight back into the pool — which pays out of the company owner\'s cash.'))return;
+  }
   // Reviewing (especially approving, which grants free shares) runs
   // server-side (rpc_review_founder_allocation) -- previously ANY
   // authenticated client could approve ANY pending allocation, including
@@ -3597,6 +3613,15 @@ async function adjustStockPrice(ticker,pct,reason){
   try{r=await sb.rpc('rpc_adjust_stock_price',{p_ticker:ticker,p_pct:pct,p_reason:(reason||'').trim()});}
   catch(e){return toast(rpcErrorMessage(e));}
   co.price=r.price;co.price_history=r.price_history;
+  // The price band, the daily % badge and the circuit breaker are all measured
+  // from session_open_prices. The server now scales that baseline by the same
+  // factor the price moved -- without it, a boost or cut big enough to clear
+  // the band left the stock outside its own band, and the band only lets a
+  // trade through if it moves the price BACK, so the market went one-way
+  // (measured: after a +50% boost every buy was refused and every sell went
+  // through). Taking the new baseline here keeps this client's band preview
+  // and % badges from disagreeing with the server until the next reload.
+  if(r.session_open_prices)DB.session.session_open_prices=r.session_open_prices;
   const rec={id:uid(),ticker,company_name:co.name,pct,old_price:r.old_price,new_price:r.price,reason:(reason||'').trim(),applied_by:u.name,ts:ts()};
   if(!DB.priceAdjustments)DB.priceAdjustments=[];DB.priceAdjustments.unshift(rec);
   const msg=(pct>=0?'📈':'📉')+' '+co.name+' ('+ticker+') price '+(pct>=0?'boosted by +':'cut by ')+Math.abs(pct)+'%'+(reason?' — '+reason.trim():'');
@@ -10126,14 +10151,28 @@ function renderAdminFounderAllocs(){
   const reviewed=DB.founderAllocations.filter(a=>a.status!=='pending');
   return '<div class="card"><div class="section-title">Pending founder share allocations '
     +(pending.length?'<span class="badge b-amber" style="margin-left:4px">'+pending.length+'</span>':'')+'</div>'
-    +(pending.length?pending.map(a=>'<div class="app-row"><div class="app-info">'
+    +(pending.length?pending.map(a=>{
+      // What a grant actually costs has to be on the screen the decision is
+      // made from. These shares come out of the float at no charge, and every
+      // one of them can be sold straight back into the pool -- and the pool
+      // pays out of the OWNER's cash. A request for "1,400 shares" reads as a
+      // number; "1,400 shares — $42,000 at today's price, 70% of everything
+      // issued" reads as a decision.
+      const fa=getCo(a.ticker);
+      const worth=fa&&fa.price>0?fa.price*a.shares:0;
+      const pct=fa&&fa.shares>0?Math.round(a.shares/fa.shares*1000)/10:0;
+      const cost=worth?' — <strong>'+fmt(worth)+'</strong> at today\'s price'
+        +(pct?', '+pct+'% of every '+esc(a.ticker)+' share issued':'')
+        +'. Granted free out of the float, and sellable back into the pool at the company\'s expense.':'';
+      return '<div class="app-row"><div class="app-info">'
       +'<div class="app-name">'+esc(a.student_name)+' <span class="badge b-blue">student</span></div>'
       +'<div class="app-meta"><strong>'+a.shares.toLocaleString()+'</strong> shares of <span style="font-family:var(--mono)">'+a.ticker+'</span> ('+esc(a.company_name)+')'+(a.reason?' — '+esc(a.reason):'')+'</div>'
+      +'<div class="app-meta">'+cost+'</div>'
       +'<div class="app-meta">'+a.ts+'</div>'
       +'</div><div class="btn-row">'
       +'<button class="btn btn-success btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewFounderAllocation(&quot;'+a.id+'&quot;,true))">Approve</button>'
       +'<button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Working…&quot;,()=>reviewFounderAllocation(&quot;'+a.id+'&quot;,false))">Reject</button>'
-      +'</div></div>').join('')
+      +'</div></div>';}).join('')
     :'<div class="empty">No pending founder share requests</div>')
     +'</div>'
     +(reviewed.length?'<div class="card"><div class="section-title">History</div>'
