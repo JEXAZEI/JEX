@@ -5179,9 +5179,21 @@ const fundShortPnl=f=>Object.entries(fundShorts(f)).reduce((s,[t,pos])=>{const c
 const fundShortCollateral=f=>Object.entries(fundShorts(f)).reduce((s,[,pos])=>s+(pos.collateral||0),0);
 // NAV per unit is just the fund's total assets split across its units --
 // see fundAUM(), which is where that total is computed, once.
+// Floored at zero, exactly as jex_fund_nav() now is.
+//
+// A short contributes qty * (2.5*entry - price) to the AUM above, so it turns
+// negative once the stock passes 2.5x the entry, and past that the whole NAV
+// can go negative. A unit is a share of a fund, not a liability: the most a
+// depositor can lose is what they put in.
+//
+// Without this the two halves disagree about what a unit is worth, which is
+// the one thing that must never happen -- fundValue() feeds nw() and the
+// leaderboard, rpc_snapshot_nw feeds the graded history, and rpc_fund_withdraw
+// decides what the depositor is actually paid. A negative NAV here also made
+// the funds page quote a unit at less than nothing.
 function currentFundNav(f){
   const totalValue=fundAUM(f);
-  return f.units_outstanding>0?Math.round((totalValue/f.units_outstanding)*10000)/10000:10;
+  return f.units_outstanding>0?Math.max(0,Math.round((totalValue/f.units_outstanding)*10000)/10000):10;
 }
 
 async function createFund(name,feePct){
@@ -5223,6 +5235,12 @@ async function depositToFund(fundId,amount){
   amount=parseFloat(amount);
   if(isNaN(amount)||amount<=0)return toast('Enter a valid amount');
   if(u.cash<amount)return toast('Insufficient funds');
+  // Refused server-side too. Said here as well so the depositor finds out
+  // before the round trip, and in the same words. A fund whose shorts have
+  // lost more than it holds has units worth nothing, and there is no honest
+  // price to mint new ones at -- rpc_fund_deposit used to divide by a negative
+  // NAV and hand out NEGATIVE units.
+  if(currentFundNav(f)<=0)return toast(f.name+' has lost more than it holds, so a unit is worth nothing right now and there is no price to buy in at. The manager has to cover its shorts or sell holdings first.');
   if(!checkRateLimit(u.id,'fund transactions'))return;
   let r;
   try{r=await sb.rpc('rpc_fund_deposit',{p_fund_id:fundId,p_amount:amount});}
@@ -5240,6 +5258,11 @@ async function withdrawFromFund(fundId,unitsStr){
   const units=parseFloat(unitsStr);
   if(isNaN(units)||units<=0)return toast('Enter a valid number of units');
   if(units>held+0.0001)return toast('You only hold '+held+' units');
+  // A fund that has lost more than it holds pays nothing on the way out. The
+  // withdrawal still works -- being able to leave is the point, and it used to
+  // CHARGE the depositor to go, or fail on the cash constraint and trap them
+  // -- but burning units for $0.00 without being told would look like a bug.
+  if(currentFundNav(f)<=0&&!confirm(f.name+' has lost more than it holds, so its units are currently worth nothing.\n\nWithdrawing '+units+' unit'+(units===1?'':'s')+' will pay you $0.00 and close that part of your position. You will not be charged anything.\n\nWithdraw anyway?'))return;
   if(!checkRateLimit(u.id,'fund transactions'))return;
   let r;
   try{r=await sb.rpc('rpc_fund_withdraw',{p_fund_id:fundId,p_units:units});}
