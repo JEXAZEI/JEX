@@ -56,6 +56,7 @@ They are listed in the order they were applied. Two of them care:
 | `login_throttle.sql` | The sign-in password check had no rate limit, so a legacy password could be guessed without end through the publishable key. |
 | `dividend_approval_total.sql` | The Treasurer was shown a dividend total that left out the conversion ratio, the student-run funds and the index pass-through — $90.00 approved, $210.00 paid. |
 | `band_clamp_snap.sql` | A stock sitting outside its price band was snapped to the band edge by the next trade — a ten-share sell took $45.00 to $39.00 and paid the seller $59 less than the ticket said. |
+| `index_constituents.sql` | The index the app showed and the index students traded at were different numbers — measured at 1500 on the card and 2740 on the receipt. **This one moves JXI's price** to the honest number; read its verification. |
 | `short_passwords.sql` | The two password-recovery paths allowed four characters, and a password under six can never be linked to a real sign-in — so the account could not trade at all afterwards. Also fixes "You only holds 0 shares". |
 
 ## The rig
