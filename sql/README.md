@@ -56,6 +56,9 @@ They are listed in the order they were applied. Two of them care:
 | `login_throttle.sql` | The sign-in password check had no rate limit, so a legacy password could be guessed without end through the publishable key. |
 | `dividend_approval_total.sql` | The Treasurer was shown a dividend total that left out the conversion ratio, the student-run funds and the index pass-through — $90.00 approved, $210.00 paid. |
 | `short_passwords.sql` | The two password-recovery paths allowed four characters, and a password under six can never be linked to a real sign-in — so the account could not trade at all afterwards. Also fixes "You only holds 0 shares". |
+| `restricted_short.sql` | `record_is_not_null.sql` fixed four of the five places with the broken guard. A restricted share class was still shortable by anyone — refused on the buy side, filled on the short side. |
+| `cover_short_safety.sql` | A short that lost more than its collateral could not be closed at all: the student got a check-constraint error and was stuck with the position, while a fund went to −$16,100 silently. Also, a fund covering a short ignored the price band and stranded the stock above it, freezing every buy. |
+| `index_margin_call.sql` | The margin call read `jex_companies.price` for the index, which only moves when somebody trades a unit — so a JXI short $30,000 under water on $22,500 of collateral reported `loss: 0.00, not_crossed`. It also assumed `jex_trades.id` is a `bigint`; if it is not, no margin call has ever completed. |
 
 ## The rig
 
@@ -78,3 +81,30 @@ The lesson is cheap to state and was expensive to learn: before measuring a
 bug in a function, diff that function against production. A rig that is right
 about ten functions and stale about the eleventh will produce a completely
 convincing measurement of a bug that does not exist.
+
+That diff now exists as one query, and it should be run first, not last:
+
+```sql
+select p.proname || '|' || pg_get_function_identity_arguments(p.oid)
+    || '|' || length(p.prosrc)
+    || '|' || md5(replace(p.prosrc, chr(13), ''))
+    || '|' || p.provolatile::text
+    || '|' || case when p.prosecdef then 'definer' else 'invoker' end
+    || '|' || coalesce(array_to_string(p.proconfig, ','), '-')
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname = 'public' and p.prokind = 'f'
+ order by 1;
+```
+
+One short line per function. Run it against production and against the rig and
+compare the hashes. The first time it was run it found **22 stale copies out of
+54** — including every core trading path — which invalidated most of what had
+been measured up to that point. The three migrations above were found only
+after the real bodies were installed, and two of them (`restricted_short.sql`
+and the `bigint` assumption in `index_margin_call.sql`) were found by scanning
+those bodies mechanically rather than by reading them.
+
+The same applies to the schema, not just the functions. `index_margin_call.sql`
+turned on whether `jex_trades.id` is a `bigint`, which is not something to
+infer from a local copy — so the migration was written to be correct either way
+and reports the real type in its verification.
