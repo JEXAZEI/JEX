@@ -1777,7 +1777,11 @@ async function doSaveSnapshot(label){
 }
 async function restoreSnapshot(snapshotId){
   if(!isAdmin(cu()))return toast('Admin access required');
-  if(!confirm('Restore this snapshot? All current holdings, prices, and cash will be overwritten.'))return;
+  if(!confirm('Restore this snapshot? All current holdings, prices, and cash will be overwritten.'
+    +'\n\nAnyone who registered AFTER this snapshot was taken is rolled back too — back to the starting cash, holding nothing. '
+    +'Their account and login are untouched, but anything they bought or earned since joining is gone. '
+    +'You will be told exactly who.'
+    +'\n\nA company listed after this snapshot is left alone — the rollback can\'t un-IPO it.'))return;
   await doRestoreSnapshot(snapshotId);
 }
 // Returns true only if the restore actually completed. Both the failure and
@@ -1793,8 +1797,16 @@ async function doRestoreSnapshot(snapshotId){
   //
   // What it actually does, read from the deployed function rather than assumed:
   //
-  //   jex_users       cash, holdings, shorts
-  //   jex_companies   price, shares, shares_avail, price_history
+  //   jex_users       cash, holdings, shorts, fund_units
+  //   jex_companies   price, shares, shares_avail, price_history,
+  //                   fund_holdings, index_base_adjust
+  //   jex_funds       cash, holdings, shorts, units_outstanding
+  //   resets          any user who did NOT exist in the snapshot, back to the
+  //                   snapshot session's starting cash holding nothing --
+  //                   without that, the rollback MINTS shares: the pool gets
+  //                   its shares back while the late joiner keeps them too
+  //                   (measured at 100 shares in two places and $3,045 the
+  //                   CEO could be made to pay for them twice)
   //   deletes         limit orders in open/after_hours, active stop-losses
   //
   // This comment previously claimed it also rolled back every trade made after
@@ -1804,10 +1816,10 @@ async function doRestoreSnapshot(snapshotId){
   // The tradesMsg below has therefore always been empty. Left in place because
   // it is harmless and correct the day the RPC does return it.
   //
-  // Also NOT restored, and worth knowing before relying on practice mode:
-  // jex_funds (a fund's cash and holdings survive a rollback),
-  // jex_companies.fund_holdings (the index basket pool), and
-  // index_base_adjust. See audit_snapshot_coverage.sql.
+  // Still NOT rolled back: a company LISTED after the snapshot. Its shares and
+  // its owner are real and un-IPOing one on a rollback would be a bigger
+  // surprise than leaving it, so it is reported instead -- see the notice
+  // below. See audit_snapshot_coverage.sql.
   let r;
   try{r=await sb.rpc('rpc_admin_restore_snapshot',{p_activity_id:snapshotId});}
   catch(e){toast(rpcErrorMessage(e));return false;}
@@ -1817,6 +1829,21 @@ async function doRestoreSnapshot(snapshotId){
   await loadAll();
   const tradesMsg=r&&r.removed_trades?' ('+r.removed_trades+' trade'+(r.removed_trades!==1?'s':'')+' rolled back)':'';
   toast('✓ Snapshot restored: '+snap.label+tradesMsg);
+  // Who the rollback reached past the snapshot, and what it could not reach.
+  // These two lists are the difference between a restore that put the world
+  // back and one that quietly left shares in two places, so they are shown
+  // rather than logged.
+  const reset=(r&&r.reset_users)||[],unknown=(r&&r.unknown_companies)||[];
+  if(reset.length||unknown.length){
+    let msg='Snapshot restored — but this snapshot is older than some of the exchange.\n';
+    if(reset.length)msg+='\nReset to a fresh account (they joined after it was taken):\n'
+      +reset.map(u=>'  • '+u.name+' — had '+fmt(u.cash_before)
+        +(u.holdings_before&&Object.keys(u.holdings_before).length
+          ?' and '+Object.entries(u.holdings_before).map(([t,q])=>q+' '+t).join(', '):'')).join('\n')+'\n';
+    if(unknown.length)msg+='\nLeft alone (listed after it was taken — a rollback can\'t un-IPO a company):\n'
+      +unknown.map(c=>'  • '+c.name+' ('+c.ticker+') — '+c.shares+' shares at '+fmt(c.price)).join('\n')+'\n';
+    alert(msg);
+  }
   return true;
 }
 function renderSnapshotTab(){
