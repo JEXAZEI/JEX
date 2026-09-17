@@ -1,8 +1,9 @@
-// The index level the app SHOWS against the one the server TRADES at.
+// The index level the app shows and the index students trade at have to be the
+// same number.
 //
 // JXI is tradeable — rpc_trade_buy's index branch mints units at
-// index_live_value(...) over the unit divisor — so these two numbers are the
-// price on the card and the price on the receipt.
+// index_live_value(...) over the unit divisor — so these two are the price on
+// the card and the price on the receipt.
 //
 // computeIndex() averages price / (first recorded price * index_base_adjust)
 // across every LISTED company, excluding three things deliberately:
@@ -13,24 +14,25 @@
 //   TEST-account companies    hidden from students everywhere else, unless
 //                             dev_mode is on
 //
-// and scoping to one classroom when asked.
+// and scoping to one classroom when asked. index_live_value() applies all
+// three and reads the classroom, so the two agree.
 //
-// index_live_value() excluded only the first. It counted restricted classes
-// and test companies, and it took p_classroom_id and never looked at it — so
-// every classroom-scoped index was priced off the whole exchange.
+// ── A correction, kept deliberately ──
 //
-// Measured against the real function on a copy of production. Five listed
-// tickers: ACME and BETA at ratio 1.0 in room_a, GAMA at 2.5 in room_b, a
-// restricted ACME.R at 0.2, a test company TEST at 9.0.
+// I reported that index_live_value did NONE of that — that it counted
+// restricted classes and test companies and ignored the classroom it was
+// handed, so students were charged 2740 where the card said 1500 — and I
+// shipped a migration for it. That was wrong about production. The live
+// function already had all three exclusions and already read the classroom;
+// what was stale was the copy on my test rig. The migration skipped on its own
+// "already applied" guard and changed nothing, and JXI's price did not move.
 //
-//                    the client showed    the server charged
-//   whole exchange        1500                  2740
-//   room_a                1000                  2740
-//   room_b                2500                  2740
+// The 1500 / 1000 / 2500 below were then confirmed against production's actual
+// function body, dumped and run: it returns exactly those three numbers, and
+// 3375 with dev_mode on.
 //
-// A student buying index units saw 15.00 and was charged 27.40. After the
-// migration the server returns 1500 / 1000 / 2500 — the same three numbers,
-// on both LF and CRLF bodies.
+// This file stays because the agreement is worth pinning and because the next
+// person to "find" this should find this note first.
 const fs=require('fs'),path=require('path');
 const src=fs.readFileSync(path.join(__dirname,'..','app.js'),'utf8');
 let fails=0;
@@ -84,19 +86,20 @@ check('...from ACME and BETA', tick('room_a')==='ACME,BETA', tick('room_a'));
 check('room_b is 2500', lvl('room_b')===2500, String(lvl('room_b')));
 check('...from GAMA alone', tick('room_b')==='GAMA', tick('room_b'));
 
-// What the server used to charge: everything except the index row.
+// What the average comes to with no exclusions at all — the shape any
+// reimplementation that forgets them would produce.
 const naive=()=>{
   const cs=DB.companies.filter(c=>c.status==='listed'&&!c.is_index_fund);
   return Math.round(cs.reduce((s,c)=>s+c.price/(c.price_history[0].p*c.index_base_adjust),0)/cs.length*1000*100)/100;
 };
-check('the old server number was 2740', naive()===2740, String(naive()));
-check('...which is 83% above what the card said',
+check('with no exclusions the average is 2740', naive()===2740, String(naive()));
+check('...which is 83% above the honest number',
       Math.round((naive()/lvl(null)-1)*100)===83, String(Math.round((naive()/lvl(null)-1)*100)));
 
-// dev_mode is the one case where a test company legitimately counts, and the
-// server now follows the client into it.
+// dev_mode is the one case where a test company legitimately counts, and both
+// sides honour it.
 DB.session.dev_mode=true;
-check('with dev_mode on the test company is back in', lvl(null)===3375, String(lvl(null)));
+check('with dev_mode on the test company is back in -- server agrees at 3375', lvl(null)===3375, String(lvl(null)));
 check('...but a restricted class still is not', tick(null)==='ACME,BETA,GAMA,TEST', tick(null));
 DB.session.dev_mode=false;
 

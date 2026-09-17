@@ -55,8 +55,6 @@ They are listed in the order they were applied. Two of them care:
 | `record_is_not_null.sql` | `record IS NOT NULL` means "every field is non-null", not "a row was found". It left restricted share classes open to anyone, stopped a CEO withdrawing their own delisting, and meant the index price the graded net worth reads was never refreshed. |
 | `login_throttle.sql` | The sign-in password check had no rate limit, so a legacy password could be guessed without end through the publishable key. |
 | `dividend_approval_total.sql` | The Treasurer was shown a dividend total that left out the conversion ratio, the student-run funds and the index pass-through — $90.00 approved, $210.00 paid. |
-| `band_clamp_snap.sql` | A stock sitting outside its price band was snapped to the band edge by the next trade — a ten-share sell took $45.00 to $39.00 and paid the seller $59 less than the ticket said. |
-| `index_constituents.sql` | The index the app showed and the index students traded at were different numbers — measured at 1500 on the card and 2740 on the receipt. **This one moves JXI's price** to the honest number; read its verification. |
 | `short_passwords.sql` | The two password-recovery paths allowed four characters, and a password under six can never be linked to a real sign-in — so the account could not trade at all afterwards. Also fixes "You only holds 0 shares". |
 
 ## The rig
@@ -67,3 +65,16 @@ says "measured", a number came out of running it. Several of the bugs above
 were found only because the fix was tested first and turned out to make things
 worse — the naive ex-dividend fix, for one, minted $240.50 through short
 positions before it was corrected.
+
+**The rig is only as good as the copy in it.** Two migrations were written,
+tested and sent against function bodies that were stale — `jex_band_clamp` and
+`index_live_value` had both already been fixed in production, and the rig was
+carrying older versions. Both were caught at the door: one aborted on its
+byte-for-byte body check, the other skipped on its own "already applied" guard,
+and neither changed anything. They have been removed rather than kept as
+history of a state production was never in.
+
+The lesson is cheap to state and was expensive to learn: before measuring a
+bug in a function, diff that function against production. A rig that is right
+about ten functions and stale about the eleventh will produce a completely
+convincing measurement of a bug that does not exist.
