@@ -5584,6 +5584,16 @@ async function issueDividend(ticker,perShare,note){
       // requester and RECOMPUTES the total. That total is what the
       // Treasurer reads when deciding, and it used to be whatever the
       // requester posted -- a request could understate its own cost.
+      //
+      // It then understated it a second way, on its own: the recount counted
+      // direct student holders only, at face value, while rpc_pay_dividend
+      // pays three groups and applies each share class's conversion ratio.
+      // Measured on a copy of production -- a $1.00 dividend with one 5:1
+      // Class B holder and one student-run fund was presented to the
+      // Treasurer as $90.00 and cost the company $210.00. The server now
+      // totals it the same way it pays it, so this client's own figure (the
+      // toast and the notification below, directTotal + pass.total + fundCut)
+      // and the stored one finally agree.
       let req;
       try{req=await sb.rpc('rpc_request_dividend_approval',{p_ticker:ticker,p_per_share:perShare,
         p_note:(document.getElementById('div-note')?.value||'').trim()});}
