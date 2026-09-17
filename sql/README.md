@@ -55,6 +55,7 @@ They are listed in the order they were applied. Two of them care:
 | `record_is_not_null.sql` | `record IS NOT NULL` means "every field is non-null", not "a row was found". It left restricted share classes open to anyone, stopped a CEO withdrawing their own delisting, and meant the index price the graded net worth reads was never refreshed. |
 | `login_throttle.sql` | The sign-in password check had no rate limit, so a legacy password could be guessed without end through the publishable key. |
 | `dividend_approval_total.sql` | The Treasurer was shown a dividend total that left out the conversion ratio, the student-run funds and the index pass-through — $90.00 approved, $210.00 paid. |
+| `short_passwords.sql` | The two password-recovery paths allowed four characters, and a password under six can never be linked to a real sign-in — so the account could not trade at all afterwards. Also fixes "You only holds 0 shares". |
 
 ## The rig
 
