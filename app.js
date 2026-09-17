@@ -3111,8 +3111,13 @@ async function loginByForm(){
     if(error){UI.loginError='Invalid username or password';return render();}
     return finishLogin(u);
   }
-  let ok=false;
-  try{ok=await sb.rpc('verify_legacy_password',{p_user_id:u.id,p_password:pw});}catch(e){ok=false;}
+  let ok=false,lockedOut=false;
+  // Being locked out has to read differently from a wrong password, or a
+  // student typing the right one gets "Invalid username or password" for
+  // fifteen minutes with nothing to act on. See RECOVERY_THROTTLED.
+  try{ok=await sb.rpc('verify_legacy_password',{p_user_id:u.id,p_password:pw});}
+  catch(e){lockedOut=RECOVERY_THROTTLED(e);ok=false;}
+  if(lockedOut){UI.loginError='Too many sign-in attempts — wait 15 minutes, or ask your instructor to reset your password.';return render();}
   if(!ok){UI.loginError='Invalid username or password';return render();}
   // Quietly migrate this account to a real Supabase Auth identity on a successful
   // legacy-password login — same "one less account stuck on the old system" idea
@@ -3280,7 +3285,11 @@ async function updateSecQ(uid2,curPw,newQ,newA){const u=getUser(uid2);if(!u)retu
     if(!supaAuth)return toast('Not available right now');
     try{const{error}=await supaAuth.auth.signInWithPassword({email:u.email,password:curPw});okSq=!error;}catch(e){okSq=false;}
   }else{
-    try{okSq=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:curPw});}catch(e){okSq=false;}
+    // verify_legacy_password is throttled now, so being locked out arrives
+    // here as a thrown JEX01 and would otherwise read as "Current password
+    // incorrect" to somebody typing it correctly.
+    try{okSq=await sb.rpc('verify_legacy_password',{p_user_id:uid2,p_password:curPw});}
+    catch(e){if(RECOVERY_THROTTLED(e))return toast(THROTTLE_MSG);okSq=false;}
   }
   if(!okSq)return toast('Current password incorrect');if(!newQ)return toast('Select a question');if(!newA||newA.trim().length<2)return toast('Enter an answer');
   // The actual write runs server-side (rpc_update_security_question), which
@@ -3330,7 +3339,14 @@ async function forgotStep1(email){
 // wrong answer HERE, because the catch below otherwise turns being locked out
 // into "Incorrect answer -- try again" forever, for a student who is in fact
 // answering correctly.
-const RECOVERY_THROTTLED=e=>/JEX01|Too many password recovery attempts/i.test(String((e&&e.message)||e||''));
+// Sign-in is throttled the same way now, and raises the same JEX01, so this
+// covers both. Without a limit on verify_legacy_password a legacy password was
+// guessable without end: rpc_resolve_login_identity turns a name off the
+// leaderboard into a user id, and verify_legacy_password turned a user id plus
+// a guess into true or false as many times as anybody cared to ask. Ten wrong
+// ones in fifteen minutes now stops it, and a correct one clears the count so
+// ordinary signing in never locks anybody out.
+const RECOVERY_THROTTLED=e=>/JEX01|Too many password recovery attempts|Too many sign-in attempts/i.test(String((e&&e.message)||e||''));
 const THROTTLE_MSG='⏳ Too many attempts — wait 15 minutes, or ask your instructor to reset your password.';
 async function forgotStep2(answer){const u=getUser(UI.forgotUserId);if(!u)return;
   let okAns=false,throttled=false;
