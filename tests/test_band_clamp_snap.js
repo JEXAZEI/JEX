@@ -1,38 +1,34 @@
-// The band clamp, and the one case where the client and the server disagreed.
+// The band clamp: the client and the server have to agree on it.
 //
-// Three places implement the price band. Two of them have always agreed:
+// Three places implement the price band:
 //
 //   rpc_trade_buy's REJECT check   (v_new > v_upper AND v_new > v_co.price)
-//   app.js bandClamp()             min(max(p, min(lo,cur)), max(hi,cur))
+//   jex_band_clamp                 the CLAMPED path -- selling, shorting,
+//                                  covering, margin calls, stop losses
+//   app.js bandClamp()             the preview
 //
-// Both say: a trade is only stopped when it moves the price FURTHER out of the
-// band. A stock already outside is held where it is, not dragged back. The
-// comment above bandClamp() even says "Same rule, same reason, as the SQL",
-// which is what made this worth checking.
+// All three say the same thing: a trade is only stopped when it moves the
+// price FURTHER out of the band. A stock already outside is held where it is,
+// not dragged back into range. Snapping it back would be a violent move at a
+// price nothing traded at -- on a $45.00 stock against a $21.00-$39.00 band, a
+// ten-share sell would fill at $39.00, paying the seller $59 less than the
+// ticket said and taking every other holder down 13.3%.
 //
-// jex_band_clamp -- the CLAMPED path, used by selling, shorting, covering,
-// margin calls and stop losses -- did not. It returned
-// `least(greatest(p_proposed, v_lo), v_hi)`, forcing the price into [lo, hi]
-// no matter where it already was, and never looked at p_current at all
-// although it is handed it.
+// ── A correction, kept deliberately ──
 //
-// Measured against the real functions on a copy of production. ACME at
-// $45.00, session open $30.00, band +/-30%, allowed range $21.00-$39.00. A
-// student sells TEN shares:
+// I reported that as a live bug and shipped a migration for it. It was not.
+// jex_band_clamp in production already widened its range with p_current and
+// already carried a comment explaining why. What was stale was the copy on my
+// test rig, which still had an older body doing the flat clamp -- so the
+// measurement above is real, and it is a measurement of my own rig, not of
+// this exchange. The migration aborted on its own byte-for-byte body check and
+// changed nothing, which is the only reason this is a note rather than an
+// incident.
 //
-//   the client quotes     $44.93
-//   the server filled at  $39.00     <- snapped to the band edge
-//   the student was paid    $390.00 instead of $449.30
-//   ACME dropped          $45.00 -> $39.00, down 13.3%, on ten shares
-//
-// Every other holder lost 13.3% because one student sold ten shares. A stock
-// stranded BELOW its band was worse in the other direction: it paid $11.04 a
-// share on a stock trading at $7.29, out of the company owner's cash, for a
-// price nothing ever traded at.
-//
-// After the fix, 384 real server fills were compared against what this
-// client's own impactPrice() quotes for the same inputs -- 116 of them with
-// the clamp actively changing the price -- and none disagreed.
+// This file stays because the agreement between the three implementations is
+// worth pinning, and because the next person to "find" this should find this
+// note first. Production's function was read back and run against the table
+// below: all nine cases pass.
 const fs=require('fs'),path=require('path');
 const src=fs.readFileSync(path.join(__dirname,'..','app.js'),'utf8');
 let fails=0;
@@ -59,14 +55,15 @@ eval(grabFn('bandLimits').replace(/^function /,'global.bandLimits=function '));
 eval(grabFn('bandClamp').replace(/^function /,'global.bandClamp=function '));
 eval(grabConst('impactPrice').replace(/^const /,'global.'));
 
-// jex_band_clamp as it now reads, transcribed:
+// jex_band_clamp as production actually reads, transcribed from a dump of the
+// live function:
 //
-//   least(greatest(p_proposed, least(v_lo, p_current)), greatest(v_hi, p_current))
+//   least(greatest(p_price, least(v_lower, p_current)), greatest(v_upper, p_current))
 //
-// which is the same expression as bandClamp() above -- that IS the fix. This
-// is not proof the deployed function matches (only running it proves that, and
-// 384 real fills did). It is here so that if either side is edited, the two
-// stop agreeing on the table below and something fails.
+// which is the same expression as bandClamp() above. This is not proof the
+// deployed function still matches -- only running it proves that, and it was
+// run against every row of the table below. It is here so that if either side
+// is edited, the two stop agreeing and something fails.
 const sqlClamp=(ticker,proposed,current)=>{
   const b=bandLimits(ticker);
   if(!b)return proposed;
@@ -97,21 +94,24 @@ for(const [label,proposed,current,expected] of cases){
 check('no session open price means no clamp, client', bandClamp('NOPE',999,1)===999);
 check('...and none server-side', sqlClamp('NOPE',999,1)===999);
 
-// ── what the old server rule did, stated so it cannot come back quietly ──
+// ── the flat clamp, stated so it cannot arrive quietly ──
+//
+// This is what the rig's stale copy did, and what any reimplementation that
+// forgets p_current would do.
 const oldSqlClamp=(ticker,proposed)=>{
   const b=bandLimits(ticker);
   if(!b)return proposed;
   return Math.min(Math.max(proposed,b.lower),b.upper);
 };
-check('the old rule snapped a stranded $45.00 sell to $39.00',
+check('a flat clamp would snap a stranded $45.00 sell to $39.00',
       oldSqlClamp('ACME',44.93)===39);
 check('...costing the seller $59.30 on ten shares',
       Math.round((44.93-39)*10*100)/100===59.30);
 check('...and dropping every other holder 13.3%',
       Math.round((1-39/45)*1000)/10===13.3);
-check('the old rule raised a stranded $7.28 sell to $21.00',
+check('...and would raise a stranded $7.28 sell to $21.00',
       oldSqlClamp('ACME',7.28)===21);
-check('the new rule does neither', bandClamp('ACME',44.93,45)===44.93&&bandClamp('ACME',7.28,7.29)===7.29);
+check('the real rule does neither', bandClamp('ACME',44.93,45)===44.93&&bandClamp('ACME',7.28,7.29)===7.29);
 
 // ── and the two agree on the whole impact path, not just the clamp ──
 //
