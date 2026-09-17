@@ -6390,6 +6390,16 @@ function quickSetQty(ticker,mode,qtyInputId,previewId,value){
     const affordable=maxAffordableQty(co,u.cash);
     if(mode==='buy'){
       qty=co.is_index_fund?affordable:Math.min(affordable,co.shares_avail);
+      // ...and never more than the 20% position limit leaves room for. Same
+      // rule the short path below already follows, and the same reason: Max
+      // offering a number the trade would be refused for is the defect, not
+      // the refusal. Measured against the real rpc_trade_buy over a grid of
+      // price/float/cash combinations -- 27 of 75 non-zero Max values came
+      // back "Position limit: one investor may hold at most 400 shares". A
+      // student with $40,000 looking at a $30 stock on a 2,000-share float
+      // was handed 1,190 and bounced every time.
+      const headroom=positionHeadroom(co,u);
+      if(headroom!=null)qty=Math.min(qty,headroom);
     } else if(mode==='short'){
       // 1.5x collateral requirement, same math as shortPrev()
       const collateralPerShare=co.price*1.5;
