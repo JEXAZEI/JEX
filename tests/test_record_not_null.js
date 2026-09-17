@@ -32,6 +32,22 @@
 // missing. rpc_trade_buy, rpc_place_limit_order, rpc_fund_buy and
 // rpc_fund_short all had it.
 //
+// ── A fifth one, found later ──
+//
+// rpc_trade_short had it too and was missed. I found the four above by
+// reading the functions and stopped there; the fifth turned up only when
+// every live function body was dumped and scanned mechanically for the
+// pattern. So for a while a restricted class was refused to a student on the
+// buy side and the limit-order side and open to the same student on the short
+// side -- measured: refused a 5-share BUY, filled a 5-share SHORT in the same
+// session. Shorting is the worse half: it does not need the shares to be for
+// sale and it drives the price down.
+//
+// The lesson is the one this directory keeps relearning. Reading finds most
+// of them; only a mechanical sweep finds the last one. The sweep is now part
+// of restricted_short.sql's verification, which reports any function still
+// using the broken shape and should always come back empty.
+//
 // ── And the index price ──
 //
 // rpc_snapshot_jxi guards its price refresh with `if v_co is not null then`,
