@@ -9163,6 +9163,12 @@ function updateBBPrev(ticker){
   const prem=parseFloat(get('bb-prem')?.value)||0;
   if(!(q>0)){p.innerHTML='';return;}
   let left=q,spend=0,bought=0;const rows=[];
+  // The price the tender's premium is measured from. rpc_buyback carries
+  // v_last_price through the cascade and prices the bid off the LAST ask it
+  // lifted, not off the price showing now -- lifting asks moves the price
+  // before the tender is posted. Previewing the premium against co.price
+  // quoted a CEO $31.50 on a tender that rested at $32.55.
+  let lastPrice=Number(co.price)||0;
   const fromFloat=Math.min(left,Math.max(0,Number(co.shares_avail)||0));
   if(fromFloat>0){rows.push(fromFloat.toLocaleString()+' cancelled from unsold stock — <b>no cost</b>');left-=fromFloat;}
   if(left>0){
@@ -9173,21 +9179,34 @@ function updateBBPrev(ticker){
       const take=Math.min(Number(a.qty)||0,left);
       if(take<=0)continue;
       spend=Math.round((spend+take*a.limit_price)*100)/100;bought+=take;left-=take;
+      lastPrice=Number(a.limit_price)||lastPrice;
     }
     if(bought>0)rows.push(bought.toLocaleString()+' bought from sellers for <b>'+fmt(spend)+'</b>');
   }
+  let tenderCost=0,overBand=null;
   if(left>0){
     if(prem>0){
-      const bid=Math.round(co.price*(1+prem/100)*100)/100;
-      rows.push(left.toLocaleString()+' offered at <b>'+fmt(bid)+'</b> ('+prem+'% above market) — '+fmt(Math.round(left*bid*100)/100)+' if it is all taken');
+      const bid=Math.max(0.01,Math.round(lastPrice*(1+prem/100)*100)/100);
+      tenderCost=Math.round(left*bid*100)/100;
+      // The server refuses a tender priced above the band's ceiling outright.
+      // Showing the bid without saying so sends a CEO into an exception after
+      // the preview told them the number.
+      const band=bandLimits(ticker);
+      if(band&&bid>band.upper)overBand=band.upper;
+      rows.push(left.toLocaleString()+' offered at <b>'+fmt(bid)+'</b> ('+prem+'% above '+fmt(lastPrice)+') — '+fmt(tenderCost)+' if it is all taken');
+      if(overBand!=null)rows.push('<b>That bid is above today\'s '+fmt(overBand)+' price-band ceiling</b>, so it would be refused. Offer a smaller premium.');
     }else{
       rows.push('<b>'+left.toLocaleString()+' with nowhere to go</b> — nobody is offering shares. Set a premium to make an offer.');
     }
   }
   const owner=getUser(co.owner_id);
-  const short=owner&&spend>(Number(owner.cash)||0);
-  p.innerHTML='<div class="ibox '+(short?'ibox-red':'ibox-blue')+'" style="margin-top:8px">'+rows.join('<br>')
-    +(short?'<br><b>The company only holds '+fmt(owner.cash)+'</b>, so it would stop part-way.':'')+'</div>';
+  // The server checks the tender against what is left AFTER the ask fills, so
+  // the warning has to count both. It used to weigh the fills alone and let a
+  // CEO commit to a tender the company could not cover.
+  const cash=Number(owner&&owner.cash)||0;
+  const short=owner&&(spend+tenderCost)>cash;
+  p.innerHTML='<div class="ibox '+((short||overBand!=null)?'ibox-red':'ibox-blue')+'" style="margin-top:8px">'+rows.join('<br>')
+    +(short?'<br><b>The company only holds '+fmt(cash)+'</b> and this would come to '+fmt(spend+tenderCost)+', so it would be refused.':'')+'</div>';
 }
 function renderDilTab(co){
   // Get all tickers for this company: base + classes
