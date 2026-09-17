@@ -13,20 +13,24 @@
 //
 //     cash + collateral_released + pnl
 //
-// and neither used to floor it. jex_users has CHECK (cash >= 0), so when that
-// sum went negative the UPDATE raised and the cover FAILED -- the student
-// could not close the position by any route the app offers, and it kept
-// growing against them. jex_funds has no such constraint, so a fund went
-// negative silently instead.
+// and neither used to floor it. jex_users.cash and jex_funds.cash both carry
+// CHECK (>= 0), so when that sum went negative the UPDATE raised and the cover
+// FAILED -- the holder could not close the position by any route the app
+// offers, and it kept growing against them.
 //
 // Measured against the live function bodies running locally, on a 1,000-share
 // short entered at $5.00 with $7,500 collateral and $5,000 of cash, covered
-// against a $30.00 price:
+// against a $30.00 price (the cover fills at $33.60 -- it is itself a market
+// buy and pays the 12% impact):
 //
 //   before   student  ERROR: violates "chk_users_cash_nonneg"  (stuck)
-//            fund     cash: -16,100.00, no error
+//            fund     ERROR: violates "chk_funds_cash_nonneg"  (stuck)
 //   after    student  covers, cash 0
 //            fund     covers, cash 0
+//
+// An earlier version of this note said the fund went to -16,100.00 silently.
+// That was my test rig, which was missing chk_funds_cash_nonneg. The real
+// database has it and the fund half failed loudly, same as the student half.
 //
 // rpc_margin_call_short already settled with greatest(0, ...) and said why in
 // its own comment. The cover paths now agree with it. The shortfall is written
@@ -102,7 +106,7 @@ check('a loss the collateral exactly covers lands on the cash',
 // cover is itself a market buy and pays the 12% impact.
 check('the measured stuck position now closes at zero instead of erroring',
       settle(5000,7500,5,33.60,1000)===0, String(settle(5000,7500,5,33.60,1000)));
-check('...and without the floor it was -16,100.00',
+check('...and without the floor it came to -16,100.00, which both CHECKs reject',
       Math.round((5000+7500+(5-33.60)*1000)*100)/100===-16100,
       String(Math.round((5000+7500+(5-33.60)*1000)*100)/100));
 check('a fund is settled by the same rule', settle(5000,7500,5,33.60,1000)===0);

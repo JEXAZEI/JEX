@@ -36,17 +36,30 @@
 --     v_cash := round(v_cash + v_cb + v_pnl, 2)
 --
 -- When the loss exceeds the collateral plus the holder's cash, that number is
--- negative. For a student, jex_users has CHECK (cash >= 0), so the UPDATE
--- raises and the whole cover fails -- the student cannot get out of the
--- position at all, ever, by any route the app offers. For a fund, jex_funds
--- has no such constraint, so it silently goes negative instead.
+-- negative, and both jex_users.cash and jex_funds.cash carry CHECK (>= 0).
+-- The UPDATE raises and the whole cover fails -- the holder cannot get out of
+-- the position at all, ever, by any route the app offers.
 --
 -- Measured, on a 1,000-share short entered at $5.00 with $7,500 collateral
--- and $5,000 of cash, against a $30.00 price:
+-- and $5,000 of cash, against a $30.00 price. The cover fills at $33.60 --
+-- it is itself a market buy and pays the 12% impact -- so the settlement
+-- comes to -$16,100.00 and:
 --
---     student   ERROR: new row violates check constraint
---               "chk_users_cash_nonneg" -- position stuck
---     fund      cash: -$16,100.00, no error, no warning
+--     student   ERROR: new row for relation "jex_users" violates check
+--               constraint "chk_users_cash_nonneg" -- position stuck
+--     fund      ERROR: new row for relation "jex_funds" violates check
+--               constraint "chk_funds_cash_nonneg" -- same, for the fund
+--
+-- ── A correction ──
+--
+-- The first version of this header said the FUND went to -$16,100.00
+-- silently, with no error. That was true of my local test copy, whose
+-- jex_funds table had no non-negative constraint. This database does have
+-- chk_funds_cash_nonneg, so the fund half failed loudly too, exactly like the
+-- student half. The migration is unchanged and was correct either way -- a
+-- stuck fund position is as unusable as a stuck student position -- but the
+-- description of what was happening was wrong, and the number came off a rig,
+-- not off this exchange.
 --
 -- rpc_margin_call_short already settles a blown short with
 -- `greatest(0, round(cash + collateral + pnl, 2))`, and its comment says why:

@@ -57,8 +57,10 @@ They are listed in the order they were applied. Two of them care:
 | `dividend_approval_total.sql` | The Treasurer was shown a dividend total that left out the conversion ratio, the student-run funds and the index pass-through — $90.00 approved, $210.00 paid. |
 | `short_passwords.sql` | The two password-recovery paths allowed four characters, and a password under six can never be linked to a real sign-in — so the account could not trade at all afterwards. Also fixes "You only holds 0 shares". |
 | `restricted_short.sql` | `record_is_not_null.sql` fixed four of the five places with the broken guard. A restricted share class was still shortable by anyone — refused on the buy side, filled on the short side. |
-| `cover_short_safety.sql` | A short that lost more than its collateral could not be closed at all: the student got a check-constraint error and was stuck with the position, while a fund went to −$16,100 silently. Also, a fund covering a short ignored the price band and stranded the stock above it, freezing every buy. |
-| `index_margin_call.sql` | The margin call read `jex_companies.price` for the index, which only moves when somebody trades a unit — so a JXI short $30,000 under water on $22,500 of collateral reported `loss: 0.00, not_crossed`. It also assumed `jex_trades.id` is a `bigint`; if it is not, no margin call has ever completed. |
+| `cover_short_safety.sql` | A short that lost more than its collateral could not be closed at all — the settlement went negative and the non-negative CHECK on the balance rejected it, leaving the position stuck permanently for a student or a fund alike. Also, a fund covering a short ignored the price band and stranded the stock above it, freezing every buy. |
+| `index_margin_call.sql` | The margin call read `jex_companies.price` for the index, which only moves when somebody trades a unit — so a JXI short $30,000 under water on $22,500 of collateral reported `loss: 0.00, not_crossed`. |
+| `fund_negative_nav.sql` | A fund unit could be worth less than nothing. Withdrawing then **charged** the investor — $12,500 on a 1,000-unit position — or failed on the cash CHECK and trapped them, and a new deposit minted negative units. The graded net worth read the same negative number. |
+| `officer_reset_guard.sql` | `rpc_admin_reset_officer_cash` emptied `holdings` and `shorts` outright. Measured: 594 shares of a 2,000-share company left existing nowhere, 200 borrows never returned, $14,316.76 gone. Nothing in the app calls it, but any officer can. |
 
 ## The rig
 
@@ -104,7 +106,26 @@ after the real bodies were installed, and two of them (`restricted_short.sql`
 and the `bigint` assumption in `index_margin_call.sql`) were found by scanning
 those bodies mechanically rather than by reading them.
 
-The same applies to the schema, not just the functions. `index_margin_call.sql`
-turned on whether `jex_trades.id` is a `bigint`, which is not something to
-infer from a local copy — so the migration was written to be correct either way
-and reports the real type in its verification.
+**The same applies to the schema, and it caught me a second time.** The first
+version of `index_margin_call.sql` also rewrote a trade insert, because
+`rpc_margin_call_short` declares `v_trade_id bigint` and the rig's
+`jex_trades.id` is `text` — which would make every margin call die after
+debiting the student. Production's `jex_trades.id` is `integer`, so that edit
+was fixing a fault that only existed locally, and the file aborted. The same
+run showed `jex_funds` carries `chk_funds_cash_nonneg` in production and did
+not on the rig, which changed a "silently goes negative" finding into a
+"fails loudly and traps the position" one.
+
+So the schema needs the same one-query diff the functions get:
+
+```sql
+select c.conrelid::regclass::text, c.conname, pg_get_constraintdef(c.oid)
+  from pg_constraint c
+ where c.contype = 'c' and c.conrelid::regclass::text like 'jex_%'
+ order by 1, 2;
+```
+
+plus the column types for anything a function assigns into a typed variable.
+A constraint that exists in one place and not the other does not just change
+the wording of a finding — it changes whether the failure is loud or silent,
+and those need different fixes.
