@@ -61,6 +61,15 @@ They are listed in the order they were applied. Two of them care:
 | `index_margin_call.sql` | The margin call read `jex_companies.price` for the index, which only moves when somebody trades a unit — so a JXI short $30,000 under water on $22,500 of collateral reported `loss: 0.00, not_crossed`. |
 | `fund_negative_nav.sql` | A fund unit could be worth less than nothing. Withdrawing then **charged** the investor — $12,500 on a 1,000-unit position — or failed on the cash CHECK and trapped them, and a new deposit minted negative units. The graded net worth read the same negative number. |
 | `officer_reset_guard.sql` | `rpc_admin_reset_officer_cash` emptied `holdings` and `shorts` outright. Measured: 594 shares of a 2,000-share company left existing nowhere, 200 borrows never returned, $14,316.76 gone. Nothing in the app calls it, but any officer can. |
+| `approve_registration_auth.sql` | **The serious one.** `approve_registration` took the new account's balance from its caller and had no role check at all — no `auth.uid()` call anywhere in it — while granted to `anon` and `authenticated`. An ordinary student minted an approved account holding $1,000,000. |
+| `removed_user_shares.sql` | Removing an account deleted the shares it held instead of returning them to the unsold pool, so `shares = shares_avail + held` stopped holding by exactly what the leaver had. 21 shares across four tickers had already gone this way. |
+| `graded_index_mark.sql` | `jex_mark_price` returned the cached price for an index row, and `app.js` calls `snapshotNW` *before* `snapshotJXI` — so every graded row written at a trade was taken before the cache caught up. Measured 8.5% low on a 500-unit holding. |
+
+### Not a migration
+
+| file | what it does |
+| --- | --- |
+| `repair_share_register.sql` | **Changes data, not a function.** Puts the 21 missing shares back into the unsold pool after `removed_user_shares.sql` stops the leak. Moves no money. Optional — leaving the register as it stands is a reasonable choice. |
 
 ## The rig
 

@@ -33,6 +33,29 @@
 //
 // This file stays because the agreement is worth pinning and because the next
 // person to "find" this should find this note first.
+//
+// ── The third place that had to stop reading the cache ──
+//
+// jex_companies.price for an index row is not a price, it is a CACHE of a
+// derived value, rewritten only by a direct unit trade or by rpc_snapshot_jxi.
+// Three server paths read it as though it were a price, and each was fixed
+// separately as it was found:
+//
+//   rpc_trade_cover_short  closing an index short settled at the cache
+//   rpc_margin_call_short  a short $30,000 under water reported loss 0.00
+//   jex_mark_price         the GRADED net worth marked units at the cache
+//
+// The last one is the worst because app.js calls snapshotNW BEFORE
+// snapshotJXI after every trade, so the graded row written at the moment of a
+// trade was always taken before the cache caught up with that trade. Not
+// occasionally -- every time. Measured: 500 units marked at $7.01 when the
+// level was $9.51, writing $13,505.00 where the truth was $14,755.00, 8.5%
+// low. It self-corrected on the next tick, so the balance was never wrong for
+// long -- but jex_nw_history IS the graded artifact, and every row taken at a
+// trade carried the error.
+//
+// The rule for this schema, stated once: for an index row, the answer is
+// index_live_value() / jex_index_unit_divisor(), never c.price.
 const fs=require('fs'),path=require('path');
 const src=fs.readFileSync(path.join(__dirname,'..','app.js'),'utf8');
 let fails=0;
@@ -112,6 +135,37 @@ DB.companies=[];
 check('no companies at all is the base level, not NaN', lvl(null)===1000, String(lvl(null)));
 DB.companies=[Object.assign(price('ZERO',20,0,'u_ceo'),{})];
 check('a zero base does not divide by zero', Number.isFinite(lvl(null)), String(lvl(null)));
+
+// ── marking a portfolio that holds index units ──
+//
+// jex_mark_price now computes the level rather than reading the cache. This is
+// the arithmetic it runs, and the gap it used to leave in the graded row.
+const DIVISOR=100;
+const markIndex=(liveLevel,cachedPrice)=>
+  liveLevel==null?cachedPrice:Math.round((liveLevel/DIVISOR)*100)/100;
+
+check('an index unit marks at the level, not the cache',
+      markIndex(951,7.01)===9.51, String(markIndex(951,7.01)));
+check('...and falls back to the cache when there is no level to compute',
+      markIndex(null,7.01)===7.01, String(markIndex(null,7.01)));
+
+const graded=(cash,units,mark)=>Math.round((cash+units*mark)*100)/100;
+check('the measured graded row: $14,755.00 with a live mark',
+      graded(10000,500,markIndex(951,7.01))===14755, String(graded(10000,500,markIndex(951,7.01))));
+check('...where the cache wrote $13,505.00',
+      graded(10000,500,7.01)===13505, String(graded(10000,500,7.01)));
+check('...understating it by $1,250.00',
+      Math.round((graded(10000,500,markIndex(951,7.01))-graded(10000,500,7.01))*100)/100===1250);
+check('...which is 8.5% of the true figure',
+      Math.round((1250/14755)*1000)/10===8.5, String(Math.round((1250/14755)*1000)/10));
+check('a holder of no units is unaffected either way',
+      graded(10000,0,markIndex(951,7.01))===graded(10000,0,7.01));
+
+// The ordering in app.js that made this fire on every trade rather than
+// occasionally. Pinned so that if it is ever reversed, the reason this was
+// fixed server-side instead is still on the record.
+check('snapshotNW still runs before snapshotJXI after a trade',
+      /if\(u\)snapshotNW\(u\.id\);[\s\S]{0,200}?snapshotJXI\(\);/.test(src));
 
 console.log(fails?('\n'+fails+' check(s) failed'):'\nall checks passed');
 process.exit(fails?1:0);
