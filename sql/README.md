@@ -63,6 +63,7 @@ They are listed in the order they were applied. Two of them care:
 | `officer_reset_guard.sql` | `rpc_admin_reset_officer_cash` emptied `holdings` and `shorts` outright. Measured: 594 shares of a 2,000-share company left existing nowhere, 200 borrows never returned, $14,316.76 gone. Nothing in the app calls it, but any officer can. |
 | `approve_registration_auth.sql` | **The serious one.** `approve_registration` took the new account's balance from its caller and had no role check at all — no `auth.uid()` call anywhere in it — while granted to `anon` and `authenticated`. An ordinary student minted an approved account holding $1,000,000. |
 | `removed_user_shares.sql` | Removing an account deleted the shares it held instead of returning them to the unsold pool, so `shares = shares_avail + held` stopped holding by exactly what the leaver had. 21 shares across four tickers had already gone this way. |
+| `graded_index_mark.sql` | `jex_mark_price` returned the cached price for an index row, and `app.js` calls `snapshotNW` *before* `snapshotJXI` — so every graded row written at a trade was taken before the cache caught up. Measured 8.5% low on a 500-unit holding. |
 
 ### Not a migration
 
