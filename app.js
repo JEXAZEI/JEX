@@ -7911,7 +7911,7 @@ function renderCompanyPage(parentTicker){
   return html;
 }
 
-function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)&&!isHiddenTestEntity(c.owner_id)).map(c=>{const chg=priceChg(c),w=isWatched(c.ticker),halted=isHalted(c.ticker);
+function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${groupByCompany(DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)&&!isHiddenTestEntity(c.owner_id))).map(c=>{const chg=priceChg(c),w=isWatched(c.ticker),halted=isHalted(c.ticker);
   const preMarket=!isOpen()?getPreMarketPrice(c.ticker):null;
   return `<div class="ticker-item ${UI.panelTicker===c.ticker?'active-t':''} ${w?'watched':''} ${halted?'halted-ticker':''}" onclick="openCompanyPage('${c.ticker}')" style="${c.brand_color?'border-color:'+c.brand_color+'30':''}">
   ${c.logo?`<img src="${c.logo}" style="width:24px;height:24px;object-fit:cover;border-radius:4px;margin-bottom:3px">`:``}
@@ -7955,13 +7955,55 @@ function renderIndexCard(){
     <tbody>${idx.constituents.map(c=>{const co=getCo(c.ticker);const chg=co?priceChg(co):Math.round(((c.ratio-1)*100)*100)/100;return `<tr><td>${esc(c.name)}</td><td><span class="badge b-gray" style="font-family:var(--mono)">${esc(c.ticker)}</span></td><td class="r" style="font-family:var(--mono)">${fmt(c.price)}</td><td class="r ${chg>=0?'price-up':'price-down'}">${chg>=0?'+':''}${chg.toFixed(2)}%</td></tr>`;}).join('')}</tbody></table>
   </div>`;
 }
+// ── Keeping a company's tickers together ────────────────
+//
+// A share class is its own jex_companies row -- ACME.B is a separate listing
+// from ACME, with its own price, float and chart. The market list used to sort
+// on nothing but "index fund first", so every other row kept creation order,
+// and a class landed wherever it happened to be approved. A company that added
+// a Class B in week six appeared at the BOTTOM of the table, several unrelated
+// companies away from its own base stock, and nothing on either row said the
+// two were the same business. It looked coherent only when a class happened to
+// be created immediately after its parent.
+//
+// Now a company's tickers travel together. The family keeps the position of
+// its base stock, so the table's overall order is unchanged for anyone without
+// share classes; inside a family the base stock comes first and its classes
+// follow in letter order.
+const classParentOf=c=>{
+  const meta=getClassMeta(c.ticker);
+  return meta&&meta.parent_ticker&&meta.parent_ticker!==c.ticker?meta.parent_ticker:null;
+};
+const familyOf=c=>classParentOf(c)||c.ticker;
+// '' sorts before any letter, which puts the base stock at the head of its own
+// family. A class with no letter recorded sorts last rather than jumping it.
+const classRank=c=>{const meta=getClassMeta(c.ticker);
+  return classParentOf(c)?(meta&&meta.class||'￿'):'';};
+function groupByCompany(list){
+  // Where each family first appears in the incoming order. Taken from the
+  // first member SEEN rather than from the parent specifically, so a class
+  // whose parent is filtered out (a search, a delisting) still sorts sanely
+  // instead of losing its seat.
+  const seat=new Map();
+  list.forEach((c,i)=>{const f=familyOf(c);if(!seat.has(f))seat.set(f,i);});
+  return list.slice().sort((a,b)=>
+       (b.is_index_fund?1:0)-(a.is_index_fund?1:0)
+    || seat.get(familyOf(a))-seat.get(familyOf(b))
+    || classRank(a).localeCompare(classRank(b))
+    || a.ticker.localeCompare(b.ticker));
+}
 function getMarketListed(u){
   const searchQ=(document.getElementById('market-search')?.value||'').toLowerCase();
-  return DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)&&!isHiddenTestEntity(c.owner_id)
-    &&(!searchQ||(c.name.toLowerCase().includes(searchQ)||c.ticker.toLowerCase().includes(searchQ))))
-    // JXI pinned to the top, like a benchmark/reference instrument on a real
-    // exchange -- everything else keeps its normal (creation) order.
-    .sort((a,b)=>(b.is_index_fund?1:0)-(a.is_index_fund?1:0));
+  // Searching a company finds its whole family. Typing "acme" used to miss
+  // ACME.B unless the class row's own name happened to contain it, so a
+  // student searching for a company could be shown some of its stock and not
+  // the rest.
+  const matches=c=>!searchQ||c.name.toLowerCase().includes(searchQ)||c.ticker.toLowerCase().includes(searchQ);
+  const visible=DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)&&!isHiddenTestEntity(c.owner_id));
+  const hitFamilies=new Set(visible.filter(matches).map(familyOf));
+  // JXI stays pinned to the top, like a benchmark instrument on a real
+  // exchange, and is never pulled in as somebody's family member.
+  return groupByCompany(visible.filter(c=>hitFamilies.has(familyOf(c))||matches(c)));
 }
 let _marketLastPrices={};
 function renderMarketRows(u,listed){
@@ -7976,7 +8018,16 @@ function renderMarketRows(u,listed){
     const prevPrice=_marketLastPrices[c.ticker];
     const flashClass=prevPrice!=null&&prevPrice!==c.price?(c.price>prevPrice?' flash-up':' flash-down'):'';
     _marketLastPrices[c.ticker]=c.price;
-    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td><span style="font-weight:500">${esc(c.name)}</span>${idxBadge}${classBadge}${restrictBadge}<br><span style="font-size:11px;color:var(--text2)">${esc(c.description||"")}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="${flashClass}" style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sparklineSVG(c)}</td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')+(!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:'');
+    // Sorting puts a class under its parent; this says WHY it is there.
+    // Adjacency on its own is a coincidence the reader has to guess at, and
+    // "ACME Inc (Class B)" only reads as related if you already know ACME is
+    // the base ticker. The rule and the ratio are the two things a student
+    // needs before deciding whether the cheaper line is the same investment.
+    const parentTicker=classParentOf(c);
+    const parentCo=parentTicker?getCo(parentTicker):null;
+    const ratio=parentTicker&&meta&&meta.conversion_ratio?Number(meta.conversion_ratio):null;
+    const parentLine=parentTicker?`<br><span style="font-size:11px;color:var(--text3)">↳ share class of <span class="badge b-gray" style="font-family:var(--mono);font-size:10px">${esc(parentTicker)}</span>${parentCo?' '+esc(parentCo.name):''}${ratio&&ratio!==1?` · converts 1 → ${ratio}`:ratio===1?' · converts 1 → 1':''}</span>`:'';
+    return`<tr style="cursor:pointer" onclick="openCompanyPage('${c.ticker}')"><td${parentTicker?' style="padding-left:20px;border-left:2px solid var(--border)"':''}><span style="font-weight:500">${esc(c.name)}</span>${idxBadge}${classBadge}${restrictBadge}${parentLine}<br><span style="font-size:11px;color:var(--text2)">${esc(c.description||"")}</span>${fin?`<br><span style="font-size:11px;color:var(--text3)">Rev ${fmt(fin.revenue)} | Profit ${fmt(fin.profit)}</span>`:''}</td><td><span class="badge b-gray copy-ticker" style="font-family:var(--mono)" onclick="copyTicker('${c.ticker}')" title="Click to copy">${c.ticker}</span></td><td class="${flashClass}" style="font-weight:500;font-family:var(--mono)">${fmt(c.price)}${(u.role==='student'&&(holdings(u)[c.ticker]||0)>0)?`<div style="font-size:10px;color:var(--green)">You: ${holdings(u)[c.ticker]}</div>`:''}</td><td class="${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</td><td>${sparklineSVG(c)}</td><td>${sharesBar(c)}</td>${(u.role==='student'||u.role==='company')?`<td><button class="wstar ${isWatched(c.ticker)?'on':''}" onclick="toggleWatch('${c.ticker}')">${isWatched(c.ticker)?'★':'☆'}</button></td>${(()=>{const hs=calcHealthScore(c);return hs!=null?`<td style="vertical-align:middle"><span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${hs>=70?'var(--green)':hs>=40?'var(--amber)':'var(--red)'}">${hs}/100</span></td>`:'<td>—</td>';})()}<td><button class="btn btn-sm btn-primary" onclick="openCompanyPage('${c.ticker}')">View</button></td>`:''}</tr>`;}).join('')+(!listed.length?`<tr><td colspan="7"><div class="empty">No listed companies yet</div></td></tr>`:'');
 }
 function renderMarket(){
   const u=cu();
@@ -10503,7 +10554,7 @@ function renderStudentOrders(){
 // RENDER: TRADING HISTORY (per stock)
 // ═══════════════════════════════════════════════
 function renderExchangeStats(){
-  const listed=DB.companies.filter(c=>c.status==='listed'&&!isHiddenTestEntity(c.owner_id));
+  const listed=groupByCompany(DB.companies.filter(c=>c.status==='listed'&&!isHiddenTestEntity(c.owner_id)));
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved'&&!isHiddenTestEntity(u.id));
   const todayTrades=DB.trades.filter(t=>isTodayTs(t.ts)&&!isHiddenTestEntity(getCo(t.ticker)?.owner_id));
   const totalVol=todayTrades.reduce((s,t)=>s+t.price*t.qty,0);
@@ -10783,7 +10834,12 @@ function renderAdminMinutes(){
 }
 function renderAdminShareholderRegistry(){
   const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
-  const listed=DB.companies.filter(c=>c.status==='listed');
+  const listed=groupByCompany(DB.companies.filter(c=>c.status==='listed'));
+  // Grouped order first, so a company's base stock and its classes are
+  // adjacent columns -- this registry is read across, and a Class B sitting
+  // six columns from its parent is the reason someone asks "wait, is that the
+  // same company?". Any class with no listed row of its own still gets a
+  // column, appended rather than dropped.
   const allTickers=[...new Set([...listed.map(c=>c.ticker),...DB.shareClasses.map(s=>s.ticker)])];
   return`<div class="card"><div class="section-title">Complete shareholder registry</div>
     <div class="ibox ibox-blue">All students, their holdings, and voting power across every listed company. Read-only.</div>
