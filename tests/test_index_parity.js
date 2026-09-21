@@ -167,5 +167,43 @@ check('a holder of no units is unaffected either way',
 check('snapshotNW still runs before snapshotJXI after a trade',
       /if\(u\)snapshotNW\(u\.id\);[\s\S]{0,200}?snapshotJXI\(\);/.test(src));
 
+// ── the index's percentage must equal its constituents' ──
+//
+// The card showed "JXI -50.00% today" next to "AZEI +0.00% today", with one
+// listed company. One number divided by a constant cannot fall 50% while the
+// number it is derived from is flat, so that was a bad baseline, not a market
+// event.
+//
+// rpc_record_session_open_prices captured jex_companies.price as the index's
+// opening baseline -- and for an index row that column is a CACHE, refreshed
+// only by a unit trade or rpc_snapshot_jxi. Whatever stale number sat there at
+// session open became the divisor for every percentage shown that day. The
+// baseline is now computed from the constituents' own opening prices, the same
+// way the live level is computed from their current ones.
+const DIV=100;
+const level=(price,base)=>Math.round((price/base)*1000*100)/100;
+const unit=lvl=>Math.round((lvl/DIV)*100)/100;
+const pct=(now,open)=>Math.round(((now/open)-1)*100*100)/100;
+
+// The reproduction: AZEI flat, JXI baseline left at a stale 24.00.
+// Asserted as a range, not a digit: Postgres rounds this to -50.13 and JS to
+// -50.12, and the point is the magnitude -- a flat stock reading as a halving.
+check('the bug: a flat constituent with a stale index baseline reads about -50%',
+      pct(unit(level(13.61,11.37)),24.00)<-50 && pct(unit(level(13.61,11.37)),24.00)>-50.2,
+      String(pct(unit(level(13.61,11.37)),24.00)));
+check('...while the constituent itself reads 0.00%', pct(13.61,13.61)===0);
+
+// With the baseline computed from the constituent's own open, they agree.
+const openUnit=unit(level(13.61,11.37));
+check('fixed: a flat constituent gives a flat index', pct(unit(level(13.61,11.37)),openUnit)===0);
+for(const [label,now] of [['up 20%',16.33],['down 20%',10.89],['up 5%',14.29],['unchanged',13.61]]){
+  const idx=pct(unit(level(now,11.37)),openUnit), con=pct(now,13.61);
+  check('the index tracks its only constituent '+label+' ('+idx+'% vs '+con+'%)',
+        Math.abs(idx-con)<=0.05, idx+' vs '+con);
+}
+// The residual is cent-rounding on the unit price, not a modelling error.
+check('any gap is under a twentieth of a point, and comes from rounding to the cent',
+      Math.abs(pct(unit(level(16.33,11.37)),openUnit)-pct(16.33,13.61))<0.05);
+
 console.log(fails?('\n'+fails+' check(s) failed'):'\nall checks passed');
 process.exit(fails?1:0);

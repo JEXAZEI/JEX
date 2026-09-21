@@ -73,6 +73,9 @@ They are listed in the order they were applied. Two of them care:
 
 | file | what it does |
 | --- | --- |
+| `vote_deadline_enforced.sql` | A shareholder vote only ended if a browser happened to run the sweep — `rpc_cast_vote` checked `status` and never looked at `closes_at`. A vote that expired yesterday still took ballots, and votes with a null or free-text deadline never closed at all. |
+| `timestamps_arizona.sql` | Eight-plus functions wrote the text `ts` column with a bare `to_char(now(), ...)`, which renders in the server's zone — UTC. A snapshot saved at 2:14 PM in Tucson was stored and displayed as 09:14 PM. |
+| `index_session_open.sql` | `rpc_record_session_open_prices` captured `jex_companies.price` as the index's opening baseline, and for an index row that column is a stale cache. JXI's card read **−50.00% today** while its only constituent read **+0.00%**. |
 | `preflight.sql` | **Read-only, run it before class.** Answers "is the exchange in a state where a lesson can happen" — dev_mode, session status, whether the books balance, stranded prices, shorts near their margin line, snapshot freshness, and whether 15 named fixes are still present. |
 | `repair_share_register.sql` | **Changes data, not a function.** Puts the 21 missing shares back into the unsold pool after `removed_user_shares.sql` stops the leak. Moves no money. Optional — leaving the register as it stands is a reasonable choice. |
 
