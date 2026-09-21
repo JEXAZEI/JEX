@@ -75,6 +75,53 @@ They are listed in the order they were applied. Two of them care:
 | --- | --- |
 | `repair_share_register.sql` | **Changes data, not a function.** Puts the 21 missing shares back into the unsold pool after `removed_user_shares.sql` stops the leak. Moves no money. Optional — leaving the register as it stands is a reasonable choice. |
 
+## Scope of the audit
+
+Every function in the `public` schema was read against the live body, not
+against a local copy — 146 of them. The fingerprint diff above is what made
+that checkable; before it existed, 22 of the copies being reasoned about were
+stale, including every core trading path.
+
+The order it was done in, because the order mattered:
+
+1. **The money paths** — trades, dividends, buybacks, funds, shorts, the
+   index. Read and then exercised on a rig carrying the same constraints,
+   foreign keys and column types as production.
+2. **The auth surface** — everything `SECURITY DEFINER` and callable by
+   `anon`. This is where `approve_registration` was, and where Forgot Password
+   turned out to be broken for every account with a password.
+3. **The remaining 50** — votes, news, notifications, announcements, flags,
+   bug reports, classroom admin, watchlists, price alerts. Triaged by whether
+   each checks its caller, then all 50 read in full.
+
+The third pass found one thing (`activity_hash_coverage.sql`) and confirmed
+everything else correct. That is worth recording precisely, because "we
+checked and found nothing" is only useful if it says what was checked:
+
+- every admin function is role-gated, and the role lists are deliberately
+  tiered — `rpc_admin_list_bug_reports` is Chairman/President only,
+  `rpc_admin_list_flags` adds the Compliance Officer, `rpc_post_minutes` is
+  the Secretary alone, and the client's tab lists agree with each of them
+- every self-service function (watchlist, price alerts, notifications,
+  last-login, bug reports) acts on the caller's own row, derived from
+  `auth.uid()`, never on an id it was handed
+- `rpc_delete_price_alert` is the one that takes an id, and it checks
+  ownership before deleting
+
+### Triggers
+
+There are exactly two, and they are the same function on two tables:
+`_hash_sec_a_on_write`, BEFORE INSERT OR UPDATE FOR EACH ROW on `jex_users`
+and on `jex_pending`, both enabled. It hashes a security answer on the way in
+unless it already looks hashed.
+
+This matters more than it sounds. `rpc_update_security_question` writes the
+answer in **plaintext** — `set sec_a = lower(trim(p_new_a))` — and it is this
+trigger, nothing in the function itself, that keeps answers out of the
+database in clear text. If the trigger were ever dropped or disabled, that
+would stop being true silently, and `password_recovery_broken.sql`'s
+verification (`sec_a_storage`) is the check that would notice.
+
 ## The rig
 
 These were developed and tested against a local PostgreSQL 16 copy with the
