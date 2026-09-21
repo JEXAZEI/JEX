@@ -73,6 +73,7 @@ They are listed in the order they were applied. Two of them care:
 
 | file | what it does |
 | --- | --- |
+| `preflight.sql` | **Read-only, run it before class.** Answers "is the exchange in a state where a lesson can happen" — dev_mode, session status, whether the books balance, stranded prices, shorts near their margin line, snapshot freshness, and whether 15 named fixes are still present. |
 | `repair_share_register.sql` | **Changes data, not a function.** Puts the 21 missing shares back into the unsold pool after `removed_user_shares.sql` stops the leak. Moves no money. Optional — leaving the register as it stands is a reasonable choice. |
 
 ## Scope of the audit
