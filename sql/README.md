@@ -64,6 +64,9 @@ They are listed in the order they were applied. Two of them care:
 | `approve_registration_auth.sql` | **The serious one.** `approve_registration` took the new account's balance from its caller and had no role check at all — no `auth.uid()` call anywhere in it — while granted to `anon` and `authenticated`. An ordinary student minted an approved account holding $1,000,000. |
 | `removed_user_shares.sql` | Removing an account deleted the shares it held instead of returning them to the unsold pool, so `shares = shares_avail + held` stopped holding by exactly what the leaver had. 21 shares across four tickers had already gone this way. |
 | `graded_index_mark.sql` | `jex_mark_price` returned the cached price for an index row, and `app.js` calls `snapshotNW` *before* `snapshotJXI` — so every graded row written at a trade was taken before the cache caught up. Measured 8.5% low on a 500-unit holding. |
+| `fund_margin_call.sql` | A fund's short had no margin call at all — `rpc_margin_call_short` reads `jex_users` and the client walked `DB.users` only. Adds the fund-side mirror and makes the poller walk both. |
+| `password_recovery_broken.sql` | **Forgot Password did not work, for anybody.** Step 2 verified the security answer as a hash and step 3 re-verified it as plaintext, so every correct answer was rejected at the last screen with no way out of the loop. |
+| `contact_details_auth.sql` | `rpc_get_company_team_contacts` and `rpc_get_leadership_contacts` returned students' names and email addresses to unauthenticated callers. |
 
 ### Not a migration
 

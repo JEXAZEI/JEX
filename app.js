@@ -4299,6 +4299,58 @@ async function checkMarginCalls(){
               +r.qty+'\u00d7'+ticker+' closed @ '+fmt(r.price));
     }
   }
+  // Funds too. A student-run fund can short exactly like a student can, and
+  // this loop used to walk DB.users only -- so the identical position was
+  // watched when a student held it and unwatched when their fund did. A fund
+  // short that runs away takes every investor in it to zero, not just the
+  // manager, and the manager is the only one who can see it coming.
+  for(const f of DB.funds||[]){
+    for(const [ticker,pos] of Object.entries(f.shorts||{})){
+      if(!pos||!(pos.qty>0))continue;
+      const co=getCo(ticker);if(!co)continue;
+      const line=shortMarginLine(pos);
+      if(line==null||co.price<line)continue;
+      if(isHalted(ticker))continue;
+      let r;
+      try{r=await sb.rpc('rpc_margin_call_fund_short',{p_fund_id:f.id,p_ticker:ticker});}
+      catch(e){
+        // Same two cases as above: a missing function is a deploy that has
+        // outrun its SQL and stays quiet; anything else means the net is down.
+        const msg=(e&&e.message)||String(e);
+        if(!/PGRST202|Could not find the function|does not exist/i.test(msg))
+          reportClientError('fund margin call failed for '+ticker+': '+msg,e&&e.stack,'checkMarginCalls');
+        continue;
+      }
+      if(!r||!r.called)continue;
+      applyFundMarginCallResult(r);
+      // The manager is told, because they are the one who can act. Investors
+      // see it in the fund's activity feed rather than as a personal alert --
+      // it is not their position, it is the fund's.
+      if(r.manager_id)
+        await pushNotification(r.manager_id,'margin_call',
+          '\u26a0\ufe0f Margin call: '+r.fund_name+"'s short of "+r.qty+'\u00d7'+ticker+' was closed at '+fmt(r.price)
+          +' (opened at '+fmt(r.avg_price)+'). Loss '+fmt(Math.abs(r.pnl))+' of the '+fmt(r.collateral)+' the fund posted.',ticker);
+      await logActivity('margin_call',r.fund_name+"'s short of "+r.qty+'\u00d7'+ticker
+        +' was closed by a margin call @ '+fmt(r.price),
+        {ticker,userId:r.manager_id,userName:r.fund_name,amount:r.qty*r.price});
+      const me2=cu();
+      if(me2&&(me2.id===r.manager_id||isAdmin(me2)))
+        toast('Margin call: '+r.fund_name+"'s short of "+r.qty+'\u00d7'+ticker+' closed @ '+fmt(r.price));
+    }
+  }
+}
+function applyFundMarginCallResult(r){
+  const f=getFund(r.fund_id);
+  if(f){f.cash=r.fund_cash;f.shorts=r.shorts;f.units_outstanding=r.units_outstanding;}
+  const co=getCo(r.ticker);
+  if(co){co.price=r.price;co.price_history=r.price_history;
+    if('shares_avail'in r)co.shares_avail=r.shares_avail;}
+  if(r.trade)recordLocalTrade(r.trade);
+  checkPriceAlerts();
+  checkCircuitBreakers();
+  pushBalances();
+  snapshotJXI();
+  pushTradeToSheets(r.trade);
 }
 function applyMarginCallResult(r){
   const u=getUser(r.user_id);
