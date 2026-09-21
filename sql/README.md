@@ -67,6 +67,7 @@ They are listed in the order they were applied. Two of them care:
 | `fund_margin_call.sql` | A fund's short had no margin call at all — `rpc_margin_call_short` reads `jex_users` and the client walked `DB.users` only. Adds the fund-side mirror and makes the poller walk both. |
 | `password_recovery_broken.sql` | **Forgot Password did not work, for anybody.** Step 2 verified the security answer as a hash and step 3 re-verified it as plaintext, so every correct answer was rejected at the last screen with no way out of the loop. |
 | `contact_details_auth.sql` | `rpc_get_company_team_contacts` and `rpc_get_leadership_contacts` returned students' names and email addresses to unauthenticated callers. |
+| `activity_hash_coverage.sql` | The audit trail's hash chain covered what happened but not who it happened to — rewriting `user_name` on every row left every hash still verifying. |
 
 ### Not a migration
 
