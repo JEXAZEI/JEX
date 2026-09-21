@@ -256,7 +256,16 @@ check('the Open anchor compares Arizona calendar days',
   /function anchorPointLabel[\s\S]{0,400}azParts\(d\)/.test(src));
 check('and not the device\'s toDateString',
   !/function anchorPointLabel[\s\S]{0,400}d\.toDateString\(\)===new Date\(\)\.toDateString\(\)/.test(src));
-check('vote close time is formatted in Arizona', /fmtAZTime\(new Date\(v\.closes_at\)\)/.test(src));
+// The vote card used to print fmtAZTime(new Date(v.closes_at)) -- the raw
+// column. It now prints the ENFORCED deadline, which is closes_at when that
+// parses and created_at + 24h when it does not (see test_vote_deadline.js),
+// because the raw column could be null or the free text "Friday 3pm" and both
+// rendered as an Invalid Date or as nothing at all. The point of this check is
+// unchanged: whatever time is shown goes through fmtAZTime, so it is Arizona
+// time rather than the device's zone.
+check('vote close time is formatted in Arizona', /fmtAZTime\(new Date\(d\)\)/.test(src));
+check('...and it is the enforced deadline being formatted, not the raw column',
+  /\(voteDeadline\(v\)\)/.test(src) && !/fmtAZTime\(new Date\(v\.closes_at\)\)/.test(src));
 check('no display path calls toLocaleString with no timezone',
   !/toLocale(Date|Time)?String\(\[\]/.test(codeOnly));
 {

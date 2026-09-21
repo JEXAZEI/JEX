@@ -6818,17 +6818,32 @@ async function reviewClassApp(id,approve){
 // after the next manual close. (See rpc_auto_close_expired_votes in the
 // vote-deadline migration for the server-side sweep that eventually
 // catches up jex_votes.status itself.)
+const VOTE_WINDOW_MS=24*60*60*1000;
+// The deadline, by the one rule the server now uses as well: closes_at when
+// it is a real timestamp, created_at + 24 hours when it is not.
+//
+// closes_at was, until this feature, a free-text "informational" note ("e.g.
+// Friday 3pm"), and old votes still hold that rather than a timestamp. This
+// used to treat an unparseable deadline -- and a null one -- as "no deadline",
+// leaving those votes open for ever. That was the safe reading while the
+// deadline was cosmetic; it is the wrong one now that every vote is supposed
+// to end, and the server was accepting ballots on them indefinitely to match.
+//
+// Falling back to created_at means every vote has an end without rewriting a
+// single row, and the browser and the database agree on when it is.
+function voteDeadline(v){
+  const t=v.closes_at?new Date(v.closes_at).getTime():NaN;
+  if(!isNaN(t))return t;
+  const c=v.created_at?new Date(v.created_at).getTime():NaN;
+  // Nothing usable to date it from at all: treat as open rather than
+  // retroactively voiding a vote on a row we cannot place in time. The server
+  // makes the same call, and rpc_post_vote now guarantees a real closes_at, so
+  // this can only be reached by a row that predates all of it.
+  return isNaN(c)?Infinity:c+VOTE_WINDOW_MS;
+}
 function isVoteOpen(v){
   if(v.status!=='open')return false;
-  if(!v.closes_at)return true;
-  // closes_at was, until this feature, a free-text "informational" note
-  // ("e.g. Friday 3pm") -- old votes can still have that garbage in the
-  // column rather than a real timestamp. new Date() on non-parseable text
-  // is NaN, and any comparison with NaN is false, which would silently
-  // treat those old votes as permanently expired. Fall back to "no real
-  // deadline" (same as null) instead, matching how they behaved before.
-  const t=new Date(v.closes_at).getTime();
-  return isNaN(t)||Date.now()<t;
+  return Date.now()<voteDeadline(v);
 }
 async function postVote(parentTicker,question,optA,optB){
   if(!question||question.trim().length<5)return toast('Enter a question');
@@ -6928,7 +6943,13 @@ function renderVoteCard(v,isOwner,isAdminUser){
   return '<div class="news-item" style="margin-bottom:12px">'
     +'<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">'
     +'<div><div style="font-weight:500;font-size:14px;margin-bottom:2px">'+esc(v.question)+'</div>'
-    +'<div style="font-size:11px;color:var(--text2)">'+esc(v.company_name)+' · '+v.ts+(v.closes_at?' · '+(openNow?'closes ':'closed ')+fmtAZTime(new Date(v.closes_at)):'')+'</div></div>'
+    +'<div style="font-size:11px;color:var(--text2)">'+esc(v.company_name)+' · '+v.ts
+    // The deadline by the same rule the server enforces, not the raw column.
+    // This printed fmtAZTime(new Date("Friday 3pm")) -- an Invalid Date -- for
+    // any vote still holding the old free-text value, and printed nothing at
+    // all when closes_at was null, which was exactly the vote that never
+    // closed. Both now show the real end.
+    +((d=>isFinite(d)?' · '+(openNow?'closes ':'closed ')+fmtAZTime(new Date(d)):'')(voteDeadline(v)))+'</div></div>'
     +'<span class="badge '+(openNow?'b-green':'b-gray')+'">'+(openNow?'open':'closed')+'</span></div>'
     // Results bars
     +'<div style="margin-bottom:10px">'
