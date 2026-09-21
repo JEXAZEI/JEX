@@ -65,14 +65,21 @@
 // price from computeIndex() at the top of every render, so co.price is live in
 // the browser. It was only the server that read the cache.
 //
-// ── Still open, deliberately not fixed here ──
+// ── The gap this file used to record, now closed ──
 //
-// A FUND's short is never margin-called at all: checkMarginCalls() walks
-// DB.users only, and there is no fund-side RPC. A fund can therefore run a
-// short past its collateral with no safety net, and now settles at zero --
-// which wipes out its investors. Fixing that means either a fund margin caller
-// or a cap on fund shorts, and that is a decision about how the class should
-// work, not a bug fix.
+// A FUND's short was never margin-called at all: checkMarginCalls() walked
+// DB.users only and there was no fund-side RPC, so the identical position was
+// watched when a student held it and unwatched when their fund did. I left it
+// alone at first because it looked like it needed an answer to "who eats the
+// loss".
+//
+// It did not, in the end. The answer was already settled by the two fixes
+// above plus fund_negative_nav.sql: a blown cover settles at greatest(0, ...)
+// and a unit is floored at zero, so the investors eat it down to zero and no
+// further. rpc_margin_call_fund_short applies that rule earlier, and is a
+// mirror of the user-side caller -- same 80% line, same impact model, same
+// band clamp, same live index mark, same floor. checkMarginCalls() now walks
+// DB.funds alongside DB.users.
 const fs=require('fs'),path=require('path');
 const src=fs.readFileSync(path.join(__dirname,'..','app.js'),'utf8');
 let fails=0;
@@ -158,13 +165,23 @@ check('the margin poller reads that same refreshed price',
 check('the poller skips a halted ticker rather than calling into a halt',
       /if\(isHalted\(ticker\)\)continue;/.test(src));
 
-// ── and the gap that is still open ──
+// ── and the gap that used to be here ──
 //
-// Stated as a test so it cannot be forgotten: if a fund margin caller is ever
-// added, this check is what should change.
-check('checkMarginCalls still only walks users, not funds (known gap)',
-      /async function checkMarginCalls\(\)\{[\s\S]{0,600}?for\(const u of DB\.users\|\|\[\]\)/.test(src)
-      && !/checkMarginCalls[\s\S]{0,900}?DB\.funds/.test(src));
+// The margin poller has to cover both holders of a short, or the safety net
+// depends on which wrapper the position happens to sit in.
+check('checkMarginCalls walks users', /for\(const u of DB\.users\|\|\[\]\)\{/.test(src));
+check('...and funds', /for\(const f of DB\.funds\|\|\[\]\)\{/.test(src));
+check('...calling the fund-side RPC for the second',
+      /sb\.rpc\('rpc_margin_call_fund_short',\{p_fund_id:f\.id,p_ticker:ticker\}\)/.test(src));
+check('both use the same line function, so the trigger cannot drift apart',
+      (src.match(/const line=shortMarginLine\(pos\);/g)||[]).length===2,
+      String((src.match(/const line=shortMarginLine\(pos\);/g)||[]).length));
+check('a missing fund RPC stays quiet, like the user one',
+      /PGRST202\|Could not find the function\|does not exist\/i\.test\(msg\)\)\s*\n\s*reportClientError\('fund margin call failed/.test(src));
+check('a fund result writes back to the fund, not to a user',
+      /function applyFundMarginCallResult\(r\)\{[\s\S]{0,200}?const f=getFund\(r\.fund_id\);/.test(src));
+check('...and refreshes the index cache afterwards, like the user path',
+      /function applyFundMarginCallResult\(r\)\{[\s\S]{0,600}?snapshotJXI\(\);/.test(src));
 
 console.log(fails?('\n'+fails+' check(s) failed'):'\nall checks passed');
 process.exit(fails?1:0);
