@@ -132,7 +132,7 @@ select jsonb_pretty(jsonb_build_object(
 
   -- ── 8. Are the fixes still in place ──
   --
-  -- Fifteen markers from the migrations that matter most. Every one should be
+  -- Twenty-two markers from the migrations that matter most. Every one should be
   -- true. A false here means a function was replaced by hand afterwards and
   -- the fix went with it -- which is exactly how this codebase lost things
   -- before sql/ existed.
@@ -156,8 +156,52 @@ select jsonb_pretty(jsonb_build_object(
         ('officer reset will not delete holdings','rpc_admin_reset_officer_cash', 'v_holders text;'),
         ('audit log covers attribution',          'rpc_log_activity', 'coalesce(p_user_id'),
         ('dividend total includes funds',         'rpc_request_dividend_approval', 'from jex_funds f where f.holdings ?| v_tickers'),
-        ('sign-in is rate limited',               'verify_legacy_password', 'jex_login_throttle')
+        ('sign-in is rate limited',               'verify_legacy_password', 'jex_login_throttle'),
+        ('an expired vote refuses ballots',       'rpc_cast_vote', 'v_deadline timestamptz;'),
+        ('every new vote gets a 24h deadline',    'rpc_post_vote', '24 hours from posting, set here'),
+        ('old votes are swept closed',            'rpc_auto_close_expired_votes', 'v.created_at + interval'),
+        ('index opens from its constituents',     'rpc_record_session_open_prices', 'index_open_from('),
+        ('...and reads companies before the index','rpc_record_session_open_prices', 'order by coalesce(is_index_fund, false) loop'),
+        ('a restore re-records the opening prices','rpc_admin_restore_snapshot', 'jex_open_prices_now()'),
+        ('a dilution marks its step on the chart','rpc_review_dilution', '''a'', case when v_co.price > 0')
       ) m(label, fn, marker)),
+
+  -- ── 8b. Fixes that are about data, not a line in a function ──
+  --
+  -- Each of these should be an empty list or `true`.
+  --
+  -- functions_writing_utc_times  a bare to_char(now(), ...) renders in the
+  --                              server's zone, UTC -- seven hours ahead of
+  --                              Tucson. Any function listed here was put
+  --                              back by hand after timestamps_arizona.sql.
+  -- unmarked_dilutions           a company whose index base was adjusted with
+  --                              no step marked in its history. JXI's chart
+  --                              draws that dilution as a crash. Fixed by
+  --                              mark_past_dilution.sql.
+  -- jxi_open_is_honest           today's recorded JXI open equals the level its
+  --                              constituents' opens give. False is how "-50%"
+  --                              and "+99.93%" happened; opening the session
+  --                              again, or restoring a snapshot, re-records it.
+  'data_fixes_holding', jsonb_build_object(
+    'functions_writing_utc_times', (
+      select coalesce(jsonb_agg(p.proname order by p.proname), '[]'::jsonb)
+        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public' and p.prokind = 'f'
+         and p.prosrc ~ 'to_char\(\s*now\(\)\s*,'),
+    'unmarked_dilutions', (
+      select coalesce(jsonb_agg(c.ticker order by c.ticker), '[]'::jsonb)
+        from jex_companies c
+       where not coalesce(c.is_index_fund, false)
+         and coalesce(c.index_base_adjust, 1) <> 1
+         and not exists (select 1 from jsonb_array_elements(coalesce(c.price_history, '[]'::jsonb)) e
+                          where e ? 'a')),
+    'jxi_open_is_honest', (
+      select coalesce(bool_and(
+               (s.session_open_prices->>c.ticker)::numeric
+               = index_open_from(s.session_open_prices, c.index_classroom_id)), true)
+        from jex_companies c cross join jex_session s
+       where s.id = 1 and coalesce(c.is_index_fund, false) and c.status = 'listed'
+         and s.session_open_prices ? c.ticker)),
 
   -- ── 9. The security answer trigger ──
   --
