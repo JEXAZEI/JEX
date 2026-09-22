@@ -1,6 +1,14 @@
 -- ============================================================
 -- index_session_open.sql
 --
+-- CORRECTION, after it ran: this fixes a real stale baseline, but not the
+-- number on the card. The card never reads session_open_prices for an index;
+-- it derives JXI's history in the browser, and the -50.00% was a dilution
+-- drawn as a crash in that history. That, a restore leaving the open behind,
+-- and an ordering hole in the capture below are fixed in
+-- dilution_and_restore_opens.sql. What this file fixed is the server's JXI
+-- baseline, which its price band and circuit breaker read.
+--
 -- JXI's "today" percentage is wrong, and there is a clean proof of it.
 --
 -- The index card reads:

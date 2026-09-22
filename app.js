@@ -964,7 +964,6 @@ function indexSeries(co){
     // Base is the constituent's first recorded price, adjusted for corporate
     // actions -- taken from the raw history so it matches computeIndex().
     const raw=(c.price_history&&c.price_history[0]&&c.price_history[0].p)||c.price;
-    bases.push(raw*(c.index_base_adjust??1));
     // Points with no timestamp cannot be placed on a shared time axis at all,
     // so they are dropped here rather than being allowed to halt the scan
     // partway through a history.
@@ -984,6 +983,24 @@ function indexSeries(co){
     // above, so a company whose first point is a 'Listing' label keeps its
     // correct base.
     const h=(c.price_history||[]).filter(p=>p&&p.t&&!isNaN(Date.parse(p.t)));
+    // The base in force AT EACH POINT, not today's. index_base_adjust is the
+    // product of every dilution so far, and dividing a pre-dilution price by
+    // the post-dilution base doubles it on a 2:1 -- so the history showed a
+    // 50% crash at the dilution while the live level did not move at all.
+    // Measured: JXI -50.00% today beside its only constituent at +0.00%.
+    //
+    // rpc_review_dilution marks the point it appends with `a`, the step it
+    // applied. Walking back from the current adjust and undoing each step as
+    // it is passed recovers the adjust every earlier point was priced under.
+    // A history with no marks gets the current adjust throughout, which is
+    // exactly what this did before.
+    const b=new Array(h.length);
+    let adj=c.index_base_adjust??1;
+    for(let j=h.length-1;j>=0;j--){
+      b[j]=raw*adj;
+      if(h[j].a>0)adj/=h[j].a;
+    }
+    bases.push(b);
     hists.push(h);
     cursor.push(-1);                                 // -1 = not listed yet
     for(const p of h)stampSet.add(p.t);
@@ -1001,7 +1018,7 @@ function indexSeries(co){
       // that it was not listed, and treating it as flat at its IPO price would
       // invent index history that never happened -- which is what a cursor
       // still at -1 means.
-      if(j>=0&&bases[i]>0){sum+=h[j].p/bases[i];n++;}
+      if(j>=0&&bases[i][j]>0){sum+=h[j].p/bases[i][j];n++;}
     }
     if(!n)continue;
     // The index level is avg(ratio) * 1000. A unit is that divided by the

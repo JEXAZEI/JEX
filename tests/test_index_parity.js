@@ -174,6 +174,13 @@ check('snapshotNW still runs before snapshotJXI after a trade',
 // number it is derived from is flat, so that was a bad baseline, not a market
 // event.
 //
+// CORRECTION: the bad baseline below is real, and fixed, but it is not what
+// the card read. The card never reads session_open_prices for an index -- it
+// runs intervalChg over the series indexSeries() derives in the browser. The
+// card's -50% was a 2:1 dilution drawn as a crash in that series; see
+// test_dilution_series.js. What this section fixed is the server's baseline
+// for JXI, which its price band and circuit breaker use.
+//
 // rpc_record_session_open_prices captured jex_companies.price as the index's
 // opening baseline -- and for an index row that column is a CACHE, refreshed
 // only by a unit trade or rpc_snapshot_jxi. Whatever stale number sat there at
