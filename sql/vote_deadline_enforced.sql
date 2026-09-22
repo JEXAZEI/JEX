@@ -66,6 +66,7 @@ declare
   r record;
   v_nl text;
   v_n  int;
+  v_tail text;
 begin
   -- ── rpc_cast_vote: the ballot itself ──
   select p.oid, p.prosrc as prosrc, pg_get_functiondef(p.oid) as def
@@ -134,15 +135,26 @@ begin
   else
     v_nl := case when position(chr(13) in r.prosrc) > 0 then chr(13) || chr(10) else chr(10) end;
 
-    v_n := (length(r.prosrc) - length(replace(r.prosrc, 'to_char(now(),''HH12:MI:SS AM''), p_closes_at)', '')))
-           / length('to_char(now(),''HH12:MI:SS AM''), p_closes_at)');
+    -- The insert tail has two possible spellings. timestamps_arizona.sql
+    -- rewrites every bare to_char(now(), ...) to convert to Arizona time, and
+    -- this function has one -- so after that migration the tail reads the
+    -- second way. Anchoring only on the first is what aborted this file in
+    -- production when the two were run in that order. Either is accepted, and
+    -- the replacement always writes the Arizona form, so running these two in
+    -- either order ends in the same place.
+    v_tail := 'to_char(now() at time zone ''America/Phoenix'',''HH12:MI:SS AM''), p_closes_at)';
+    v_n := (length(r.prosrc) - length(replace(r.prosrc, v_tail, ''))) / length(v_tail);
+    if v_n = 0 then
+      v_tail := 'to_char(now(),''HH12:MI:SS AM''), p_closes_at)';
+      v_n := (length(r.prosrc) - length(replace(r.prosrc, v_tail, ''))) / length(v_tail);
+    end if;
     if v_n <> 1 then
       raise exception 'ABORT: expected the insert tail exactly once in rpc_post_vote, found %. Nothing changed.', v_n;
     end if;
 
     execute replace(r.def, r.prosrc, replace(r.prosrc,
-      'to_char(now(),''HH12:MI:SS AM''), p_closes_at)',
-      'to_char(now(),''HH12:MI:SS AM''),' || v_nl ||
+      v_tail,
+      'to_char(now() at time zone ''America/Phoenix'',''HH12:MI:SS AM''),' || v_nl ||
       '      -- 24 hours from posting, set here rather than taken from the' || v_nl ||
       '      -- caller. p_closes_at is kept so the signature does not change,' || v_nl ||
       '      -- and is deliberately ignored: it was inserted verbatim before,' || v_nl ||
