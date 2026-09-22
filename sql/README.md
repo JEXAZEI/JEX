@@ -30,6 +30,18 @@ Every file:
   Retyping a `CREATE OR REPLACE` by hand is how a function quietly loses its
   `search_path` and starts failing with `relation "jex_users" does not exist`.
 
+## Not yet run in production
+
+Send only these when asked for "the SQL". Remove a file from this list once
+its result has come back green. `preflight.sql` is read-only and is run before
+each class, so it is never on this list.
+
+- `timestamps_arizona.sql`
+- `index_session_open.sql`
+- `vote_deadline_enforced.sql`
+
+Every other file here has been run and verified.
+
 ## Order
 
 They are listed in the order they were applied. Two of them care:
