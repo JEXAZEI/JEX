@@ -124,7 +124,10 @@ const ta=(id,value)=>({id,value,tagName:'TEXTAREA'});
   check('corrupt stored draft does not throw', textareas[0].value==='');
 
   console.log('\n=== source wiring ===');
-  check('render() calls restoreDrafts()', /restoreDrafts\(\);\s*\n\}/.test(src));
+  // At the end of render(), and followed only by refreshQtyPreviews(): the Fill
+  // lines must be repriced AFTER typed values and drafts are put back, or they
+  // price the default quantity while the box shows the typed one.
+  check('render() calls restoreDrafts()', /restoreDrafts\(\);(\s*\/\/[^\n]*)*\s*refreshQtyPreviews\(\);\s*\n\}/.test(src));
   check('delegated input listener saves textareas only', /t\.tagName==='TEXTAREA'&&t\.id/.test(src));
   // Lower bound, not an exact count: more submits get wrapped over time and
   // an exact figure just makes this test stale. test_busy_wiring.js is what
