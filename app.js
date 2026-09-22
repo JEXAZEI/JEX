@@ -6466,7 +6466,43 @@ function shortPrev(co,qty){
 // (renderCompanyPage's Trade tab and openPanel's market-page side panel) --
 // sets the quantity input and recomputes the preview in one click instead
 // of typing a number and waiting for the next render.
+//
+// ── ...and the Fill line has to follow a TYPED number too ──
+//
+// Only the buttons refreshed the "Fill: $x | Total: $y" line. Typing 2 or 6
+// into the company page's box left it showing whatever the last button said,
+// and the market panel's box had its own copy of the logic wired by hand. And
+// on both, the 20-second background repaint put the typed number back in the
+// box (restoreFormState) while redrawing the Fill line for 1 share -- so the
+// box said 6 and the total was for 1.
+//
+// Every quantity box that has these buttons registers here as it is drawn,
+// with the ticker, mode and preview it belongs to. One delegated listener
+// refreshes the preview on every keystroke, and render() refreshes all of them
+// after putting typed values back, so the Fill line always prices the number in
+// the box -- at the price on screen now, not the one when the panel opened.
+const _qtyPreviews={};
+function qtyPreviewHTML(co,mode,qty){
+  if(mode==='short')return shortPrev(co,qty);
+  // Covering is buying back borrowed shares, same direction as a plain
+  // buy -- only an actual sell should get the 'sell' impact direction.
+  return impactPreview(co,qty,mode==='sell'?'sell':'buy');
+}
+function refreshQtyPreview(qtyInputId){
+  const reg=_qtyPreviews[qtyInputId];if(!reg)return;
+  const input=get(qtyInputId),preview=get(reg.previewId),co=getCo(reg.ticker);
+  if(!input||!preview||!co)return;
+  preview.innerHTML=qtyPreviewHTML(co,reg.mode,parseInt(input.value)||0);
+}
+function refreshQtyPreviews(){for(const id of Object.keys(_qtyPreviews))refreshQtyPreview(id);}
+if(typeof document!=='undefined'){
+  document.addEventListener('input',e=>{
+    const t=e.target;
+    if(t&&t.id&&_qtyPreviews[t.id])refreshQtyPreview(t.id);
+  });
+}
 function quickQtyButtonsHTML(ticker,mode,qtyInputId,previewId){
+  _qtyPreviews[qtyInputId]={ticker,mode,previewId};
   const lastLabel=(mode==='sell'||mode==='cover')?'All':'Max';
   const lastVal=(mode==='sell'||mode==='cover')?'all':'max';
   return '<div style="display:flex;gap:6px;margin-top:6px">'
@@ -6514,12 +6550,7 @@ function quickSetQty(ticker,mode,qtyInputId,previewId,value){
   qty=Math.max(0,qty||0);
   const input=get(qtyInputId);if(input)input.value=qty;
   const preview=get(previewId);
-  if(preview){
-    if(mode==='short')preview.innerHTML=shortPrev(co,qty);
-    // Covering is buying back borrowed shares, same direction as a plain
-    // buy -- only an actual sell should get the 'sell' impact direction.
-    else preview.innerHTML=impactPreview(co,qty,mode==='sell'?'sell':'buy');
-  }
+  if(preview)preview.innerHTML=qtyPreviewHTML(co,mode,qty);
 }
 function dilPreview(co,ns){if(!ns||ns<=0)return'';const ta=co.shares+ns,np=Math.max(0.01,Math.round(co.price*(co.shares/ta)*100)/100);return `<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px"><div><div style="color:var(--text2);margin-bottom:2px">Total after</div><div style="font-weight:500">${ta.toLocaleString()}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Increase</div><div style="font-weight:500;color:var(--amber)">+${Math.round((ns/co.shares)*100)}%</div></div><div><div style="color:var(--text2);margin-bottom:2px">Est. price</div><div style="font-weight:500;color:var(--red)">${fmt(np)}</div></div></div>`;}
 
@@ -8324,7 +8355,8 @@ function openPanel(ticker){
     :effMode==='short'?`<div class="ibox ibox-purple">Short selling${infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. You borrow shares and sell them now; later you buy them back to cover, hopefully at a lower price. The difference is your profit or loss, but losses are uncapped since a price can rise indefinitely.')} — borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="placeShort('${ticker}',get('t-qty')?.value)">Short sell</button></div></div>${quickQtyButtonsHTML(ticker,'short','t-qty','t-preview')}<div id="t-preview">${shortPrev(c,1)}</div>`
     :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="coverShort('${ticker}',get('t-qty')?.value)">Cover short</button></div></div>${quickQtyButtonsHTML(ticker,'cover','t-qty','t-preview')}<div id="t-preview">${impactPreview(c,short.qty,'buy')}</div>`:''}
   </div>`;
-  const qi=get('t-qty');if(qi){qi.addEventListener('input',()=>{const q=parseInt(qi.value)||0,p=get('t-preview');if(!p)return;if(effMode==='buy')p.innerHTML=impactPreview(c,q,'buy');else if(effMode==='sell')p.innerHTML=impactPreview(c,q,'sell');else if(effMode==='short')p.innerHTML=shortPrev(c,q);else if(effMode==='cover')p.innerHTML=impactPreview(c,q,'buy');});}
+  // Typing into t-qty refreshes t-preview through the delegated listener
+  // beside quickQtyButtonsHTML, which every quantity box here registers with.
   panel.scrollIntoView({behavior:'smooth',block:'nearest'});setTimeout(()=>{destroyChart('panel-chart');buildChart('panel-chart',c);},50);
 }
 function closePanel(){UI.panelTicker=null;destroyCharts();document.getElementById('market-content').innerHTML=renderMarket();}
@@ -11268,6 +11300,9 @@ function render(){
   // restoreDrafts() fill only whatever is still genuinely empty.
   if(_formSnapshot){restoreFormState(_formSnapshot);_formSnapshot=null;}
   restoreDrafts();
+  // The previews were just drawn for each box's DEFAULT quantity. Re-price
+  // them for whatever the boxes hold now, typed values included.
+  refreshQtyPreviews();
 }
 function setTab(t){UI.navTab=t;UI.panelTicker=null;destroyCharts();render();}
 // ── Keyboard shortcuts: the list, and the card that shows it ──
