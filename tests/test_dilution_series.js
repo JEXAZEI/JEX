@@ -126,5 +126,36 @@ check('the open capture reaches companies before the index',
 check('...and so does the helper the restore uses',
       /order by coalesce\(is_index_fund, false\), ticker loop/.test(sql));
 
+// ── dilutions approved before the mark existed ──
+//
+// mark_past_dilution.sql marks AZEI's Sep 3 dilution after the fact. It must
+// refuse to guess: exactly one matching step after the application, or skip.
+const mark=fs.readFileSync(path.join(__dirname,'..','sql','mark_past_dilution.sql'),'utf8');
+check('a past dilution is marked only when exactly one point matches',
+      /\(select count\(\*\) from hits\) <> 1/.test(mark));
+check('...and only at or after the moment it was applied for',
+      /\(e->>'t'\)::timestamptz >= p_since/.test(mark));
+check('...never twice', /when exists \(select 1 from jsonb_array_elements\(p_hist\) e where e \? 'a'\)/.test(mark));
+check('...and the same point is marked inside saved snapshots, or a restore brings the drop back',
+      /update jex_snapshots set data = v_data/.test(mark));
+{
+  // The production shape, marked the way that file marks it: the step is the
+  // whole adjust, since only one dilution produced it.
+  const hist=[{p:22.73,t:'2026-08-20T16:00:00.000Z'},{p:27.50,t:'2026-08-24T16:00:00.000Z'},
+              {p:25.00,t:'2026-08-25T16:00:00.000Z'},{p:29.93,t:'2026-09-02T16:00:00.000Z'},
+              {p:27.21,t:'2026-09-04T01:00:00.000Z'},{p:27.40,t:'2026-09-10T16:00:00.000Z'}];
+  load(co('AZEI',hist.map(p=>({...p})),10/11));
+  const before=series();
+  hist[4].a=10/11;
+  load(co('AZEI',hist,10/11));
+  const after=series();
+  check('unmarked, the Sep 3 dilution draws a 9% drop',
+        Math.round((before[4]/before[3]-1)*10000)/100===-9.05, (before[4]/before[3]-1)*100+'%');
+  check('marked, it is flat', after[4]===after[3], after.join(','));
+  check('...a real move of the same size before it still shows',
+        Math.round((after[2]/after[1]-1)*10000)/100===-9.09, after.join(','));
+  check('...and the live end of the chart does not change', after[after.length-1]===before[before.length-1]);
+}
+
 console.log(fails?('\n'+fails+' check(s) failed'):'\nall checks passed');
 process.exit(fails?1:0);

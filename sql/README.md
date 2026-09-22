@@ -36,10 +36,7 @@ Send only these when asked for "the SQL". Remove a file from this list once
 its result has come back green. `preflight.sql` is read-only and is run before
 each class, so it is never on this list.
 
-- `vote_deadline_enforced.sql` — aborted once, cleanly, because
-  `timestamps_arizona.sql` had rewritten the text it anchors on. Now accepts
-  either spelling.
-- `dilution_and_restore_opens.sql`
+- `mark_past_dilution.sql`
 
 Every other file here has been run and verified.
 
@@ -90,6 +87,7 @@ They are listed in the order they were applied. Two of them care:
 | `timestamps_arizona.sql` | Eight-plus functions wrote the text `ts` column with a bare `to_char(now(), ...)`, which renders in the server's zone — UTC. A snapshot saved at 2:14 PM in Tucson was stored and displayed as 09:14 PM. |
 | `index_session_open.sql` | `rpc_record_session_open_prices` captured `jex_companies.price` as the index's opening baseline, and for an index row that column is a stale cache. This fixed the server's JXI baseline (its band and circuit breaker) — **not** the card's −50.00%, which it was written for. The card never reads that baseline. |
 | `dilution_and_restore_opens.sql` | The card's actual −50.00%: the browser rebuilds JXI's history dividing every past point by today's dilution adjustment, so a 2:1 dilution drew a 50% crash on an index that never moved. The dilution point now records its step. Also: a snapshot restore left the day's opening prices behind (AZEI **+99.93% today**, and priced so far above its band that buying could not move it), and the open capture could reach JXI before its constituents and fall back to the stale cache. Re-records today's opens. |
+| `mark_past_dilution.sql` | **Changes data.** Marks AZEI's Sep 3 dilution on its price point (and in every snapshot holding it), which predates the mark — without it JXI's 1M/Max chart shows a ~9% drop on Sep 3 that never happened. Marks only when exactly one point matches the dilution's step; otherwise skips and reports. Moves no money, shares or price. |
 | `preflight.sql` | **Read-only, run it before class.** Answers "is the exchange in a state where a lesson can happen" — dev_mode, session status, whether the books balance, stranded prices, shorts near their margin line, snapshot freshness, and whether 15 named fixes are still present. |
 | `repair_share_register.sql` | **Changes data, not a function.** Puts the 21 missing shares back into the unsold pool after `removed_user_shares.sql` stops the leak. Moves no money. Optional — leaving the register as it stands is a reasonable choice. |
 
