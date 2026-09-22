@@ -459,6 +459,71 @@ ${PRELUDE}
     return 'ok';
   });
 
+  // The Fill line has to price the number in the box, whatever it is. It only
+  // followed the 1/5/10/Max buttons: typing 6 left it on the last button's
+  // number, and a background repaint put the 6 back in the box while redrawing
+  // the Fill line for 1 share.
+  const typeQty = (id, n) => {
+    const q = document.getElementById(id); if(!q) throw new Error('no #'+id);
+    q.value = String(n);
+    q.dispatchEvent(new Event('input', {bubbles:true}));
+  };
+  // Expected text built from impactPreview/shortPrev directly -- functions that
+  // existed before the fix -- so these steps fail on the old code for the
+  // behaviour, not for a missing helper.
+  const fillFor = (inputId, n) => {
+    const co = getCo('ACME'), mode = UI.panelMode||'buy';
+    return mode==='short' ? shortPrev(co, n) : impactPreview(co, n, mode==='sell'?'sell':'buy');
+  };
+  const totalText = html => (/Total: <strong>([^<]+)</.exec(html)||/Collateral: <strong>([^<]+)</.exec(html)||[])[1];
+  await step('typing a quantity reprices the Fill line (company page)', ()=>{
+    UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='trade'; UI.panelMode='buy'; render();
+    const out = [];
+    for(const n of [2, 6, 37]){                     // none of them is a button
+      typeQty('cp-qty', n);
+      const p = document.getElementById('cp-preview').innerHTML;
+      if(p !== fillFor('cp-qty', n)) throw new Error('after typing '+n+' the Fill line reads '+totalText(p)+', expected '+totalText(fillFor('cp-qty', n)));
+      out.push(n+' → '+totalText(p));
+    }
+    if(fillFor('cp-qty', 6) === fillFor('cp-qty', 1)) throw new Error('test is vacuous: 6 and 1 price the same');
+    return out.join(', ');
+  });
+  await step('...and still prices the typed number after a background repaint', ()=>{
+    UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='trade'; UI.panelMode='buy'; render();
+    typeQty('cp-qty', 6);
+    renderBackground();
+    const q = document.getElementById('cp-qty'), p = document.getElementById('cp-preview').innerHTML;
+    if(q.value !== '6') throw new Error('box became '+q.value);
+    if(p !== fillFor('cp-qty', 6)) throw new Error('box says 6, Fill line says '+totalText(p));
+    q.value = '';
+    return 'box 6, total '+totalText(p);
+  });
+  await step('...for a short too, where the line is collateral', ()=>{
+    UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='trade'; UI.panelMode='short'; render();
+    typeQty('cp-qty', 6);
+    const p = document.getElementById('cp-preview').innerHTML, want = fillFor('cp-qty', 6);
+    UI.panelMode='buy';
+    document.getElementById('cp-qty').value='';
+    if(p !== want) throw new Error('short preview reads '+totalText(p)+', expected '+totalText(want));
+    return 'collateral '+totalText(p);
+  });
+  await step('typing a quantity reprices the Fill line (market side panel)', ()=>{
+    UI.navTab='market'; UI.companyPage=null; UI.panelMode='buy'; render();
+    openPanel('ACME');
+    typeQty('t-qty', 6);
+    let p = document.getElementById('t-preview').innerHTML;
+    if(p !== fillFor('t-qty', 6)) throw new Error('side panel Fill line reads '+totalText(p));
+    renderBackground();
+    const q = document.getElementById('t-qty');
+    if(q){
+      p = document.getElementById('t-preview').innerHTML;
+      if(q.value === '6' && p !== fillFor('t-qty', 6)) throw new Error('after a repaint: box 6, Fill line '+totalText(p));
+      q.value='';
+    }
+    UI.panelTicker=null;
+    return 'total '+totalText(fillFor('t-qty', 6));
+  });
+
   // Draft persistence. The news tab is used rather than dilution because the
   // seeded exchange already has a PENDING dilution application, and the app
   // correctly hides the form while one is outstanding.
