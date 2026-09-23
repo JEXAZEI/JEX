@@ -4568,7 +4568,8 @@ async function pushNotification(userId, type, message, ticker=null){
         after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
         ipo:'🏢 IPO update',session:'🕐 Session update',
         price_alert:'🔔 Price alert',resume:'✅ Trading resumed',
-        founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised',bug_report:'🐛 Bug report',contact_admin:'✉️ New message'
+        founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised',bug_report:'🐛 Bug report',contact_admin:'✉️ New message',
+        margin_call:'⚠️ Margin call'
       };
       showBrowserPush(titles[type]||'Notification',message);
     }
