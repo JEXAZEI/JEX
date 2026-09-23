@@ -593,6 +593,71 @@ ${PRELUDE}
     } finally { me.cash = keep; UI.panelTicker=null; }
   });
 
+  // The limit form: total if it fills, whether it fills now, and its refusals.
+  const limitLine = (ticker, mode, qtyId, priceId, previewId, q, p) => {
+    UI.userId='u-stu'; UI.navTab='market'; UI.companyPage=ticker; UI.companyPageTab='trade'; UI.panelMode=mode; render();
+    const qi = document.getElementById(qtyId), pi = document.getElementById(priceId);
+    if(!qi || !pi) throw new Error('no #'+qtyId+' / #'+priceId);
+    qi.value = String(q); qi.dispatchEvent(new Event('input', {bubbles:true}));
+    pi.value = String(p); pi.dispatchEvent(new Event('input', {bubbles:true}));
+    const el = document.getElementById(previewId);
+    if(!el) throw new Error('no #'+previewId);
+    return el.textContent;
+  };
+  await step('limit buy: the total and whether it waits', ()=>{
+    const wait = limitLine('ACME', 'buy', 'cp-lmt-qty', 'cp-lmt-price', 'cp-lmt-preview', 6, 13);
+    const now  = limitLine('ACME', 'buy', 'cp-lmt-qty', 'cp-lmt-price', 'cp-lmt-preview', 6, 14);
+    UI.panelMode='buy';
+    if(!wait.includes('If it fills: 6 × $13.00 = $78.00')) throw new Error('"'+wait+'"');
+    if(!wait.includes('Waits until the price falls to $13.00.')) throw new Error('"'+wait+'"');
+    if(!now.includes('so it can fill right away')) throw new Error('"'+now+'"');
+    if(wait.includes('you have')) throw new Error('warned on an affordable order');
+    return wait;
+  });
+  await step('limit buy the cash cannot cover is flagged, with what would fit', ()=>{
+    const me = getUser('u-stu'), keep = me.cash;
+    try{
+      me.cash = 30;
+      const t = limitLine('ACME', 'buy', 'cp-lmt-qty', 'cp-lmt-price', 'cp-lmt-preview', 6, 13);
+      if(!t.includes('That would cost $78.00 if it fills, and you have $30.00 — enough for 2 at $13.00.')) throw new Error('"'+t+'"');
+      return 'enough for 2 at $13.00';
+    } finally { me.cash = keep; UI.panelMode='buy'; }
+  });
+  await step('limit sell over what is held is flagged', ()=>{
+    const t = limitLine('ACME', 'sell', 'cp-lmt-sty', 'cp-lmt-sprice', 'cp-lmt-preview', 25, 14);
+    const ok = limitLine('ACME', 'sell', 'cp-lmt-sty', 'cp-lmt-sprice', 'cp-lmt-preview', 5, 14);
+    UI.panelMode='buy';
+    if(!t.includes('You hold 20 shares — a limit sell has to be backed by shares you own.')) throw new Error('"'+t+'"');
+    if(!t.includes('Waits until the price rises to $14.00.')) throw new Error('"'+t+'"');
+    if(ok.includes('You hold')) throw new Error('warned on selling 5 of 20');
+    return 'flagged 25 of 20, not 5';
+  });
+  await step('no price typed: the limit line stays empty', ()=>{
+    const t = limitLine('ACME', 'buy', 'cp-lmt-qty', 'cp-lmt-price', 'cp-lmt-preview', 6, '');
+    UI.panelMode='buy';
+    if(t.trim()) throw new Error('"'+t+'"');
+    return 'empty';
+  });
+  await step('limit line on the market side panel, and it survives a repaint', ()=>{
+    UI.userId='u-stu'; UI.navTab='market'; UI.companyPage=null; UI.panelMode='buy'; render();
+    openPanel('ACME');
+    const qi = document.getElementById('t-lmt-qty'), pi = document.getElementById('t-lmt-price');
+    qi.value='6'; qi.dispatchEvent(new Event('input', {bubbles:true}));
+    pi.value='13'; pi.dispatchEvent(new Event('input', {bubbles:true}));
+    let t = document.getElementById('t-lmt-preview').textContent;
+    if(!t.includes('6 × $13.00 = $78.00')) throw new Error('panel: "'+t+'"');
+    renderBackground();
+    const el = document.getElementById('t-lmt-preview');
+    if(el && document.getElementById('t-lmt-price') && document.getElementById('t-lmt-price').value==='13'){
+      t = el.textContent;
+      if(!t.includes('6 × $13.00 = $78.00')) throw new Error('after repaint: "'+t+'"');
+    }
+    const a=document.getElementById('t-lmt-qty'), b=document.getElementById('t-lmt-price');
+    if(a)a.value=''; if(b)b.value='';
+    UI.panelTicker=null;
+    return 'panel shows $78.00';
+  });
+
   // Snapshots: which one is which, and when it was taken.
   await step('the snapshot list shows a date and Arizona time, not the old UTC text', ()=>{
     const keep = DB.snapshots;
