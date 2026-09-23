@@ -6550,12 +6550,68 @@ function refreshQtyPreview(qtyInputId){
   if(!input||!preview||!co)return;
   preview.innerHTML=qtyPreviewHTML(co,reg.mode,parseInt(input.value)||0);
 }
-function refreshQtyPreviews(){for(const id of Object.keys(_qtyPreviews))refreshQtyPreview(id);}
+function refreshQtyPreviews(){
+  for(const id of Object.keys(_qtyPreviews))refreshQtyPreview(id);
+  for(const id of Object.keys(_limitPreviews))refreshLimitPreview(id);
+}
 if(typeof document!=='undefined'){
   document.addEventListener('input',e=>{
-    const t=e.target;
-    if(t&&t.id&&_qtyPreviews[t.id])refreshQtyPreview(t.id);
+    const t=e.target;if(!t||!t.id)return;
+    if(_qtyPreviews[t.id])refreshQtyPreview(t.id);
+    const lim=_limitInputs[t.id];if(lim)refreshLimitPreview(lim);
   });
+}
+
+// ── The same, for a limit order ──
+//
+// The limit form showed nothing until it was submitted: no total, no sign of
+// whether it would fill now or wait, and placeLimitOrder's two refusals --
+// a buy costing more than your cash, a sell of shares you do not hold --
+// arrived only as a toast after the click. This line says all three while the
+// quantity and price are being typed.
+//
+// Registered the same way as the Fill line, keyed by the preview's id, with
+// both of its inputs pointing back at it.
+const _limitPreviews={},_limitInputs={};
+function limitPreviewSlot(ticker,side,qtyId,priceId,previewId){
+  _limitPreviews[previewId]={ticker,side,qtyId,priceId};
+  _limitInputs[qtyId]=previewId;_limitInputs[priceId]=previewId;
+  return '<div id="'+previewId+'"></div>';
+}
+function limitPreviewHTML(co,side,qty,price){
+  if(!co||!(qty>0))return'';
+  const box=(inner,warn)=>`<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">${inner}</div>`
+    +(warn?`<div class="qty-warn" style="font-size:12px;margin-top:4px;padding:5px 10px;border-radius:var(--radius);color:var(--red);background:rgba(255,77,106,0.08)">${warn}</div>`:'');
+  // Nothing until a price is typed: the price box's placeholder already shows
+  // the current price, and a line under every limit form on every page is noise.
+  if(!(price>0))return'';
+  const total=Math.round(qty*price*100)/100,u=cu();
+  const s=n=>n===1?'':'s';
+  // Whether it is marketable. A buy at or above the current price, or a sell
+  // at or below it, can fill as soon as it is placed -- partly, if filling all
+  // of it would push the price past the limit.
+  const now=side==='buy'?price>=co.price:price<=co.price;
+  const when=now
+    ?`At ${side==='buy'?'or above':'or below'} the current ${fmt(co.price)}, so it can fill right away.`
+    :`Waits until the price ${side==='buy'?'falls':'rises'} to ${fmt(price)}.`;
+  let warn='';
+  if(u){
+    if(side==='buy'&&total>u.cash){
+      const n=Math.floor(u.cash/price);
+      warn='That would cost '+fmt(total)+' if it fills, and you have '+fmt(u.cash)
+        +(n>0?' — enough for '+n.toLocaleString()+' at '+fmt(price)+'.':'.');
+    } else if(side==='sell'){
+      const held=(holdings(u)[co.ticker])||0;
+      if(qty>held)warn='You hold '+held.toLocaleString()+' share'+s(held)+' — a limit sell has to be backed by shares you own.';
+    }
+  }
+  return box(`If it fills: ${qty.toLocaleString()} × ${fmt(price)} = <strong>${fmt(total)}</strong> <span style="color:var(--text2)">· ${when}</span>`,warn);
+}
+function refreshLimitPreview(previewId){
+  const reg=_limitPreviews[previewId];if(!reg)return;
+  const p=get(previewId),q=get(reg.qtyId),pr=get(reg.priceId),co=getCo(reg.ticker);
+  if(!p||!q||!pr||!co)return;
+  p.innerHTML=limitPreviewHTML(co,reg.side,parseInt(q.value)||0,parseFloat(pr.value)||0);
 }
 function quickQtyButtonsHTML(ticker,mode,qtyInputId,previewId){
   _qtyPreviews[qtyInputId]={ticker,mode,previewId};
@@ -7902,7 +7958,8 @@ function renderCompanyPage(parentTicker){
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-qty" value="1" min="1"></div>'
           +'<div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="cp-lmt-price" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
           +'<div class="frow" style="flex:1"><label class="flabel">Order type</label><select id="limit-order-type"><option value="gtc">GTC (Good till cancelled)</option><option value="day">Day order (expires at close)</option></select></div>'
-          +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Placing…&quot;,()=>cpLimit(&quot;buy&quot;))">Place limit</button></div></div>');
+          +'<div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Placing…&quot;,()=>cpLimit(&quot;buy&quot;))">Place limit</button></div></div>'
+          +limitPreviewSlot(parentTicker,'buy','cp-lmt-qty','cp-lmt-price','cp-lmt-preview'));
       } else if(effMode==='sell'){
         html+='<p style="font-size:12px;color:var(--text2);margin-bottom:8px">You hold: <strong>'+held+'</strong></p>';
         if(held>0){
@@ -7914,7 +7971,8 @@ function renderCompanyPage(parentTicker){
             +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="cp-lmt-sty" value="1" min="1" max="'+held+'"></div>'
             +'<div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="cp-lmt-sprice" placeholder="'+co.price.toFixed(2)+'" step="0.01" min="0.01"></div>'
             +'<div class="frow" style="flex:1"><label class="flabel">Type</label><select id="limit-order-type-sell"><option value="gtc">GTC</option><option value="day">Day</option><option value="fok">FOK</option></select></div>'
-            +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="busy(this,&quot;Placing…&quot;,()=>cpLimit(&quot;sell&quot;))">Place limit</button></div></div>');
+            +'<div style="padding-bottom:12px"><button class="btn btn-danger" onclick="busy(this,&quot;Placing…&quot;,()=>cpLimit(&quot;sell&quot;))">Place limit</button></div></div>'
+            +limitPreviewSlot(parentTicker,'sell','cp-lmt-sty','cp-lmt-sprice','cp-lmt-preview'));
         } else {
           html+='<div class="empty" style="padding:16px">You don&#39;t hold any '+parentTicker+'.</div>';
         }
@@ -8397,7 +8455,7 @@ function openPanel(ticker){
       <div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="t-lmt-qty" value="1" min="1"></div>
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Placing…&quot;,()=>placeLimitOrder('${ticker}','buy',get('t-lmt-qty')?.value,get('t-lmt-price')?.value))">Place limit</button></div>
-    </div>`}`
+    </div>${limitPreviewSlot(ticker,'buy','t-lmt-qty','t-lmt-price','t-lmt-preview')}`}`
     :effMode==='sell'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?'Sells redeem your units at the live index price.':'Sell pushes price down.'} You hold: <strong>${held}</strong>.</p>${held>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${held}"></div><div style="padding-bottom:12px"><button class="btn btn-danger" onclick="placeSell('${ticker}',get('t-qty')?.value)">Sell now</button></div></div>
     ${quickQtyButtonsHTML(ticker,'sell','t-qty','t-preview')}
     <div id="t-preview">${impactPreview(c,1,'sell')}</div>
@@ -8407,7 +8465,7 @@ function openPanel(ticker){
       <div class="frow" style="flex:1"><label class="flabel">Qty</label><input type="number" id="t-lmt-qty" value="1" min="1" max="${held}"></div>
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Placing…&quot;,()=>placeLimitOrder('${ticker}','sell',get('t-lmt-qty')?.value,get('t-lmt-price')?.value))">Place limit</button></div>
-    </div>`}`:`<div class="empty" style="padding:16px">You don't hold any ${ticker}.</div>`}`
+    </div>${limitPreviewSlot(ticker,'sell','t-lmt-qty','t-lmt-price','t-lmt-preview')}`}`:`<div class="empty" style="padding:16px">You don't hold any ${ticker}.</div>`}`
     :effMode==='short'?`<div class="ibox ibox-purple">Short selling${infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. You borrow shares and sell them now; later you buy them back to cover, hopefully at a lower price. The difference is your profit or loss, but losses are uncapped since a price can rise indefinitely.')} — borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="placeShort('${ticker}',get('t-qty')?.value)">Short sell</button></div></div>${quickQtyButtonsHTML(ticker,'short','t-qty','t-preview')}<div id="t-preview">${shortPrev(c,1)}</div>`
     :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="coverShort('${ticker}',get('t-qty')?.value)">Cover short</button></div></div>${quickQtyButtonsHTML(ticker,'cover','t-qty','t-preview')}<div id="t-preview">${impactPreview(c,short.qty,'buy')}</div>`:''}
   </div>`;
@@ -8415,7 +8473,7 @@ function openPanel(ticker){
   // beside quickQtyButtonsHTML, which every quantity box here registers with.
   // Priced once now as well: this panel can open without a render(), and the
   // first line should carry its warning (can't afford even 1) straight away.
-  refreshQtyPreview('t-qty');
+  refreshQtyPreview('t-qty');refreshLimitPreview('t-lmt-preview');
   panel.scrollIntoView({behavior:'smooth',block:'nearest'});setTimeout(()=>{destroyChart('panel-chart');buildChart('panel-chart',c);},50);
 }
 function closePanel(){UI.panelTicker=null;destroyCharts();document.getElementById('market-content').innerHTML=renderMarket();}
