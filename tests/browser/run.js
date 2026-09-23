@@ -524,6 +524,105 @@ ${PRELUDE}
     return 'total '+totalText(fillFor('t-qty', 6));
   });
 
+  // The refusal a click would get, shown on the Fill line before the click.
+  const warnAfter = (ticker, mode, n) => {
+    UI.userId='u-stu'; UI.navTab='market'; UI.companyPage=ticker; UI.companyPageTab='trade'; UI.panelMode=mode; render();
+    typeQty('cp-qty', n);
+    const w = document.querySelector('#cp-preview .qty-warn');
+    return w ? w.textContent : '';
+  };
+  await step('Fill line warns before a buy the cash cannot cover', ()=>{
+    const me = getUser('u-stu'), keep = me.cash;
+    try{
+      me.cash = 11.62;
+      const none = warnAfter('ACME', 'buy', 6);
+      if(!none.includes('You have $11.62 — not enough for one share.')) throw new Error('with $11.62: "'+none+'"');
+      me.cash = 30;
+      const two = warnAfter('ACME', 'buy', 6);
+      if(!two.includes('You have $30.00 — enough for 2 shares.')) throw new Error('with $30: "'+two+'"');
+      if(maxAffordableQty(getCo('ACME'), 30) !== 2) throw new Error('the "2" disagrees with the Max button');
+      return none+' | '+two;
+    } finally { me.cash = keep; UI.panelMode='buy'; }
+  });
+  await step('...and says nothing for an order that would go through', ()=>{
+    const w = warnAfter('ACME', 'buy', 2);
+    UI.panelMode='buy';
+    if(w) throw new Error('warned on a fine order: '+w);
+    return 'no warning';
+  });
+  await step('...a buy over what is available, and over the 20% limit', ()=>{
+    const avail = warnAfter('ACME', 'buy', 500);
+    if(!avail.includes('Only 400 shares available to buy.')) throw new Error('500: "'+avail+'"');
+    const cap = warnAfter('ACME', 'buy', 250);
+    UI.panelMode='buy';
+    if(!/at most/.test(cap) && !/limit/.test(cap)) throw new Error('250: "'+cap+'"');
+    return avail+' | '+cap.slice(0,60)+'…';
+  });
+  await step('...a sell over what is held', ()=>{
+    const w = warnAfter('ACME', 'sell', 25);
+    const ok = warnAfter('ACME', 'sell', 5);
+    UI.panelMode='buy';
+    if(w !== 'You hold 20 shares.') throw new Error('25: "'+w+'"');
+    if(ok) throw new Error('warned on selling 5 of 20: '+ok);
+    return w;
+  });
+  await step('...a short the cash cannot collateralise', ()=>{
+    const me = getUser('u-stu'), keep = me.cash;
+    try{
+      me.cash = 30;
+      const w = warnAfter('ACME', 'short', 6);
+      if(!w.includes('You have $30.00 — enough collateral to short 1.')) throw new Error('"'+w+'"');
+      return w;
+    } finally { me.cash = keep; UI.panelMode='buy'; }
+  });
+  await step('...a cover over the open short', ()=>{
+    const w = warnAfter('BETA', 'cover', 12);
+    UI.panelMode='buy';
+    if(w !== 'You have 10 shorted.') throw new Error('"'+w+'"');
+    return w;
+  });
+  await step('...and on the market side panel as it opens, before any typing', ()=>{
+    const me = getUser('u-stu'), keep = me.cash;
+    try{
+      me.cash = 5;
+      UI.userId='u-stu'; UI.navTab='market'; UI.companyPage=null; UI.panelMode='buy'; render();
+      openPanel('ACME');
+      const w = document.querySelector('#t-preview .qty-warn');
+      if(!w || !/not enough for one share/.test(w.textContent)) throw new Error('no warning on open: '+(w&&w.textContent));
+      return w.textContent;
+    } finally { me.cash = keep; UI.panelTicker=null; }
+  });
+
+  // Snapshots: which one is which, and when it was taken.
+  await step('the snapshot list shows a date and Arizona time, not the old UTC text', ()=>{
+    const keep = DB.snapshots;
+    try{
+      DB.snapshots = [
+        {id:'s-new', label:'Test', created_by:'President', ts:'09:03:46 PM', created_at:'2026-09-21T21:03:46.614Z'},
+        {id:'s-old', label:'Auto-snapshot before dev mode', created_by:'Admin', ts:'07:01:12 AM', created_at:'2026-08-20T07:01:12.000Z'}];
+      const html = renderSnapshotTab();
+      if(!html.includes('Mon, Sep 21, 2:03 PM')) throw new Error('newest row missing its Arizona date; got '+snapshotWhen(DB.snapshots[0]));
+      if(!html.includes('Thu, Aug 20, 12:01 AM')) throw new Error('older row wrong');
+      if(html.includes('09:03:46 PM')) throw new Error('still showing the UTC text');
+      if((html.match(/>newest</g)||[]).length !== 1) throw new Error('newest badge count wrong');
+      return 'Mon, Sep 21, 2:03 PM · Thu, Aug 20, 12:01 AM';
+    } finally { DB.snapshots = keep; }
+  });
+  await step('the restore confirmation names the snapshot and when it was saved', async ()=>{
+    const keepSnaps = DB.snapshots, keepConfirm = window.confirm, keepUser = UI.userId;
+    let asked = '';
+    const NL = String.fromCharCode(10);
+    try{
+      DB.snapshots = [{id:'s-new', label:'Test', created_by:'President', ts:'09:03:46 PM', created_at:'2026-09-21T21:03:46.614Z'}];
+      UI.userId = 'u-chair';
+      window.confirm = m => { asked = m; return false; };     // decline: nothing is restored
+      await restoreSnapshot('s-new');
+      if(!asked.startsWith('Restore "Test", saved Mon, Sep 21, 2:03 PM?')) throw new Error('asked: '+asked.split(NL)[0]);
+      if(!/Everything since then is undone/.test(asked)) throw new Error('no "since then" line');
+      return asked.split(NL)[0];
+    } finally { DB.snapshots = keepSnaps; window.confirm = keepConfirm; UI.userId = keepUser; }
+  });
+
   // Draft persistence. The news tab is used rather than dilution because the
   // seeded exchange already has a PENDING dilution application, and the app
   // correctly hides the form while one is outstanding.

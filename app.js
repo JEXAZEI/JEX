@@ -1794,7 +1794,13 @@ async function doSaveSnapshot(label){
 }
 async function restoreSnapshot(snapshotId){
   if(!isAdmin(cu()))return toast('Admin access required');
-  if(!confirm('Restore this snapshot? All current holdings, prices, and cash will be overwritten.'
+  // Name the snapshot and when it was taken. "Restore this snapshot?" gave no
+  // way to notice the wrong row had been clicked, and a restore undoes
+  // everything since -- on Sep 21 that included a dilution approved two
+  // minutes earlier.
+  const pick=DB.snapshots.find(s=>s.id===snapshotId);
+  if(!confirm('Restore "'+(pick?pick.label:'this snapshot')+'"'+(pick?', saved '+snapshotWhen(pick):'')+'?'
+    +'\n\nEverything since then is undone. All current holdings, prices, and cash will be overwritten.'
     +'\n\nAnyone who registered AFTER this snapshot was taken is rolled back too — back to the starting cash, holding nothing. '
     +'Their account and login are untouched, but anything they bought or earned since joining is gone. '
     +'You will be told exactly who.'
@@ -1863,6 +1869,17 @@ async function doRestoreSnapshot(snapshotId){
   }
   return true;
 }
+// When a snapshot was saved, as a date AND a time in Arizona. The list showed
+// the text ts column, which is a time with no date -- nine rows all named
+// "Auto-snapshot before dev mode" were told apart by clock time alone -- and
+// rows saved before timestamps_arizona.sql hold UTC, seven hours out. created_at
+// is a real instant, so every row reads right, old ones included.
+function snapshotWhen(s){
+  const d=s&&s.created_at?new Date(s.created_at):null;
+  if(!d||isNaN(d.getTime()))return (s&&s.ts)||'';
+  return d.toLocaleString('en-US',{timeZone:AZ_TZ,weekday:'short',month:'short',day:'numeric',
+    hour:'numeric',minute:'2-digit',hour12:true});
+}
 function renderSnapshotTab(){
   const snaps=DB.snapshots;
   return`<div class="card"><div class="section-title">Save snapshot</div>
@@ -1873,11 +1890,11 @@ function renderSnapshotTab(){
     </div>
   </div>
   ${snaps.length?`<div class="card"><div class="section-title">Saved snapshots (${snaps.length})</div>
-    <table><thead><tr><th>Name</th><th>Created by</th><th>Time</th><th></th></tr></thead>
-    <tbody>${snaps.map(s=>`<tr>
-      <td style="font-weight:500">${esc(s.label)}</td>
+    <table><thead><tr><th>Name</th><th>Created by</th><th>Saved (Arizona time)</th><th></th></tr></thead>
+    <tbody>${snaps.map((s,i)=>`<tr>
+      <td style="font-weight:500">${esc(s.label)}${i===0?' <span class="badge b-green" style="font-size:10px">newest</span>':''}</td>
       <td style="color:var(--text2)">${esc(s.created_by)}</td>
-      <td style="color:var(--text2)">${s.ts}</td>
+      <td style="color:var(--text2)">${esc(snapshotWhen(s))}</td>
       <td><button class="btn btn-sm btn-warning" onclick="restoreSnapshot('${s.id}')">⏪ Restore</button></td>
     </tr>`).join('')}</tbody></table>
   </div>`:''}`;
@@ -6483,10 +6500,49 @@ function shortPrev(co,qty){
 // the box -- at the price on screen now, not the one when the panel opened.
 const _qtyPreviews={};
 function qtyPreviewHTML(co,mode,qty){
-  if(mode==='short')return shortPrev(co,qty);
   // Covering is buying back borrowed shares, same direction as a plain
   // buy -- only an actual sell should get the 'sell' impact direction.
-  return impactPreview(co,qty,mode==='sell'?'sell':'buy');
+  const base=mode==='short'?shortPrev(co,qty):impactPreview(co,qty,mode==='sell'?'sell':'buy');
+  const warn=qtyWarning(co,mode,qty);
+  return base+(warn?`<div class="qty-warn" style="font-size:12px;margin-top:4px;padding:5px 10px;border-radius:var(--radius);color:var(--red);background:rgba(255,77,106,0.08)">${warn}</div>`:'');
+}
+// The refusal a click would get, said before the click. The same local checks
+// placeBuy/placeSell/placeShort/coverShort make, plus the one they leave to the
+// server: cash. A student with $11.62 could type 6, read "Total: $79.62" with
+// nothing wrong on screen, and only learn it was unaffordable from the refusal.
+//
+// Advisory only -- the buttons and the server still decide. Each message says
+// what WOULD work, not just that this will not.
+function qtyWarning(co,mode,qty){
+  const u=cu();
+  if(!u||!co||!(qty>0))return'';
+  const s=n=>n===1?'':'s';
+  if(mode==='buy'){
+    if(!co.is_index_fund&&qty>co.shares_avail)
+      return 'Only '+co.shares_avail.toLocaleString()+' share'+s(co.shares_avail)+' available to buy.';
+    const headroom=positionHeadroom(co,u);
+    if(headroom!=null&&qty>headroom)return esc(positionCapMsg(co,u));
+    const cost=co.is_index_fund?Math.round(co.price*qty*100)/100
+      :Math.round(impactPrice(co,qty,'buy')*qty*100)/100;
+    if(cost>u.cash){
+      const n=maxAffordableQty(co,u.cash);
+      return 'You have '+fmt(u.cash)+(n>0?' — enough for '+n.toLocaleString()+' '+(co.is_index_fund?'unit':'share')+s(n)+'.'
+        :' — not enough for one '+(co.is_index_fund?'unit':'share')+'.');
+    }
+  } else if(mode==='sell'){
+    const held=(holdings(u)[co.ticker])||0;
+    if(qty>held)return 'You hold '+held.toLocaleString()+' '+(co.is_index_fund?'unit':'share')+s(held)+'.';
+  } else if(mode==='short'){
+    const need=Math.round(co.price*qty*1.5*100)/100;
+    if(need>u.cash){
+      const per=co.price*1.5,n=per>0?Math.floor(u.cash/per):0;
+      return 'You have '+fmt(u.cash)+' — enough collateral to short '+(n>0?n.toLocaleString():'none')+'.';
+    }
+  } else if(mode==='cover'){
+    const open=((shorts(u))[co.ticker]||{}).qty||0;
+    if(qty>open)return 'You have '+open.toLocaleString()+' shorted.';
+  }
+  return '';
 }
 function refreshQtyPreview(qtyInputId){
   const reg=_qtyPreviews[qtyInputId];if(!reg)return;
@@ -8357,6 +8413,9 @@ function openPanel(ticker){
   </div>`;
   // Typing into t-qty refreshes t-preview through the delegated listener
   // beside quickQtyButtonsHTML, which every quantity box here registers with.
+  // Priced once now as well: this panel can open without a render(), and the
+  // first line should carry its warning (can't afford even 1) straight away.
+  refreshQtyPreview('t-qty');
   panel.scrollIntoView({behavior:'smooth',block:'nearest'});setTimeout(()=>{destroyChart('panel-chart');buildChart('panel-chart',c);},50);
 }
 function closePanel(){UI.panelTicker=null;destroyCharts();document.getElementById('market-content').innerHTML=renderMarket();}
