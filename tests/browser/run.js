@@ -658,6 +658,56 @@ ${PRELUDE}
     return 'panel shows $78.00';
   });
 
+  // Email verification on the sign-up form, against both server versions.
+  // The new server emails the code itself and returns {sent:true}; the old one
+  // returned the code for the page to send. The page must work with either,
+  // so it can deploy before the SQL runs.
+  const withVerifyServer = async (reply, fn) => {
+    const keep = {rpc: sb.rpc, ej: window.emailjs, toast: window.toast, user: UI.userId, view: UI.loginView,
+      sess: [DB.session.emailjs_service_id, DB.session.emailjs_template_id, DB.session.emailjs_public_key]};
+    const mailed = [], toasts = [];
+    try{
+      DB.session.emailjs_service_id='svc'; DB.session.emailjs_template_id='tpl'; DB.session.emailjs_public_key='pk';
+      window.emailjs = {init(){}, send:(...a)=>{ mailed.push(a); return Promise.resolve(); }};
+      window.toast = m => { toasts.push(String(m)); };
+      sb.rpc = async (name, args) => {
+        if(name !== 'rpc_request_verification_code') return keep.rpc.call(sb, name, args);
+        if(reply instanceof Error) throw reply;
+        return Object.assign({email: args.p_email}, reply);
+      };
+      UI.userId = null; openRegisterView();
+      const e = document.getElementById('reg-email'); if(!e) throw new Error('no #reg-email on the sign-up form');
+      e.value = 'new.student@school.edu';
+      await sendRegVerificationCode('reg');
+      return fn({mailed, toasts, state: UI.regVerify.reg});
+    } finally {
+      sb.rpc = keep.rpc; window.emailjs = keep.ej; window.toast = keep.toast;
+      [DB.session.emailjs_service_id, DB.session.emailjs_template_id, DB.session.emailjs_public_key] = keep.sess;
+      UI.userId = keep.user; UI.loginView = keep.view; render();
+    }
+  };
+  await step('verification: a new server sends the code, and the page does not', async ()=>
+    withVerifyServer({sent:true}, ({mailed, state}) => {
+      if(mailed.length) throw new Error('the page emailed a code itself: '+JSON.stringify(mailed[0]));
+      if(state.status !== 'sent') throw new Error('state is '+state.status);
+      return 'page sent nothing; state sent';
+    }));
+  await step('...an old server still works: the page emails the code it was given', async ()=>
+    withVerifyServer({code:'482913'}, ({mailed, state}) => {
+      if(mailed.length !== 1) throw new Error(mailed.length+' emails');
+      if(!String(mailed[0][2].message).includes('482913')) throw new Error('code not in the email');
+      if(state.status !== 'sent') throw new Error('state is '+state.status);
+      return 'emailed 482913';
+    }));
+  await step('...and a server refusal is shown in its own words', async ()=>
+    withVerifyServer(new Error('Please wait 30 seconds before asking for another code'), ({mailed, toasts, state}) => {
+      const t = toasts.find(m => m.includes('30 seconds'));
+      if(!t) throw new Error('toasts: '+JSON.stringify(toasts));
+      if(mailed.length) throw new Error('emailed anyway');
+      if(state.status === 'sent') throw new Error('marked as sent after a refusal');
+      return t;
+    }));
+
   // Snapshots: which one is which, and when it was taken.
   await step('the snapshot list shows a date and Arizona time, not the old UTC text', ()=>{
     const keep = DB.snapshots;

@@ -2880,19 +2880,26 @@ async function sendRegVerificationCode(prefix){
   // Runs server-side (rpc_request_verification_code), which generates and
   // stores the code itself -- a raw POST here used to let anyone insert
   // their own self-chosen code for an email they don't own, "verifying"
-  // it without any real email round-trip. The code is only ever returned
-  // to this immediate caller, since it's needed here to embed in the
-  // EmailJS send just below.
+  // it without any real email round-trip.
+  //
+  // The server now EMAILS the code too, and returns {sent:true} with no code
+  // (see sql/email_verification_guard.sql). Returning the code to this caller
+  // is what let anyone verify an address they did not own: ask for a code,
+  // read it out of the reply, confirm it. The branch below only runs against a
+  // server that has not been updated yet, which still hands back a code for
+  // this page to send -- so this works on either side of that migration.
   try{
     const r=await sb.rpc('rpc_request_verification_code',{p_email:email});
-    emailjs.init({publicKey:DB.session.emailjs_public_key});
-    await emailjs.send(DB.session.emailjs_service_id,DB.session.emailjs_template_id,{
-      to_email:email,to_name:name,
-      subject:'Your JEX verification code',
-      message:'Your JEX email verification code is '+r.code+'. It expires in 15 minutes.',
-      ticker:'',app_url:window.location.origin+window.location.pathname
-    });
-  }catch(e){return toast('Failed to send verification code: '+(e.message||e));}
+    if(r&&r.code){
+      emailjs.init({publicKey:DB.session.emailjs_public_key});
+      await emailjs.send(DB.session.emailjs_service_id,DB.session.emailjs_template_id,{
+        to_email:email,to_name:name,
+        subject:'Your JEX verification code',
+        message:'Your JEX email verification code is '+r.code+'. It expires in 15 minutes.',
+        ticker:'',app_url:window.location.origin+window.location.pathname
+      });
+    }
+  }catch(e){return toast('Could not send a verification code: '+rpcErrorMessage(e));}
   UI.regVerify[prefix]={status:'sent',email,resendAt:Date.now()+30000};
   renderRegEmailVerify(prefix);
   toast('Verification code sent to '+email);
@@ -2909,7 +2916,7 @@ async function confirmRegVerificationCode(prefix){
   let ok;
   try{ok=await sb.rpc('rpc_confirm_verification_code',{p_email:state.email,p_code:code});}
   catch(e){return toast('Verification failed, please try again');}
-  if(!ok)return toast('Incorrect or expired code');
+  if(!ok)return toast('Incorrect or expired code. After 5 wrong tries a code stops working, so send a new one.');
   UI.regVerify[prefix]={status:'verified',email:state.email,resendAt:0};
   renderRegEmailVerify(prefix);
   toast('Email verified');

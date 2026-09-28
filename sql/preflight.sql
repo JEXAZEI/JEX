@@ -132,7 +132,7 @@ select jsonb_pretty(jsonb_build_object(
 
   -- ── 8. Are the fixes still in place ──
   --
-  -- Twenty-three markers from the migrations that matter most. Every one should be
+  -- Twenty-five markers from the migrations that matter most. Every one should be
   -- true. A false here means a function was replaced by hand afterwards and
   -- the fix went with it -- which is exactly how this codebase lost things
   -- before sql/ existed.
@@ -164,7 +164,9 @@ select jsonb_pretty(jsonb_build_object(
         ('...and reads companies before the index','rpc_record_session_open_prices', 'order by coalesce(is_index_fund, false) loop'),
         ('a restore re-records the opening prices','rpc_admin_restore_snapshot', 'jex_open_prices_now()'),
         ('a dilution marks its step on the chart','rpc_review_dilution', '''a'', case when v_co.price > 0'),
-        ('notifications cannot be forged by email','rpc_push_notification', 'v_officer_sends')
+        ('notifications cannot be forged by email','rpc_push_notification', 'v_officer_sends'),
+        ('verification codes are emailed, never returned','rpc_request_verification_code', '''sent'', true'),
+        ('sign-up cannot claim a verified email', 'rpc_register_pending', 'v_verified := exists')
       ) m(label, fn, marker)),
 
   -- ── 8b. Fixes that are about data, not a line in a function ──
