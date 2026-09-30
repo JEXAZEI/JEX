@@ -708,6 +708,25 @@ ${PRELUDE}
       return t;
     }));
 
+  // The Errors tab: a date on every report, and repeats counted on one card.
+  await step('Errors tab shows a date and Arizona time, and counts repeats', ()=>{
+    const keep = DB.clientErrors;
+    try{
+      DB.clientErrors = [
+        {id:'e1', message:'same crash', stack:'', source:'app.js:10', url:'', user_name:'Kyle Nguyen', user_role:'student',
+         ts:'09:03:46 PM', created_at:'2026-09-21T21:03:46.000Z', repeat_count:300, last_seen_at:'2026-09-21T21:13:05.000Z'},
+        {id:'e2', message:'older one', stack:'', source:'', url:'', user_name:null, user_role:null, ts:'07:01:12 AM'}];
+      const html = renderAdminClientErrors();
+      if(!html.includes('Mon, Sep 21, 2:03 PM')) throw new Error('no Arizona date on the first report');
+      if(!html.includes('×300')) throw new Error('repeat count not shown');
+      if(!html.includes('last Mon, Sep 21, 2:13 PM')) throw new Error('last-seen time not shown');
+      if(html.includes('09:03:46 PM')) throw new Error('still showing the UTC text');
+      if(!html.includes('07:01:12 AM')) throw new Error('a report with no created_at lost its time');
+      if((html.match(/×/g)||[]).length !== 1) throw new Error('a single report was marked as a repeat');
+      return 'Mon, Sep 21, 2:03 PM · ×300 · last Mon, Sep 21, 2:13 PM';
+    } finally { DB.clientErrors = keep; }
+  });
+
   // Snapshots: which one is which, and when it was taken.
   await step('the snapshot list shows a date and Arizona time, not the old UTC text', ()=>{
     const keep = DB.snapshots;
