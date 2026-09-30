@@ -1875,8 +1875,15 @@ async function doRestoreSnapshot(snapshotId){
 // rows saved before timestamps_arizona.sql hold UTC, seven hours out. created_at
 // is a real instant, so every row reads right, old ones included.
 function snapshotWhen(s){
-  const d=s&&s.created_at?new Date(s.created_at):null;
-  if(!d||isNaN(d.getTime()))return (s&&s.ts)||'';
+  return azWhen(s&&s.created_at,(s&&s.ts)||'');
+}
+// A stored instant as a date and time in Arizona -- "Mon, Sep 21, 2:03 PM".
+// The text ts columns hold a clock time with no date, and rows written before
+// the Arizona fix hold UTC; created_at is a real instant, so every row reads
+// right. Falls back to whatever text the caller has when there is no instant.
+function azWhen(iso,fallback){
+  const d=iso?new Date(iso):null;
+  if(!d||isNaN(d.getTime()))return fallback||'';
   return d.toLocaleString('en-US',{timeZone:AZ_TZ,weekday:'short',month:'short',day:'numeric',
     hour:'numeric',minute:'2-digit',hour12:true});
 }
@@ -10412,11 +10419,17 @@ function renderAdminClientErrors(){
     html+='<div class="empty">No errors reported</div>';
   } else {
     errors.forEach(e=>{
+      // A repeat of the same error is counted on one report server-side (see
+      // sql/client_error_limits.sql), so a bug firing in a loop reads x300,
+      // last seen just now -- instead of 300 cards burying everything else.
+      const times=Number(e.repeat_count)||1;
+      const repeat=times>1
+        ?` <span class="badge b-red" style="font-size:10px">×${times.toLocaleString()}</span><span style="font-size:11px;color:var(--text2)">last ${esc(azWhen(e.last_seen_at,''))}</span>`:'';
       html+=`<div style="padding:12px;border:1px solid var(--red);border-radius:var(--radius);margin-bottom:10px;background:rgba(255,77,106,0.04)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
           <span style="font-size:16px">⚠️</span>
-          <strong style="font-family:var(--mono);font-size:13px">${esc(e.message)}</strong>
-          <span style="font-size:11px;color:var(--text2);margin-left:auto">${esc(e.ts)}</span>
+          <strong style="font-family:var(--mono);font-size:13px">${esc(e.message)}</strong>${repeat}
+          <span style="font-size:11px;color:var(--text2);margin-left:auto">${esc(azWhen(e.created_at,e.ts))}</span>
         </div>
         <div style="font-size:12px;color:var(--text2)">${e.user_name?esc(e.user_name)+' ('+esc(e.user_role||'unknown')+')':'Not signed in'}${e.url?' — '+esc(e.url):''}</div>
         ${e.stack?`<pre style="font-size:11px;color:var(--text2);white-space:pre-wrap;margin-top:8px;max-height:120px;overflow:auto">${esc(e.stack)}</pre>`:''}
