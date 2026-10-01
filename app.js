@@ -780,10 +780,21 @@ const getCo=t=>DB.companies.find(c=>c.ticker===t);
 // owner_id, a fund's manager_id).
 const isHiddenTestEntity=userId=>!DB.session.dev_mode&&!!getUser(userId)?.is_test_account;
 // ── CSV Export ────────────────────────────────────────────
+// A cell that starts with = + - @ (or a tab or carriage return) is a FORMULA
+// to Excel and Google Sheets, and a formula can fetch a URL -- carrying the
+// rest of the sheet with it -- the moment an officer opens the file. Activity
+// descriptions and types are written by students' browsers, so an export or a
+// Sheets sync was a way to put a live formula in front of an officer. A
+// leading apostrophe makes the cell plain text and is not displayed. Plain
+// numbers, negative ones included, are left alone so amounts stay numbers.
+function neutralizeFormula(v){
+  if(typeof v!=='string')return v;
+  return /^[=+\-@\t\r]/.test(v)&&!/^[-+]?\d+(\.\d+)?$/.test(v)?"'"+v:v;
+}
 function exportCSV(filename,rows,headers){
   const escape=v=>{
     if(v==null)return'';
-    const s=String(v).replace(/\n/g,' ');
+    const s=neutralizeFormula(String(v).replace(/[\r\n]+/g,' '));
     return s.includes(',')||s.includes('"')?'"'+s.replace(/"/g,'""')+'"':s;
   };
   const lines=[headers.map(escape).join(','),...rows.map(r=>headers.map(h=>escape(r[h]||r[headers.indexOf(h)])).join(','))];
@@ -2043,7 +2054,10 @@ async function pushToSheets(type,payload){
     // it. text/plain is a CORS-simple content type, skipping the preflight
     // entirely -- doPost(e) still reads the same raw JSON string either way
     // via e.postData.contents.
-    await fetch(SHEETS_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({type,...payload})});
+    // Every string neutralized on the way out -- the sheet turns a leading =
+    // into a live formula just as Excel does (see neutralizeFormula).
+    const body=JSON.stringify({type,...payload},(k,v)=>neutralizeFormula(v));
+    await fetch(SHEETS_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body});
   }catch(e){console.warn('Sheets sync failed:',e);}
 }
 async function pushBalances(){
@@ -10557,7 +10571,7 @@ function renderAdminDashboard(){
   </div>
   <div class="card"><div class="section-title">Recent activity</div>
     ${DB.activity.slice(0,10).length?`<table><thead><tr><th>Time</th><th>Type</th><th>Description</th></tr></thead><tbody>
-    ${DB.activity.slice(0,10).map(a=>`<tr><td style="color:var(--text2);white-space:nowrap">${a.ts||''}</td><td><span class="badge b-gray">${a.type}</span></td><td style="font-size:12px">${esc(a.description)}</td></tr>`).join('')}
+    ${DB.activity.slice(0,10).map(a=>`<tr><td style="color:var(--text2);white-space:nowrap">${esc(a.ts||'')}</td><td><span class="badge b-gray">${esc(a.type)}</span></td><td style="font-size:12px">${esc(a.description)}</td></tr>`).join('')}
     </tbody></table>`:'<div class="empty">No activity yet</div>'}
   </div>`;
 }
@@ -11227,9 +11241,9 @@ function renderActivityLog(){
   return`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Activity log <div style="display:flex;align-items:center;gap:8px"><span style="font-size:12px;font-weight:400;color:var(--text2)">${filtered.length} of ${DB.activity.length} events</span><button class="btn btn-sm" onclick="exportTableCSV('activity')">📥 CSV</button></div></div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;margin-bottom:12px;align-items:end">
       <div><label class="flabel">Filter by type</label>
-        <select value="${f.type||''}" onchange="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.type=this.value;render()">
+        <select value="${esc(f.type||'')}" onchange="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.type=this.value;render()">
           <option value="" ${!f.type?'selected':''}>All types</option>
-          ${types.map(t=>`<option value="${t}" ${f.type===t?'selected':''}>${t}</option>`).join('')}
+          ${types.map(t=>`<option value="${esc(t)}" ${f.type===t?'selected':''}>${esc(t)}</option>`).join('')}
         </select>
       </div>
       <div><label class="flabel">Filter by ticker</label>
@@ -11242,11 +11256,11 @@ function renderActivityLog(){
     </div>
     ${filtered.length?`<table><thead><tr><th>Time</th><th>Type</th><th>Description</th><th>Amount</th><th title="Audit hash">🔒</th></tr></thead>
     <tbody>${filtered.slice(0,100).map(a=>`<tr>
-      <td style="color:var(--text2);white-space:nowrap">${a.ts||''}</td>
-      <td><span class="badge ${typeBadge[a.type]||'b-gray'}">${typeIcon[a.type]||''} ${a.type}</span></td>
+      <td style="color:var(--text2);white-space:nowrap">${esc(a.ts||'')}</td>
+      <td><span class="badge ${typeBadge[a.type]||'b-gray'}">${typeIcon[a.type]||''} ${esc(a.type)}</span></td>
       <td style="font-size:12px">${esc(a.description)}</td>
       <td style="font-family:var(--mono);font-size:12px">${a.amount!=null?(a.amount>=0?'+':'')+fmt(a.amount):''}</td>
-      <td title="${a.entry_hash||'no hash'}" style="font-size:9px;color:var(--text3);font-family:var(--mono)">${a.entry_hash?a.entry_hash.slice(-4):'—'}</td>
+      <td title="${esc(a.entry_hash||'no hash')}" style="font-size:9px;color:var(--text3);font-family:var(--mono)">${a.entry_hash?a.entry_hash.slice(-4):'—'}</td>
     </tr>`).join('')}</tbody></table>`:'<div class="empty">No matching activity</div>'}
   </div>`;
 }

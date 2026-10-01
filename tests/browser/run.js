@@ -727,6 +727,29 @@ ${PRELUDE}
     } finally { DB.clientErrors = keep; }
   });
 
+  // The activity log is written by students' browsers and read on officer
+  // screens. A type, time or description must never become live markup there.
+  await step('a hostile activity entry renders as text on both officer screens', ()=>{
+    const keep = {act: DB.activity, user: UI.userId, nav: UI.navTab, tab: UI.adminTab};
+    try{
+      window.__pwned = 0;
+      DB.activity = [{id:'a1', type:'<img src=x onerror="window.__pwned=1">', ts:'<b id=pwnts>9</b>',
+        description:'<img src=y onerror="window.__pwned=2">', entry_hash:'"><img src=z onerror="window.__pwned=3">'}];
+      UI.userId='u-chair'; UI.navTab='admin';
+      const out = [];
+      for(const tab of ['dashboard','activity']){
+        UI.adminTab = tab; render();
+        const app = document.getElementById('app');
+        const bad = app.querySelector('img[src="x"],img[src="y"],img[src="z"],#pwnts');
+        if(bad) throw new Error(tab+': an injected element made it into the page: '+bad.outerHTML.slice(0,80));
+        if(!app.textContent.includes('<img src=x')) throw new Error(tab+': the type is not shown as text');
+        out.push(tab+' ok');
+      }
+      if(window.__pwned) throw new Error('injected script ran: '+window.__pwned);
+      return out.join(', ');
+    } finally { DB.activity = keep.act; UI.userId = keep.user; UI.navTab = keep.nav; UI.adminTab = keep.tab; render(); }
+  });
+
   // Snapshots: which one is which, and when it was taken.
   await step('the snapshot list shows a date and Arizona time, not the old UTC text', ()=>{
     const keep = DB.snapshots;
