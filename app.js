@@ -811,7 +811,10 @@ function exportTableCSV(table){
       exportCSV('jex-dividends-'+now+'.csv',DB.dividends.map(d=>({ts:d.ts,company:d.company_name,ticker:d.ticker,per_share:d.per_share,total:d.total,recipients:(d.payouts||[]).length,note:d.note})),['ts','company','ticker','per_share','total','recipients','note']);
       break;
     case 'activity':
-      exportCSV('jex-activity-'+now+'.csv',DB.activity,['ts','type','description','amount']);
+      // logged_by: the account whose browser wrote the entry, which the server
+      // now records from the login (see sql/activity_log_guard.sql).
+      exportCSV('jex-activity-'+now+'.csv',DB.activity.map(a=>({...a,about:a.user_name||'',written_by:activityWriterName(a)})),
+        ['ts','type','description','amount','about','written_by']);
       break;
     case 'balances':{
       const rows=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({name:u.name,email:u.email,cash:u.cash,portfolio:pv(u),net_worth:nw(u),dividends:divRec(u)}));
@@ -11227,6 +11230,21 @@ function renderTreasurerBudgetWarnings(){
   </div>`;
 }
 
+// Who WROTE an entry, as distinct from who it is about. Entries are written by
+// whichever browser does or notices the thing, and the server now records that
+// account from the login (logged_by) and hashes it into the chain. Shown only
+// when it differs from the subject -- "Elijah withdrew $5,000" written by
+// Kyle's browser says so; a student's own deposit does not repeat their name.
+// Entries from before the server recorded it have no writer and show nothing.
+function activityWriterName(a){
+  if(!a||!a.logged_by)return'';
+  const w=getUser(a.logged_by);
+  return w?w.name:a.logged_by;
+}
+function activityWriterNote(a){
+  if(!a||!a.logged_by||a.logged_by===a.user_id)return'';
+  return `<div style="font-size:11px;color:var(--text3);margin-top:2px">written by ${esc(activityWriterName(a))}</div>`;
+}
 function renderActivityLog(){
   const f=UI.activityFilter||{};
   const typeIcon={trade:'↔',ipo:'🏢',dividend:'💰',news:'📰',announcement:'📢',limit_fill:'⚡',balance_adj:'💵',session:'🕐',registration:'✓',limit_order:'📋',flag:'🚩',cofound:'👥',founder_alloc:'🎁',class_app:'📄',class_approved:'📄',class_convert:'🔁'};
@@ -11247,10 +11265,10 @@ function renderActivityLog(){
         </select>
       </div>
       <div><label class="flabel">Filter by ticker</label>
-        <input type="text" placeholder="e.g. BWV" value="${f.ticker||''}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.ticker=this.value;clearTimeout(window._actFilterTimer);window._actFilterTimer=setTimeout(render,300)">
+        <input type="text" placeholder="e.g. BWV" value="${esc(f.ticker||'')}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.ticker=this.value;clearTimeout(window._actFilterTimer);window._actFilterTimer=setTimeout(render,300)">
       </div>
       <div><label class="flabel">Filter by user</label>
-        <input type="text" placeholder="Name..." value="${f.user||''}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.user=this.value;clearTimeout(window._actFilterTimer);window._actFilterTimer=setTimeout(render,300)">
+        <input type="text" placeholder="Name..." value="${esc(f.user||'')}" oninput="UI.activityFilter=UI.activityFilter||{};UI.activityFilter.user=this.value;clearTimeout(window._actFilterTimer);window._actFilterTimer=setTimeout(render,300)">
       </div>
       <div><button class="btn btn-sm" onclick="UI.activityFilter={type:'',ticker:'',user:''};render()">Clear filters</button></div>
     </div>
@@ -11258,7 +11276,7 @@ function renderActivityLog(){
     <tbody>${filtered.slice(0,100).map(a=>`<tr>
       <td style="color:var(--text2);white-space:nowrap">${esc(a.ts||'')}</td>
       <td><span class="badge ${typeBadge[a.type]||'b-gray'}">${typeIcon[a.type]||''} ${esc(a.type)}</span></td>
-      <td style="font-size:12px">${esc(a.description)}</td>
+      <td style="font-size:12px">${esc(a.description)}${activityWriterNote(a)}</td>
       <td style="font-family:var(--mono);font-size:12px">${a.amount!=null?(a.amount>=0?'+':'')+fmt(a.amount):''}</td>
       <td title="${esc(a.entry_hash||'no hash')}" style="font-size:9px;color:var(--text3);font-family:var(--mono)">${a.entry_hash?a.entry_hash.slice(-4):'—'}</td>
     </tr>`).join('')}</tbody></table>`:'<div class="empty">No matching activity</div>'}

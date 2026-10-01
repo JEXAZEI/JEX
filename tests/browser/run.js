@@ -750,6 +750,23 @@ ${PRELUDE}
     } finally { DB.activity = keep.act; UI.userId = keep.user; UI.navTab = keep.nav; UI.adminTab = keep.tab; render(); }
   });
 
+  await step('the Activity tab says who wrote an entry when it is not who it is about', ()=>{
+    const keep = {act: DB.activity, user: UI.userId, nav: UI.navTab, tab: UI.adminTab};
+    try{
+      DB.activity = [
+        {id:'w1', type:'limit_fill', description:'Bea <-> Ariel: 5 x ACME', ts:'Oct 1, 1:00 PM', user_id:'u-stu2', user_name:'Bea', logged_by:'u-stu'},
+        {id:'w2', type:'fund_deposit', description:'Ariel deposited $50', ts:'Oct 1, 1:01 PM', user_id:'u-stu', user_name:'Ariel', logged_by:'u-stu'},
+        {id:'w3', type:'vote', description:'an old entry', ts:'Sep 1, 1:00 PM', user_id:'u-stu'}];
+      UI.userId='u-chair'; UI.navTab='admin'; UI.adminTab='activity'; render();
+      const text = document.getElementById('app').textContent;
+      const writer = getUser('u-stu').name;
+      const n = (text.match(/written by /g)||[]).length;
+      if(!text.includes('written by '+writer)) throw new Error('the fill written by another account does not say so');
+      if(n !== 1) throw new Error(n+' "written by" notes; expected exactly one (own entries and old entries show none)');
+      return 'written by '+writer+' (once)';
+    } finally { DB.activity = keep.act; UI.userId = keep.user; UI.navTab = keep.nav; UI.adminTab = keep.tab; render(); }
+  });
+
   // Snapshots: which one is which, and when it was taken.
   await step('the snapshot list shows a date and Arizona time, not the old UTC text', ()=>{
     const keep = DB.snapshots;

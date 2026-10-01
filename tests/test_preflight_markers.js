@@ -26,8 +26,8 @@ const block=pre.slice(pre.indexOf("'fixes_still_applied'"),pre.indexOf(') m(labe
 const rows=[...block.matchAll(/\(\s*'((?:[^']|'')*)'\s*,\s*'((?:[^']|'')*)'\s*,\s*'((?:[^']|'')*)'\s*\)/g)]
   .map(m=>({label:unq(m[1]),fn:unq(m[2]),marker:unq(m[3])}));
 
-check('the preflight lists 26 markers', rows.length===26, String(rows.length));
-check('the header says how many there are', /Twenty-six markers/.test(pre));
+check('the preflight lists 27 markers', rows.length===27, String(rows.length));
+check('the header says how many there are', /Twenty-seven markers/.test(pre));
 for(const r of rows){
   check(r.fn+': "'+r.label+'" is text a migration really wrote', haystack.includes(r.marker), r.marker);
 }
