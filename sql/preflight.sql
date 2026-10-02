@@ -175,6 +175,10 @@ select jsonb_pretty(jsonb_build_object(
   --
   -- Each of these should be an empty list or `true`.
   --
+  -- tables_anyone_can_truncate   tables anon or authenticated can TRUNCATE --
+  --                              empty in one statement, past row-level
+  --                              security. Fixed by revoke_truncate.sql.
+  --
   -- functions_writing_utc_times  a bare to_char(now(), ...) renders in the
   --                              server's zone, UTC -- seven hours ahead of
   --                              Tucson. Any function listed here was put
@@ -200,6 +204,15 @@ select jsonb_pretty(jsonb_build_object(
          and coalesce(c.index_base_adjust, 1) <> 1
          and not exists (select 1 from jsonb_array_elements(coalesce(c.price_history, '[]'::jsonb)) e
                           where e ? 'a')),
+    -- Tables a signed-out visitor or any student can empty in one statement.
+    -- revoke_truncate.sql removed them all; a table created later by a role
+    -- whose defaults still grant ALL would show up here.
+    'tables_anyone_can_truncate', (
+      select coalesce(jsonb_agg(c.relname order by c.relname), '[]'::jsonb)
+        from pg_class c join pg_namespace n on n.oid = c.relnamespace
+       where n.nspname = 'public' and c.relkind in ('r','p','v','m','f')
+         and (has_table_privilege('anon', c.oid, 'TRUNCATE')
+           or has_table_privilege('authenticated', c.oid, 'TRUNCATE'))),
     'jxi_open_is_honest', (
       select coalesce(bool_and(
                (s.session_open_prices->>c.ticker)::numeric

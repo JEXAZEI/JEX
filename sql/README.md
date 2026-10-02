@@ -36,7 +36,9 @@ Send only these when asked for "the SQL". Remove a file from this list once
 its result has come back green. `preflight.sql` is read-only and is run before
 each class, so it is never on this list.
 
-Nothing — every file here has been run and verified.
+- `revoke_truncate.sql`
+
+Every other file here has been run and verified.
 
 ## Order
 
@@ -90,6 +92,7 @@ They are listed in the order they were applied. Two of them care:
 | `email_verification_guard.sql` | Email verification proved nothing. The code was **returned to whoever asked for it**, so anyone could verify an address they did not own; registration stored whatever the browser claimed about verification; and guesses were unlimited. The server now emails the code itself and never returns it, five wrong guesses kill a code, requests are rate limited, and registration decides "verified" from a confirmed code or a Google token. |
 | `client_error_limits.sql` | Anyone, signed in or not, could add error reports as fast as they could send them — 5,000 in one go became 5,000 rows, and one crash firing 300 times became 300. Repeats within 10 minutes are now counted on one report; new reports are limited (30 per user, 50 signed-out, 200 overall per 10 minutes); only the newest 2,000 are kept. |
 | `activity_log_guard.sql` | Any signed-in account could write anything into the activity log about anyone — a script tag as the type, a forged Chairman session entry, a $5,000 withdrawal blamed on another student — and nothing recorded who wrote it. Every entry now records its writer from the login, hashed into the chain; seven officer-only types; types must be plain words; lengths and a rate limit. Concurrent writers forked the chain (15 forks in 160 entries) — now serialized. Leftover TRUNCATE/TRIGGER/REFERENCES grants revoked. |
+| `revoke_truncate.sql` | Signed-out visitors and every signed-in user held TRUNCATE (empty a table in one statement, past row-level security), TRIGGER and REFERENCES on 38 tables, `jex_users` and `jex_trades` among them — leftovers from the project's default setup. Unreachable through the web API today and unused by the app. Revoked everywhere, and from the defaults for new tables; SELECT/INSERT/UPDATE/DELETE are counted before and after and must not move. |
 | `preflight.sql` | **Read-only, run it before class.** Answers "is the exchange in a state where a lesson can happen" — dev_mode, session status, whether the books balance, stranded prices, shorts near their margin line, snapshot freshness, whether 27 named fixes are still present, and three data checks: no function writing UTC times, no dilution the index chart would draw as a crash, and a JXI open that matches its constituents. |
 | `repair_share_register.sql` | **Changes data, not a function.** Puts the 21 missing shares back into the unsold pool after `removed_user_shares.sql` stops the leak. Moves no money. Optional — leaving the register as it stands is a reasonable choice. |
 
