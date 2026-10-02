@@ -178,6 +178,9 @@ select jsonb_pretty(jsonb_build_object(
   -- tables_anyone_can_truncate   tables anon or authenticated can TRUNCATE --
   --                              empty in one statement, past row-level
   --                              security. Fixed by revoke_truncate.sql.
+  -- tables_anyone_can_maintain   tables anon or authenticated can LOCK (which
+  --                              stops every read and write), REINDEX or
+  --                              VACUUM. Fixed by revoke_maintain.sql.
   --
   -- functions_writing_utc_times  a bare to_char(now(), ...) renders in the
   --                              server's zone, UTC -- seven hours ahead of
@@ -213,6 +216,15 @@ select jsonb_pretty(jsonb_build_object(
        where n.nspname = 'public' and c.relkind in ('r','p','v','m','f')
          and (has_table_privilege('anon', c.oid, 'TRUNCATE')
            or has_table_privilege('authenticated', c.oid, 'TRUNCATE'))),
+    -- Tables anyone can LOCK (blocking every read and write), REINDEX or
+    -- VACUUM. Postgres 17 only; fixed by revoke_maintain.sql.
+    'tables_anyone_can_maintain', (
+      select coalesce(jsonb_agg(c.relname order by c.relname), '[]'::jsonb)
+        from pg_class c join pg_namespace n on n.oid = c.relnamespace
+       where n.nspname = 'public' and c.relkind in ('r','p','v','m','f')
+         and current_setting('server_version_num')::int >= 170000
+         and (has_table_privilege('anon', c.oid, 'MAINTAIN')
+           or has_table_privilege('authenticated', c.oid, 'MAINTAIN'))),
     'jxi_open_is_honest', (
       select coalesce(bool_and(
                (s.session_open_prices->>c.ticker)::numeric
