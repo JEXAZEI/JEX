@@ -580,6 +580,7 @@ async function loadAll(){
     // to render a list nobody scrolls to the bottom of.
     sb.get('jex_announcements','order=created_at.desc&limit=100'),
     sb.get('jex_halts','order=created_at.asc'),
+    loadServerEvents(),   // never throws; see SERVER_EVENTS
   ]);
   // Apply phase 1 immediately so login renders fast
   DB.users=users;
@@ -1669,8 +1670,11 @@ async function reviewDivApproval(id,approve){
   // through here -- so it was the largest drops that went unshown.
   const dropsA=applyExDividend(r)?r.new_prices:null;
   if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker:da.ticker,company_name:da.company_name,per_share:da.per_share,total:r.total,note:da.note||'Treasurer-approved dividend',payouts:r.payouts,jxi_pass_through:r.jxi_pass_through||[],ts:ts()});
-  await logActivity('dividend',da.company_name+' paid dividend '+fmt(da.per_share)+'/share — total '+fmt(r.total),{ticker:da.ticker,userId:r.owner_id,userName:u.name,amount:r.total});
-  await pushNotificationToHolders(da.ticker,'dividend','💰 '+da.company_name+' paid a dividend of '+fmt(da.per_share)+'/share');
+  if(serverRecords('rpc_pay_dividend'))afterServerEvent();
+  else{
+    await logActivity('dividend',da.company_name+' paid dividend '+fmt(da.per_share)+'/share — total '+fmt(r.total),{ticker:da.ticker,userId:r.owner_id,userName:u.name,amount:r.total});
+    await pushNotificationToHolders(da.ticker,'dividend','💰 '+da.company_name+' paid a dividend of '+fmt(da.per_share)+'/share');
+  }
   pushBalances();
   toast(da.company_name+' paid '+fmt(da.per_share)+'/share (Treasurer-approved)'
     +(dropsA&&dropsA[da.ticker]!=null
@@ -2478,6 +2482,7 @@ async function autoRefresh(){
   const minGap=realtimeHealthy()?60000:18000;
   if(now-_lastRefresh<minGap)return;
   _lastRefresh=now;
+  if(!_serverEventsKnown)loadServerEvents();
   try{
     // Only reload lightweight tables that change frequently
     const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports,newFunds,newUsers]=await Promise.all([
@@ -3506,6 +3511,56 @@ async function deleteNews(id){
   toast('News deleted');render();
 }
 
+// ── Events the server records itself ────────────────────
+// Since sql/server_events_batch1.sql, a function that moves money or shares
+// writes its own activity entry and notifications, in the same transaction,
+// from what it actually did -- the page used to describe the result after
+// the fact, so a browser could describe a fill or a dividend that never
+// happened. The server names those functions (rpc_server_events) and the page
+// skips its own copy for exactly those, so each event is recorded once
+// whichever version of the SQL is live: before the migration the list is
+// empty and the page records everything, as it always has.
+// Until the server has answered, autoRefresh asks again: a tab whose first
+// ask failed on a blip would otherwise write a second copy of every event for
+// as long as it stays open, and a tab open while the migration is run picks
+// the list up without a reload.
+let SERVER_EVENTS=new Set(), _serverEventsKnown=false;
+async function loadServerEvents(){
+  try{
+    const r=await sb.rpc('rpc_server_events',{});
+    SERVER_EVENTS=new Set(Array.isArray(r)?r:[]);
+    _serverEventsKnown=Array.isArray(r);
+  }catch(e){/* not deployed yet, or unreachable: the page records everything */}
+}
+function serverRecords(fn){return SERVER_EVENTS.has(fn);}
+// The entry and notifications the server just wrote are not in this page's
+// copy -- logActivity/pushNotification used to put them there. Fetch them
+// once, shortly after (a matching sweep can settle many orders in a row), and
+// fire the browser push for anything new addressed to this user, which is what
+// pushNotification did when this tab wrote it.
+let _serverEventTimer=null;
+function afterServerEvent(){
+  if(_serverEventTimer)return;
+  _serverEventTimer=setTimeout(async()=>{
+    _serverEventTimer=null;
+    const known=new Set((DB.notifications||[]).map(n=>n.id));
+    const [act,notes]=await Promise.all([
+      isAdmin(cu())?safeRpc('rpc_admin_list_activity',{p_limit:100}):null,
+      UI.userId?safeRpc('rpc_get_my_notifications',{p_limit:50}):null,
+    ]);
+    if(Array.isArray(act))DB.activity=act;
+    if(Array.isArray(notes)){
+      DB.notifications=notes;
+      for(const n of notes)
+        if(!known.has(n.id)&&n.user_id===UI.userId&&!n.read)showBrowserPush(PUSH_TITLES[n.type]||'Notification',n.message);
+    }
+    if(Array.isArray(act)||Array.isArray(notes)){
+      if(!userIsFillingForm())renderBackground();
+      else{const tb=document.querySelector('.user-pill');if(tb)tb.outerHTML=renderTopbar();}
+    }
+  },400);
+}
+
 // ── Activity log ────────────────────────────────────────
 async function logActivity(type,description,extras={}){
   try{
@@ -3734,9 +3789,12 @@ async function adjustStockPrice(ticker,pct,reason){
   if(!DB.priceAdjustments)DB.priceAdjustments=[];DB.priceAdjustments.unshift(rec);
   const msg=(pct>=0?'📈':'📉')+' '+co.name+' ('+ticker+') price '+(pct>=0?'boosted by +':'cut by ')+Math.abs(pct)+'%'+(reason?' — '+reason.trim():'');
   const holderIds=DB.users.filter(hu=>hu.role==='student'&&(holdings(hu)[ticker]||0)>0).map(hu=>hu.id);
-  await pushNotificationToHolders(ticker,'price_adj',msg);
-  await pushNotificationToAll('price_adj',msg,holderIds);
-  await logActivity('price_adj',msg,{ticker,userId:u.id,userName:u.name,amount:r.price-oldPrice});
+  if(serverRecords('rpc_adjust_stock_price'))afterServerEvent();
+  else{
+    await pushNotificationToHolders(ticker,'price_adj',msg);
+    await pushNotificationToAll('price_adj',msg,holderIds);
+    await logActivity('price_adj',msg,{ticker,userId:u.id,userName:u.name,amount:r.price-oldPrice});
+  }
   toast(ticker+' '+(pct>=0?'boosted':'cut')+' by '+Math.abs(pct)+'% → '+fmt(r.price));render();
 }
 
@@ -4212,8 +4270,11 @@ async function checkStopLossOrders(){
     co.price=r.price;co.shares_avail=r.shares_avail;co.price_history=r.price_history;
     if(r.trade)recordLocalTrade(r.trade);
     pushTradeToSheets(r.trade);
-    await pushNotification(r.user_id,'stop_loss','🛑 Stop-loss triggered: sold '+r.sell_qty+'×'+sl.ticker+' @ '+fmt(r.price)+' (trigger: '+fmt(sl.trigger_price)+')',sl.ticker);
-    await logActivity('stop_loss',(u?u.name:'Someone')+' stop-loss triggered on '+sl.ticker+' @ '+fmt(r.price),{ticker:sl.ticker,userId:r.user_id,userName:u?u.name:'',amount:r.sell_qty*r.price});
+    if(serverRecords('rpc_trigger_stop_loss'))afterServerEvent();
+    else{
+      await pushNotification(r.user_id,'stop_loss','🛑 Stop-loss triggered: sold '+r.sell_qty+'×'+sl.ticker+' @ '+fmt(r.price)+' (trigger: '+fmt(sl.trigger_price)+')',sl.ticker);
+      await logActivity('stop_loss',(u?u.name:'Someone')+' stop-loss triggered on '+sl.ticker+' @ '+fmt(r.price),{ticker:sl.ticker,userId:r.user_id,userName:u?u.name:'',amount:r.sell_qty*r.price});
+    }
     // Whose screen this appears on matters. Every logged-in client polls and
     // triggers ANY due stop-loss -- that is the whole point of the design,
     // since there is no server-side cron -- so without this gate the toast
@@ -4350,12 +4411,15 @@ async function checkMarginCalls(){
       if(!r||!r.called)continue;
       applyMarginCallResult(r);
       const who=getUser(r.user_id);
-      await pushNotification(r.user_id,'margin_call',
-        '\u26a0\ufe0f Margin call: your short of '+r.qty+'\u00d7'+ticker+' was closed at '+fmt(r.price)
-        +' (opened at '+fmt(r.avg_price)+'). Loss '+fmt(Math.abs(r.pnl))+' of the '+fmt(r.collateral)+' you posted.',ticker);
-      await logActivity('margin_call',(who?who.name:'Someone')+"'s short of "+r.qty+'\u00d7'+ticker
-        +' was closed by a margin call @ '+fmt(r.price),
-        {ticker,userId:r.user_id,userName:who?who.name:'',amount:r.qty*r.price});
+      if(serverRecords('rpc_margin_call_short'))afterServerEvent();
+      else{
+        await pushNotification(r.user_id,'margin_call',
+          '\u26a0\ufe0f Margin call: your short of '+r.qty+'\u00d7'+ticker+' was closed at '+fmt(r.price)
+          +' (opened at '+fmt(r.avg_price)+'). Loss '+fmt(Math.abs(r.pnl))+' of the '+fmt(r.collateral)+' you posted.',ticker);
+        await logActivity('margin_call',(who?who.name:'Someone')+"'s short of "+r.qty+'\u00d7'+ticker
+          +' was closed by a margin call @ '+fmt(r.price),
+          {ticker,userId:r.user_id,userName:who?who.name:'',amount:r.qty*r.price});
+      }
       // Same rule as the stop-loss toast: the person it happened to, and
       // admins running the session. Not whichever classmate's tab noticed.
       const me=cu();
@@ -4391,13 +4455,16 @@ async function checkMarginCalls(){
       // The manager is told, because they are the one who can act. Investors
       // see it in the fund's activity feed rather than as a personal alert --
       // it is not their position, it is the fund's.
-      if(r.manager_id)
-        await pushNotification(r.manager_id,'margin_call',
-          '\u26a0\ufe0f Margin call: '+r.fund_name+"'s short of "+r.qty+'\u00d7'+ticker+' was closed at '+fmt(r.price)
-          +' (opened at '+fmt(r.avg_price)+'). Loss '+fmt(Math.abs(r.pnl))+' of the '+fmt(r.collateral)+' the fund posted.',ticker);
-      await logActivity('margin_call',r.fund_name+"'s short of "+r.qty+'\u00d7'+ticker
-        +' was closed by a margin call @ '+fmt(r.price),
-        {ticker,userId:r.manager_id,userName:r.fund_name,amount:r.qty*r.price});
+      if(serverRecords('rpc_margin_call_fund_short'))afterServerEvent();
+      else{
+        if(r.manager_id)
+          await pushNotification(r.manager_id,'margin_call',
+            '\u26a0\ufe0f Margin call: '+r.fund_name+"'s short of "+r.qty+'\u00d7'+ticker+' was closed at '+fmt(r.price)
+            +' (opened at '+fmt(r.avg_price)+'). Loss '+fmt(Math.abs(r.pnl))+' of the '+fmt(r.collateral)+' the fund posted.',ticker);
+        await logActivity('margin_call',r.fund_name+"'s short of "+r.qty+'\u00d7'+ticker
+          +' was closed by a margin call @ '+fmt(r.price),
+          {ticker,userId:r.manager_id,userName:r.fund_name,amount:r.qty*r.price});
+      }
       const me2=cu();
       if(me2&&(me2.id===r.manager_id||isAdmin(me2)))
         toast('Margin call: '+r.fund_name+"'s short of "+r.qty+'\u00d7'+ticker+' closed @ '+fmt(r.price));
@@ -4583,6 +4650,15 @@ if(typeof Notification!=='undefined'&&Notification.permission==='granted')_pushE
 // now lives server-only (jex_email_secrets) and dispatch happens inside
 // rpc_push_notification() via pg_net (see email-pii-exposure-fix migration).
 
+const PUSH_TITLES={
+  dividend:'💰 Dividend received',halt:'⚠️ Trading halted',
+  stop_loss:'🛑 Stop-loss triggered',limit_fill:'⚡ Order filled',
+  after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
+  ipo:'🏢 IPO update',session:'🕐 Session update',
+  price_alert:'🔔 Price alert',resume:'✅ Trading resumed',
+  founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised',bug_report:'🐛 Bug report',contact_admin:'✉️ New message',
+  margin_call:'⚠️ Margin call'
+};
 async function pushNotification(userId, type, message, ticker=null){
   try{
     // jex_notifications INSERT is revoked from anon/authenticated entirely
@@ -4593,16 +4669,7 @@ async function pushNotification(userId, type, message, ticker=null){
     if(userId===UI.userId){
       DB.notifications.unshift(rec);
       // Fire browser push for current user
-      const titles={
-        dividend:'💰 Dividend received',halt:'⚠️ Trading halted',
-        stop_loss:'🛑 Stop-loss triggered',limit_fill:'⚡ Order filled',
-        after_hours:'⏰ After-hours order',invite:'🤝 Founder invite',
-        ipo:'🏢 IPO update',session:'🕐 Session update',
-        price_alert:'🔔 Price alert',resume:'✅ Trading resumed',
-        founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised',bug_report:'🐛 Bug report',contact_admin:'✉️ New message',
-        margin_call:'⚠️ Margin call'
-      };
-      showBrowserPush(titles[type]||'Notification',message);
+      showBrowserPush(PUSH_TITLES[type]||'Notification',message);
     }
   }catch(e){console.warn('Notification failed:',e);}
 }
@@ -4947,6 +5014,8 @@ async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
   }
   await logActivity('limit_order',(fundId?getFund(fundId)?.name+"'s fund":cu().name)+' placed limit '+side+' '+qty+'×'+ticker+' @ '+fmt(limitPrice),{ticker,amount:limitPrice});
   const filledQty=await settleLimitOrder(r.order,orderType==='fok');
+  // Fills here were never logged by the page; the server logs them now.
+  if(filledQty>0&&(serverRecords('rpc_match_limit_order_book')||serverRecords('rpc_fill_limit_vs_pool')))afterServerEvent();
   if(filledQty>=qty)toast('Limit order fully filled!');
   else if(filledQty>0)toast('Partial fill: '+filledQty+' matched, '+(qty-filledQty)+' queued @ '+fmt(limitPrice));
   // A fill-or-kill that did not fill used to say nothing whatsoever, so the
@@ -5023,7 +5092,8 @@ async function checkLimitOrders(){
       applyLimitMatchResult(r);
       const buyerName=r.buyer_type==='fund'?(getFund(r.buyer_id)?.name||'a fund'):(getUser(r.buyer_id)?.name||'someone');
       const sellerName=r.seller_type==='fund'?(getFund(r.seller_id)?.name||'a fund'):(getUser(r.seller_id)?.name||'someone');
-      await logActivity('limit_fill',buyerName+' ↔ '+sellerName+': '+r.fill_qty+'×'+ticker+' @ '+fmt(r.fill_price),{ticker,amount:r.fill_price});
+      if(serverRecords('rpc_match_limit_order_book'))afterServerEvent();
+      else await logActivity('limit_fill',buyerName+' ↔ '+sellerName+': '+r.fill_qty+'×'+ticker+' @ '+fmt(r.fill_price),{ticker,amount:r.fill_price});
       if(myFillSide(r.buyer_type,r.buyer_id)||myFillSide(r.seller_type,r.seller_id)||isAdmin(cu()))
         toast(r.fill_qty+'×'+ticker+' matched: '+buyerName+' bought from '+sellerName+' @ '+fmt(r.fill_price));
     }
@@ -5038,8 +5108,11 @@ async function checkLimitOrders(){
       const qty=o.qty;
       applyLimitPoolFillResult(o.id,r);
       const ownerName=r.owner_type==='fund'?(getFund(r.owner_id)?.name||'a fund'):(getUser(r.owner_id)?.name||'someone');
-      await logActivity('limit_fill',ownerName+"'s limit "+o.side+" "+qty+"×"+ticker+" filled vs JEX pool @ "+fmt(r.fill_price),{ticker,amount:r.fill_price});
-      if(r.owner_type==='user')await pushNotification(r.owner_id,'limit_fill','⚡ Limit '+o.side+' filled: '+qty+'×'+ticker+' @ '+fmt(r.fill_price),ticker);
+      if(serverRecords('rpc_fill_limit_vs_pool'))afterServerEvent();
+      else{
+        await logActivity('limit_fill',ownerName+"'s limit "+o.side+" "+qty+"×"+ticker+" filled vs JEX pool @ "+fmt(r.fill_price),{ticker,amount:r.fill_price});
+        if(r.owner_type==='user')await pushNotification(r.owner_id,'limit_fill','⚡ Limit '+o.side+' filled: '+qty+'×'+ticker+' @ '+fmt(r.fill_price),ticker);
+      }
       if(myFillSide(r.owner_type,r.owner_id)||isAdmin(cu()))
         toast(ownerName+"'s limit order filled: "+qty+"×"+ticker+" @ "+fmt(r.fill_price));
     }
@@ -5365,7 +5438,8 @@ async function depositToFund(fundId,amount){
   catch(e){return toast(rpcErrorMessage(e));}
   u.cash=r.cash;u.fund_units=r.fund_units;
   f.cash=r.fund_cash;f.units_outstanding=r.units_outstanding;
-  await logActivity('fund_deposit',u.name+' deposited '+fmt(amount)+' into '+f.name,{userId:u.id,userName:u.name,amount});
+  if(serverRecords('rpc_fund_deposit'))afterServerEvent();
+  else await logActivity('fund_deposit',u.name+' deposited '+fmt(amount)+' into '+f.name,{userId:u.id,userName:u.name,amount});
   toast('Deposited '+fmt(amount)+' into '+f.name);render();
 }
 async function withdrawFromFund(fundId,unitsStr){
@@ -5388,7 +5462,8 @@ async function withdrawFromFund(fundId,unitsStr){
   u.cash=r.cash;u.fund_units=r.fund_units;
   f.cash=r.fund_cash;f.units_outstanding=r.units_outstanding;
   if(r.fee>0&&r.manager_id){const manager=getUser(r.manager_id);if(manager)manager.cash=r.manager_cash;}
-  await logActivity('fund_withdraw',u.name+' withdrew '+fmt(r.net)+' from '+f.name+(r.fee?' (performance fee '+fmt(r.fee)+' to '+f.manager_name+')':''),{userId:u.id,userName:u.name,amount:r.net});
+  if(serverRecords('rpc_fund_withdraw'))afterServerEvent();
+  else await logActivity('fund_withdraw',u.name+' withdrew '+fmt(r.net)+' from '+f.name+(r.fee?' (performance fee '+fmt(r.fee)+' to '+f.manager_name+')':''),{userId:u.id,userName:u.name,amount:r.net});
   toast('Withdrew '+fmt(r.net)+' from '+f.name+(r.fee?' (after '+fmt(r.fee)+' performance fee)':''));render();
 }
 // Fund manager trades are executed server-side (rpc_fund_buy/sell -- see
@@ -5794,8 +5869,11 @@ async function issueDividend(ticker,perShare,note){
   const exNote=drops&&drops[ticker]!=null
     ? ' '+ticker+' fell '+fmt(perShare)+' to '+fmt(drops[ticker])+' — the cash came out of the company, so your total is unchanged. That is what a dividend is.'
     : '';
-  await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(r.total),{ticker,userId:owner.id,userName:owner.name,amount:r.total});
-  await pushNotificationToHolders(ticker,'dividend','💰 '+co.name+' paid a dividend of '+fmt(perShare)+'/share.'+exNote);
+  if(serverRecords('rpc_pay_dividend'))afterServerEvent();
+  else{
+    await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(r.total),{ticker,userId:owner.id,userName:owner.name,amount:r.total});
+    await pushNotificationToHolders(ticker,'dividend','💰 '+co.name+' paid a dividend of '+fmt(perShare)+'/share.'+exNote);
+  }
   pushBalances();
   toast(co.name+' paid '+fmt(perShare)+'/share');UI.companyTab='dividends';render();
 }
@@ -6964,7 +7042,8 @@ async function convertShareClass(ticker,qty){
   if(r2.holdings)holder.holdings=r2.holdings;
   const cls=getCo(r2.class_ticker);if(cls&&r2.class_shares!=null)cls.shares=r2.class_shares;
   if(r2.parent_shares!=null)parent.shares=r2.parent_shares;
-  await logActivity('class_convert',u.name+' converted '+r2.converted+' '+r2.class_ticker+' into '+r2.received+' '+r2.parent_ticker,
+  if(serverRecords('rpc_convert_share_class'))afterServerEvent();
+  else await logActivity('class_convert',u.name+' converted '+r2.converted+' '+r2.class_ticker+' into '+r2.received+' '+r2.parent_ticker,
     {ticker:r2.parent_ticker,userId:u.id,userName:u.name});
   toast('Converted '+r2.converted+' '+r2.class_ticker+' into '+r2.received+' '+r2.parent_ticker);
   pushBalances();render();
@@ -10167,7 +10246,8 @@ async function adjustCompanyCash(uid2){
   try{newCash=await sb.rpc('admin_adjust_cash',{p_target_id:uid2,p_op:op,p_amount:amt});}
   catch(e){return toast('Failed to adjust balance: '+(e.message||e));}
   u.cash=newCash;
-  await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
+  if(serverRecords('admin_adjust_cash'))afterServerEvent();
+  else await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
   toast(u.name+"'s balance updated to "+fmt(newCash));render();
 }
 async function adjustCash(uid2){
@@ -10182,7 +10262,8 @@ async function adjustCash(uid2){
   try{newCash=await sb.rpc('admin_adjust_cash',{p_target_id:uid2,p_op:op,p_amount:amt});}
   catch(e){return toast('Failed to adjust balance: '+(e.message||e));}
   u.cash=newCash;
-  await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:''+u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
+  if(serverRecords('admin_adjust_cash'))afterServerEvent();
+  else await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:''+u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
   pushBalances();
   toast(u.name+"'s balance updated to "+fmt(newCash));render();
 }
@@ -11236,13 +11317,16 @@ function renderTreasurerBudgetWarnings(){
 // when it differs from the subject -- "Elijah withdrew $5,000" written by
 // Kyle's browser says so; a student's own deposit does not repeat their name.
 // Entries from before the server recorded it have no writer and show nothing.
+// 'server' is the exchange itself (sql/server_events_batch1.sql): the function
+// that did the thing wrote the entry, so there is no browser to name.
 function activityWriterName(a){
   if(!a||!a.logged_by)return'';
+  if(a.logged_by==='server')return'JEX';
   const w=getUser(a.logged_by);
   return w?w.name:a.logged_by;
 }
 function activityWriterNote(a){
-  if(!a||!a.logged_by||a.logged_by===a.user_id)return'';
+  if(!a||!a.logged_by||a.logged_by===a.user_id||a.logged_by==='server')return'';
   return `<div style="font-size:11px;color:var(--text3);margin-top:2px">written by ${esc(activityWriterName(a))}</div>`;
 }
 function renderActivityLog(){

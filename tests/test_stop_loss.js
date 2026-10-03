@@ -58,7 +58,11 @@ global.getUser=id=>[JANE,BOB,CHAIR].find(u=>u.id===id)||null;
 global.cu=()=>viewer;
 global.getCo=t=>DB.companies.find(c=>c.ticker===t)||null;
 global.pushNotification=async(uid,kind,msg)=>{notified.push({uid,kind,msg});};
-global.logActivity=async()=>{};
+let logged=0;
+global.logActivity=async()=>{logged++;};
+let serverList=new Set(), refreshed=0;
+global.serverRecords=fn=>serverList.has(fn);
+global.afterServerEvent=()=>{refreshed++;};
 global.pushTradeToSheets=()=>{};
 // Trades made locally go in at the FRONT of DB.trades, which is newest-first.
 global.recordLocalTrade=t=>{if(t&&!DB.trades.some(x=>x.id===t.id))DB.trades.unshift(t);};
@@ -108,6 +112,19 @@ const reset=()=>{
   check('an admin is told', toasts.length===1, JSON.stringify(toasts));
   check('...including whose it was', toasts.length===1 && /Jane/.test(toasts[0]),
         JSON.stringify(toasts));
+
+  // ── once the server records stop-losses (server_events_batch1.sql) ──
+  serverList=new Set(['rpc_trigger_stop_loss']);
+  viewer=BOB; reset(); logged=0; refreshed=0;
+  await checkStopLossOrders();
+  check('server-recorded: the sale still goes through', DB.stopLossOrders[0].status==='triggered');
+  check('...the page sends no notification of its own', notified.length===0, JSON.stringify(notified));
+  check('...and writes no log entry of its own', logged===0);
+  check('...and fetches what the server wrote', refreshed===1);
+  viewer=JANE; reset();
+  await checkStopLossOrders();
+  check('...and the owner is still told on screen', toasts.length===1, JSON.stringify(toasts));
+  serverList=new Set();
 
   // ── the engine itself still behaves ──
   viewer=BOB; reset();

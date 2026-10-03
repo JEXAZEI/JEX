@@ -62,6 +62,11 @@ global.applyLimitMatchResult=()=>{};
 global.applyLimitPoolFillResult=(id)=>{const o=DB.limitOrders.find(x=>x.id===id);if(o)o.status='filled';};
 global.logActivity=async(...a)=>{acts.push(a);};
 global.pushNotification=async(...a)=>{notes.push(a);};
+// Before server_events_batch1.sql the page records fills itself; after it,
+// the server does and the page only refreshes. Both are exercised below.
+let serverList=new Set(), refreshed=0;
+global.serverRecords=fn=>serverList.has(fn);
+global.afterServerEvent=()=>{refreshed++;};
 global.isAdmin=eval('('+grabConst('isAdmin').replace(/^const isAdmin=/,'').replace(/;$/,'')+')');
 eval(grabFn('myFillSide'));
 eval(grabFn('checkLimitOrders'));
@@ -120,6 +125,18 @@ const setup=(mode)=>{
   await checkLimitOrders();
   check('the owner still gets the notification even when a stranger polled',
         notes.length===1 && notes[0][0]==='u-jane', JSON.stringify(notes));
+
+  // ── once the server records fills, the page writes nothing itself ──
+  serverList=new Set(['rpc_match_limit_order_book','rpc_fill_limit_vs_pool']);
+  for(const mode of ['book','pool']){
+    viewer=JANE; setup(mode); refreshed=0;
+    await checkLimitOrders();
+    check(mode+' fill recorded by the server: the page logs nothing', acts.length===0, JSON.stringify(acts));
+    check('...notifies nobody', notes.length===0, JSON.stringify(notes));
+    check('...fetches what the server wrote', refreshed>0);
+    check('...and still tells the owner on screen', toasts.length>0, JSON.stringify(toasts));
+  }
+  serverList=new Set();
 
   // ── a fund's manager counts as a participant ──
   check('a fund is mine when I manage it',

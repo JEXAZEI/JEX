@@ -756,13 +756,14 @@ ${PRELUDE}
       DB.activity = [
         {id:'w1', type:'limit_fill', description:'Bea <-> Ariel: 5 x ACME', ts:'Oct 1, 1:00 PM', user_id:'u-stu2', user_name:'Bea', logged_by:'u-stu'},
         {id:'w2', type:'fund_deposit', description:'Ariel deposited $50', ts:'Oct 1, 1:01 PM', user_id:'u-stu', user_name:'Ariel', logged_by:'u-stu'},
-        {id:'w3', type:'vote', description:'an old entry', ts:'Sep 1, 1:00 PM', user_id:'u-stu'}];
+        {id:'w3', type:'vote', description:'an old entry', ts:'Sep 1, 1:00 PM', user_id:'u-stu'},
+        {id:'w4', type:'dividend', description:'Acme paid dividend', ts:'Oct 1, 1:02 PM', user_id:'u-co', user_name:'Acme', logged_by:'server'}];
       UI.userId='u-chair'; UI.navTab='admin'; UI.adminTab='activity'; render();
       const text = document.getElementById('app').textContent;
       const writer = getUser('u-stu').name;
       const n = (text.match(/written by /g)||[]).length;
       if(!text.includes('written by '+writer)) throw new Error('the fill written by another account does not say so');
-      if(n !== 1) throw new Error(n+' "written by" notes; expected exactly one (own entries and old entries show none)');
+      if(n !== 1) throw new Error(n+' "written by" notes; expected exactly one (own, old and server-written entries show none)');
       return 'written by '+writer+' (once)';
     } finally { DB.activity = keep.act; UI.userId = keep.user; UI.navTab = keep.nav; UI.adminTab = keep.tab; render(); }
   });
@@ -1491,6 +1492,35 @@ ${PRELUDE}
       throw new Error('units outstanding '+g.units_outstanding);
     if(Math.abs(pos.costBasis-nav0)>0.01) throw new Error('cost basis '+pos.costBasis+' expected '+nav0);
     return expUnits+' units @ NAV '+nav0;
+  });
+
+  // sql/server_events_batch1.sql: once a function writes its own log entry
+  // and notifications, the page must not write a second copy -- and before the
+  // migration (an empty list) it must keep writing its own.
+  await step('a deposit is logged once: by the page before the migration, by the server after', async ()=>{
+    const keep=SERVER_EVENTS;
+    const callsDuring=async()=>{
+      UI.userId='u-stu2';
+      // The page's own spacing between money moves would refuse the second.
+      _lastOrderTime['u-stu2']=0;
+      const n0=stub.rpcCalls.length;
+      await depositToFund('f-1', 25);
+      await new Promise(r=>setTimeout(r,700));
+      // Other polls run meanwhile (limit fills log too), so only deposit
+      // entries count.
+      return stub.rpcCalls.slice(n0).map(c=>c.fn==='rpc_log_activity'?'log:'+(c.params&&c.params.p_type):c.fn);
+    };
+    try{
+      SERVER_EVENTS=new Set();
+      const before=await callsDuring();
+      if(!before.includes('log:fund_deposit')) throw new Error('before the migration the page did not log: '+before.join(','));
+      SERVER_EVENTS=new Set(['rpc_fund_deposit']);
+      const after=await callsDuring();
+      if(!after.includes('rpc_fund_deposit')) throw new Error('no deposit was made: '+after.join(','));
+      if(after.includes('log:fund_deposit')) throw new Error('the page logged it too: '+after.join(','));
+      if(!after.includes('rpc_get_my_notifications')) throw new Error('what the server wrote was never fetched: '+after.join(','));
+      return 'before: '+before.join(' > ')+' | after: '+after.join(' > ');
+    } finally { SERVER_EVENTS=keep; }
   });
 
   await step('depositing into a fund does not destroy net worth', async ()=>{

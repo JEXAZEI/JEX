@@ -36,7 +36,7 @@ Send only these when asked for "the SQL". Remove a file from this list once
 its result has come back green. `preflight.sql` is read-only and is run before
 each class, so it is never on this list.
 
-Nothing — every file here has been run and verified.
+- `server_events_batch1.sql`
 
 ## Order
 
@@ -92,7 +92,8 @@ They are listed in the order they were applied. Two of them care:
 | `activity_log_guard.sql` | Any signed-in account could write anything into the activity log about anyone — a script tag as the type, a forged Chairman session entry, a $5,000 withdrawal blamed on another student — and nothing recorded who wrote it. Every entry now records its writer from the login, hashed into the chain; seven officer-only types; types must be plain words; lengths and a rate limit. Concurrent writers forked the chain (15 forks in 160 entries) — now serialized. Leftover TRUNCATE/TRIGGER/REFERENCES grants revoked. |
 | `revoke_truncate.sql` | Signed-out visitors and every signed-in user held TRUNCATE (empty a table in one statement, past row-level security), TRIGGER and REFERENCES on 38 tables, `jex_users` and `jex_trades` among them — leftovers from the project's default setup. Unreachable through the web API today and unused by the app. Revoked everywhere, and from the defaults for new tables; SELECT/INSERT/UPDATE/DELETE are counted before and after and must not move. |
 | `revoke_maintain.sql` | Postgres 17's MAINTAIN privilege — part of "grant all" — was still held by anon and authenticated, and in the defaults for new tables. With production's SELECT-only grants it was the one thing letting a signed-out caller LOCK a table in ACCESS EXCLUSIVE mode, stopping every read and write, or REINDEX it. Revoked everywhere and from the defaults; reads counted before and after. A no-op on Postgres 16. |
-| `preflight.sql` | **Read-only, run it before class.** Answers "is the exchange in a state where a lesson can happen" — dev_mode, session status, whether the books balance, stranded prices, shorts near their margin line, snapshot freshness, whether 27 named fixes are still present, and three data checks: no function writing UTC times, no dilution the index chart would draw as a crash, and a JXI open that matches its constituents. |
+| `server_events_batch1.sql` | Batch 1 of the server-events rebuild (`SERVER_EVENTS_PLAN.md`). The activity entry and notifications for eleven money-and-positions actions — balance adjustments, fund deposits and withdrawals, dividends, limit fills, stop-losses, margin calls, class conversions, price adjustments — were written by whichever browser did or noticed the thing, describing a result it was handed, so a page could describe a fill or a dividend that never happened. Each function now writes its own, in the same transaction, as writer `server`. Moves no money: balances, holdings, shorts, prices, orders and trades verified identical on a copy of production's code. The page skips its own copy for whatever `rpc_server_events()` lists, so nothing is recorded twice. |
+| `preflight.sql` | **Read-only, run it before class.** Answers "is the exchange in a state where a lesson can happen" — dev_mode, session status, whether the books balance, stranded prices, shorts near their margin line, snapshot freshness, whether 30 named fixes are still present, and three data checks: no function writing UTC times, no dilution the index chart would draw as a crash, and a JXI open that matches its constituents. |
 | `repair_share_register.sql` | **Changes data, not a function.** Puts the 21 missing shares back into the unsold pool after `removed_user_shares.sql` stops the leak. Moves no money. Optional — leaving the register as it stands is a reasonable choice. |
 
 ## Scope of the audit

@@ -49,9 +49,23 @@ for(const c of calls.filter(c=>offList.includes(c.type))){
 }
 
 // ── the page ──
+function grab(name){
+  const m=new RegExp('^function '+name+'\\(','m').exec(src);
+  if(!m)throw new Error('not found: '+name);
+  let i=src.indexOf('{',m.index),d=0;
+  for(let j=i;j<src.length;j++){if(src[j]==='{')d++;else if(src[j]==='}'&&--d===0)return src.slice(m.index,j+1);}
+}
+global.getUser=id=>({u_kyle:{id:'u_kyle',name:'Kyle'},u_eli:{id:'u_eli',name:'Eli'}})[id]||null;
+global.esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+eval(grab('activityWriterName'));eval(grab('activityWriterNote'));
 check('the Activity tab shows who wrote an entry when it is not who it is about',
-      /if\(!a\|\|!a\.logged_by\|\|a\.logged_by===a\.user_id\)return'';/.test(src)
-      && /written by \$\{esc\(activityWriterName\(a\)\)\}/.test(src));
+      activityWriterNote({logged_by:'u_kyle',user_id:'u_eli'}).includes('written by Kyle'));
+check('...not when they wrote their own', activityWriterNote({logged_by:'u_eli',user_id:'u_eli'})==='');
+check('...nor for entries from before the writer was recorded', activityWriterNote({user_id:'u_eli'})==='');
+check('...nor for entries the exchange wrote itself (server events)',
+      activityWriterNote({logged_by:'server',user_id:'u_eli'})==='');
+check('...which the CSV names as JEX, not as an unknown account',
+      activityWriterName({logged_by:'server'})==='JEX' && activityWriterName({logged_by:'u_kyle'})==='Kyle');
 check('...and the CSV export carries it', /\['ts','type','description','amount','about','written_by'\]/.test(src));
 
 console.log(fails?('\n'+fails+' check(s) failed'):'\nall checks passed');
