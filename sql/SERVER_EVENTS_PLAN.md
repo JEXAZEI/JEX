@@ -106,14 +106,14 @@ called them and the `rpc_server_events()` switch.
 
 ## Status
 
-- [ ] step 0 + batch 1 — `server_events_batch1.sql` written and tested on a
-  Postgres 17 copy of production's eleven bodies: balances, holdings, shorts,
-  prices, orders and trades identical before and after; one entry per event,
-  chain intact under 8 parallel writers (1,312 entries, 0 forks); wording
-  identical to the page's. Page deployed first. **Waiting on the production
-  run.** Changes found along the way: instant fills are now logged (the page
-  never did) but don't notify; Treasurer-approved dividends now carry the full
-  holder message and name the company's owner.
+- [x] step 0 + batch 1 — `server_events_batch1.sql`, run October 2026: all
+  eleven record their own events, the page was told about all eleven, no helper
+  callable from the web. Tested first on a Postgres 17 copy of production's
+  bodies: money and shares identical before and after, chain intact under 8
+  parallel writers (1,312 entries, 0 forks), wording identical to the page's.
+  Changes found along the way: instant fills are now logged (the page never
+  did) but don't notify; Treasurer-approved dividends carry the full holder
+  message and name the company's owner.
 - [ ] batch 2 (with the short-squeeze alert)
 - [ ] batch 3
 - [ ] batch 4
