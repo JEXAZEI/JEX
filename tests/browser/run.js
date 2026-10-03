@@ -1523,6 +1523,37 @@ ${PRELUDE}
     } finally { SERVER_EVENTS=keep; }
   });
 
+  // Batch 2: an officer's halt and resume. Before the migration the page logs
+  // and notifies every student itself; after it, none of that comes from the
+  // page, and the officer's activity list is refreshed from the server.
+  await step('a halt and resume are recorded once: by the page before batch 2, by the server after', async ()=>{
+    const keep={ev:SERVER_EVENTS, user:UI.userId, confirm:window.confirm};
+    const run=async()=>{
+      const n0=stub.rpcCalls.length;
+      await haltStock('ACME','Checking a news report');
+      await resumeStock('ACME');
+      await new Promise(r=>setTimeout(r,700));
+      return stub.rpcCalls.slice(n0).map(c=>c.fn==='rpc_log_activity'?'log:'+c.params.p_type
+        :c.fn==='rpc_push_notification'?'notify:'+c.params.p_type:c.fn);
+    };
+    try{
+      UI.userId='u-chair'; window.confirm=()=>true;
+      SERVER_EVENTS=new Set();
+      const before=await run();
+      if(!before.includes('log:halt')||!before.includes('log:resume')) throw new Error('before batch 2 the page did not log: '+before.join(','));
+      if(!before.includes('notify:halt')) throw new Error('before batch 2 nobody was told: '+before.join(','));
+      SERVER_EVENTS=new Set(['rpc_admin_halt_stock','rpc_admin_resume_stock']);
+      const after=await run();
+      if(!after.includes('rpc_admin_halt_stock')||!after.includes('rpc_admin_resume_stock')) throw new Error('no halt or resume: '+after.join(','));
+      const own=after.filter(x=>x==='log:halt'||x==='log:resume'||x==='notify:halt'||x==='notify:resume');
+      if(own.length) throw new Error('the page still wrote '+own.join(','));
+      if(!after.includes('rpc_admin_list_activity')) throw new Error("the officer's activity list was not refreshed: "+after.join(","));
+      if(isHalted('ACME')) throw new Error('ACME left halted');
+      const n=x=>before.filter(y=>y===x).length;
+      return 'before: '+n('log:halt')+' halt log, '+n('notify:halt')+' halt notices | after: none from the page';
+    } finally { SERVER_EVENTS=keep.ev; UI.userId=keep.user; window.confirm=keep.confirm; render(); }
+  });
+
   await step('depositing into a fund does not destroy net worth', async ()=>{
     const me=DB.users.find(u=>u.id==='u-stu2');
     const nwBefore=nw(me);

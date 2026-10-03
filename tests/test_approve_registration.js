@@ -51,6 +51,11 @@ global.render=()=>{};
 global.fmt=n=>'$'+Number(n).toFixed(2);
 global.document={getElementById:()=>null};
 global.logActivity=async(...a)=>{acts.push(a);};
+// Before server_events_batch2.sql the page logs the approval; after it the
+// server does and the page only fetches it. Both are run below.
+let serverList=new Set(), refreshed=0;
+global.serverRecords=fn=>serverList.has(fn);
+global.afterServerEvent=()=>{refreshed++;};
 global.reportClientError=()=>{};
 global.INTERNAL_DB_ERROR=eval('('+grabConst('INTERNAL_DB_ERROR')
   .replace(/^const INTERNAL_DB_ERROR=/,'').replace(/;$/,'')+')');
@@ -75,6 +80,17 @@ const stillQueued=()=>DB.pending.some(p=>p.id==='p1');
   check('...and removes them from the queue', !stillQueued());
   check('...and is logged', acts.length===1, JSON.stringify(acts));
   check('...and says so', toasts.some(t=>/approved/i.test(t)), JSON.stringify(toasts));
+
+  // ── once the server logs approvals ──
+  serverList=new Set(['approve_registration']); reset(null); refreshed=0;
+  await approveReg('p1',10000);
+  check('server-recorded: the approval still lands', DB.users.length===1 && !stillQueued());
+  check('...the page writes no entry of its own', acts.length===0, JSON.stringify(acts));
+  check('...and fetches the server\'s', refreshed===1);
+  reset(err('network down')); refreshed=0;
+  await approveReg('p1',10000);
+  check('...a failed approval fetches nothing', refreshed===0);
+  serverList=new Set();
 
   // ── a genuine double-approval ──
   // The RPC reuses the pending id as the new user id, so a second approval

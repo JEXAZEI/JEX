@@ -96,6 +96,8 @@ global.getUser=id=>({id,name:'x',cash:0,holdings:{}});
 global.pushNotification=async()=>{};
 global.pushNotificationToHolders=async()=>{};
 global.logActivity=async()=>{};
+global.serverRecords=()=>false;
+global.afterServerEvent=()=>{};
 global.rpcErrorMessage=e=>String(e&&e.message||e);
 global.delistExposure=()=>({shares:769,holders:3,shorts:1});
 global.DELIST_KIND_LABEL={going_private:'Going private',bankruptcy:'Bankruptcy'};
