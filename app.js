@@ -1648,7 +1648,8 @@ async function reviewDivApproval(id,approve){
     catch(e){return toast(rpcErrorMessage(e));}
     if(!r.rejected)return toast('This request was already reviewed');
     da.status='rejected';da.approved_by=u.name;
-    await pushNotification(da.requested_by,'div_approval','❌ Your dividend request for '+da.company_name+' was rejected by the Treasurer.',da.ticker);
+    if(serverRecords('rpc_reject_dividend_approval'))afterServerEvent();
+    else await pushNotification(da.requested_by,'div_approval','❌ Your dividend request for '+da.company_name+' was rejected by the Treasurer.',da.ticker);
     toast('Dividend rejected');render();return;
   }
   // Approving DOES move money -- rpc_pay_dividend does its own atomic claim
@@ -3507,7 +3508,16 @@ async function postNews(ticker,headline,body){
   try{rec=await sb.rpc('rpc_post_news',{p_ticker:ticker,p_headline:headline.trim(),p_body:(body||'').trim()});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.news.unshift(rec);
-  if(document.getElementById('news-notify')?.checked)await pushNotificationToHolders(ticker,'news','📰 '+co.name+': '+headline.trim());
+  if(document.getElementById('news-notify')?.checked){
+    // Since server_events_batch3.sql the server tells holders, from the stored
+    // article: the author only, within 10 minutes of posting, once.
+    const serverNews=serverRecords('rpc_notify_news_holders');
+    if(serverNews){
+      try{const n=await sb.rpc('rpc_notify_news_holders',{p_news_id:rec.id});if(n&&n.sent)afterServerEvent();}
+      catch(e){toast('News posted, but shareholders could not be notified — '+rpcErrorMessage(e));}
+    }
+    if(!serverNews)await pushNotificationToHolders(ticker,'news','📰 '+co.name+': '+headline.trim());
+  }
   clearDraft('news-body');toast('News posted');UI.companyTab='news';render();
 }
 async function deleteNews(id){
@@ -3670,22 +3680,28 @@ async function respondToInvite(memberId,accept){
   const u=cu();
   if(accept&&co)_teamContactsLoaded.delete(co.ticker);
 
+  const serverInvite=serverRecords('rpc_respond_to_invite');
+  if(serverInvite)afterServerEvent();
   if(accept&&co){
     // jex_company_members is already patched above — that's the source of truth
     // No need to also patch co.founders
-    await logActivity('cofound',u.name+' joined '+co.name+' as a founder',{ticker:co.ticker,userId:u.id,userName:u.name});
-    await pushNotification(
-      m.company_user_id,'invite',
-      '✅ '+u.name+' accepted your founder invitation and has joined '+co.name+'!',
-      co.ticker
-    );
+    if(!serverInvite){
+      await logActivity('cofound',u.name+' joined '+co.name+' as a founder',{ticker:co.ticker,userId:u.id,userName:u.name});
+      await pushNotification(
+        m.company_user_id,'invite',
+        '✅ '+u.name+' accepted your founder invitation and has joined '+co.name+'!',
+        co.ticker
+      );
+    }
     toast('You joined '+co.name+' as a founder!');
   } else if(!accept&&co){
-    await pushNotification(
-      m.company_user_id,'invite',
-      '❌ '+u.name+' declined your founder invitation for '+co.name+'.',
-      co.ticker
-    );
+    if(!serverInvite){
+      await pushNotification(
+        m.company_user_id,'invite',
+        '❌ '+u.name+' declined your founder invitation for '+co.name+'.',
+        co.ticker
+      );
+    }
     toast('Invitation declined');
   }
   render();
@@ -3722,7 +3738,8 @@ async function requestFounderAllocation(ticker,studentId,shares,reason){
   try{
     rec=await sb.rpc('rpc_request_founder_allocation',{p_ticker:ticker,p_student_id:studentId,p_shares:shares,p_reason:reason||''});
     DB.founderAllocations.unshift(rec);   // newest first, as loaded
-    await logActivity('founder_alloc',companyName+' requested '+shares+' '+classLabel+' founder shares for '+student.name,{ticker});
+    if(serverRecords('rpc_request_founder_allocation'))afterServerEvent();
+    else await logActivity('founder_alloc',companyName+' requested '+shares+' '+classLabel+' founder shares for '+student.name,{ticker});
     toast('✓ Allocation request submitted: '+shares+'×'+ticker+' for '+student.name);
     render();
   }catch(err){
@@ -3761,11 +3778,15 @@ async function reviewFounderAllocation(id,approve){
     const localStudent=getUser(a.student_id);
     if(localStudent)localStudent.holdings=r.holdings;
     const co=getCo(a.ticker);if(co)co.shares_avail=r.shares_avail;
-    await pushNotification(a.student_id,'founder_alloc','🎁 '+a.shares+' founder shares of '+a.company_name+' ('+a.ticker+') have been added to your portfolio!',a.ticker);
-    await logActivity('founder_alloc',a.student_name+' granted '+a.shares+' founder shares of '+a.company_name,{ticker:a.ticker,amount:a.shares});
+    if(serverRecords('rpc_review_founder_allocation'))afterServerEvent();
+    else{
+      await pushNotification(a.student_id,'founder_alloc','🎁 '+a.shares+' founder shares of '+a.company_name+' ('+a.ticker+') have been added to your portfolio!',a.ticker);
+      await logActivity('founder_alloc',a.student_name+' granted '+a.shares+' founder shares of '+a.company_name,{ticker:a.ticker,amount:a.shares});
+    }
     toast('✓ '+a.student_name+' granted '+a.shares+'×'+a.ticker+' — portfolio updated');
   } else {
-    await pushNotification(a.student_id,'founder_alloc','❌ Your founder share request for '+a.shares+'×'+a.ticker+' in '+a.company_name+' was rejected.');
+    if(serverRecords('rpc_review_founder_allocation'))afterServerEvent();
+    else await pushNotification(a.student_id,'founder_alloc','❌ Your founder share request for '+a.shares+'×'+a.ticker+' in '+a.company_name+' was rejected.');
     toast('Allocation rejected');
   }
   render();
@@ -3860,7 +3881,8 @@ async function removeFounder(memberId){
   m.status='removed';
   const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
   const u=cu();
-  if(co){
+  if(serverRecords('rpc_remove_founder'))afterServerEvent();
+  else if(co){
     await pushNotification(m.student_id,'invite','❌ You have been removed as a founder of '+co.name+'.',co.ticker);
     await logActivity('cofound',name+' removed as founder of '+co.name,{ticker:co.ticker,userId:u.id,userName:u.name});
   }
@@ -3886,7 +3908,8 @@ async function sendFounderInvite(ownerId,studentId){
   try{rec=await sb.rpc('rpc_send_founder_invite',{p_owner_id:ownerId,p_student_id:studentId});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.companyMembers.push(rec);
-  await pushNotification(
+  if(serverRecords('rpc_send_founder_invite'))afterServerEvent();
+  else await pushNotification(
     studentId,'invite',
     '🤝 '+u.name+' has invited you to join '+co.name+' as a founder. Accept or decline below.',
     co.ticker
@@ -3915,12 +3938,15 @@ async function flagAccount(targetId,targetName,targetType,reason){
   try{rec=await sb.rpc('rpc_flag_account',{p_target_id:targetId,p_target_type:targetType,p_reason:reason});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.flags.push(rec);
-  // Notify Chairman and President
-  const admins=DB.users.filter(u2=>u2.role==='chairman'||u2.role==='president');
-  for(const a of admins){
-    await pushNotification(a.id,'flag','🚩 Compliance flag: '+targetName+' ('+targetType+') — '+reason.trim(),null);
+  if(serverRecords('rpc_flag_account'))afterServerEvent();
+  else{
+    // Notify Chairman and President
+    const admins=DB.users.filter(u2=>u2.role==='chairman'||u2.role==='president');
+    for(const a of admins){
+      await pushNotification(a.id,'flag','🚩 Compliance flag: '+targetName+' ('+targetType+') — '+reason.trim(),null);
+    }
+    await logActivity('flag','🚩 '+u.name+' flagged '+targetName+' ('+targetType+'): '+reason.trim(),{userId:u.id,userName:u.name});
   }
-  await logActivity('flag','🚩 '+u.name+' flagged '+targetName+' ('+targetType+'): '+reason.trim(),{userId:u.id,userName:u.name});
   clearDraft('flag-reason');toast('🚩 '+targetName+' flagged and Chairman notified');render();
 }
 async function resolveFlag(flagId,action,note){
@@ -4539,7 +4565,8 @@ async function checkPriceAlerts(){
     try{r=await sb.rpc('rpc_trigger_price_alert',{p_id:a.id});}catch(e){continue;}
     if(!r.triggered){if(r.reason==='already_triggered_or_missing')a.triggered=true;continue;}
     a.triggered=true;
-    await pushNotification(r.user_id,'price_alert','🎯 Price alert: '+r.ticker+' is '+r.direction+' '+fmt(r.target_price)+' (now '+fmt(r.price)+')',r.ticker);
+    if(serverRecords('rpc_trigger_price_alert'))afterServerEvent();
+    else await pushNotification(r.user_id,'price_alert','🎯 Price alert: '+r.ticker+' is '+r.direction+' '+fmt(r.target_price)+' (now '+fmt(r.price)+')',r.ticker);
     // Same rule as fills and stop-losses: every client polls every alert, so
     // without this the toast lands wherever the poll ran. Holdings and cash
     // are public in JEX by design, but a target price is not -- it is a
@@ -5044,7 +5071,8 @@ async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
     toast('After-hours order queued: '+qty+'×'+ticker+' @ '+fmt(limitPrice)+' — activates when session opens');
     render();return;
   }
-  await logActivity('limit_order',(fundId?getFund(fundId)?.name+"'s fund":cu().name)+' placed limit '+side+' '+qty+'×'+ticker+' @ '+fmt(limitPrice),{ticker,amount:limitPrice});
+  if(serverRecords('rpc_place_limit_order'))afterServerEvent();
+  else await logActivity('limit_order',(fundId?getFund(fundId)?.name+"'s fund":cu().name)+' placed limit '+side+' '+qty+'×'+ticker+' @ '+fmt(limitPrice),{ticker,amount:limitPrice});
   const filledQty=await settleLimitOrder(r.order,orderType==='fok');
   // Fills here were never logged by the page; the server logs them now.
   if(filledQty>0&&(serverRecords('rpc_match_limit_order_book')||serverRecords('rpc_fill_limit_vs_pool')))afterServerEvent();
@@ -5076,10 +5104,12 @@ async function activateAfterHoursOrders(){
   let activated=[];
   try{activated=(await sb.rpc('rpc_activate_after_hours_orders',{}))?.activated||[];}catch(e){console.warn('Activate after-hours failed:',e);return;}
   if(!activated.length)return;
+  const serverAfterHours=serverRecords('rpc_activate_after_hours_orders');
+  if(serverAfterHours)afterServerEvent();
   for(const o of activated){
     const local=DB.limitOrders.find(x=>x.id===o.id);if(local)local.status='open';
     const u=getUser(o.user_id);
-    if(u)await pushNotification(u.id,'after_hours','⏰ Your after-hours '+o.side+' order for '+o.qty+'×'+o.ticker+' @ '+fmt(o.limit_price)+' is now active',o.ticker);
+    if(u&&!serverAfterHours)await pushNotification(u.id,'after_hours','⏰ Your after-hours '+o.side+' order for '+o.qty+'×'+o.ticker+' @ '+fmt(o.limit_price)+' is now active',o.ticker);
   }
   toast(activated.length+' after-hours order'+(activated.length!==1?'s':'')+' activated');
   render();
@@ -5434,7 +5464,8 @@ async function createFund(name,feePct){
   try{rec=await sb.rpc('rpc_create_fund',{p_name:name.trim(),p_fee_pct:feePct});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.funds.push(rec);
-  await logActivity('fund_create',u.name+' launched a new fund: '+rec.name+' ('+rec.fee_pct+'% performance fee)',{userId:u.id,userName:u.name});
+  if(serverRecords('rpc_create_fund'))afterServerEvent();
+  else await logActivity('fund_create',u.name+' launched a new fund: '+rec.name+' ('+rec.fee_pct+'% performance fee)',{userId:u.id,userName:u.name});
   toast('Fund launched');UI.fundPage=rec.id;render();
 }
 async function closeFund(fundId){
@@ -5632,8 +5663,11 @@ async function postFinancials(ticker,period,revenue,profit,summary){
   try{r=await sb.rpc('rpc_post_financials',{p_ticker:ticker,p_period:period.trim(),p_revenue:revenue,p_profit:profit,p_summary:summary.trim()});}
   catch(e){return toast(rpcErrorMessage(e));}
   co.financials=r.financials;
-  await pushNotificationToHolders(ticker,'financials','📊 '+co.name+' ('+ticker+') posted financial results for '+r.entry.period+': Revenue '+fmt(revenue)+', Profit '+fmt(profit));
-  await logActivity('financials',co.name+' posted financials for '+r.entry.period+' — Rev '+fmt(revenue)+', Profit '+fmt(profit),{ticker,amount:revenue});
+  if(serverRecords('rpc_post_financials'))afterServerEvent();
+  else{
+    await pushNotificationToHolders(ticker,'financials','📊 '+co.name+' ('+ticker+') posted financial results for '+r.entry.period+': Revenue '+fmt(revenue)+', Profit '+fmt(profit));
+    await logActivity('financials',co.name+' posted financials for '+r.entry.period+' — Rev '+fmt(revenue)+', Profit '+fmt(profit),{ticker,amount:revenue});
+  }
   clearDraft('fin-summary');toast('Financial report posted');render();
 }
 async function updateFundingGoal(ticker,goal,useOfFunds){
@@ -5847,7 +5881,8 @@ async function issueDividend(ticker,perShare,note){
         p_note:(document.getElementById('div-note')?.value||'').trim()});}
       catch(e){return toast(rpcErrorMessage(e));}
       DB.divApprovals.push(req);
-      await pushNotification(treasurer.id,'div_approval','💰 Dividend approval needed: '+co.name+' wants to pay '+fmt(total)+' total ('+fmt(perShare)+'/share)',ticker);
+      if(serverRecords('rpc_request_dividend_approval'))afterServerEvent();
+      else await pushNotification(treasurer.id,'div_approval','💰 Dividend approval needed: '+co.name+' wants to pay '+fmt(total)+' total ('+fmt(perShare)+'/share)',ticker);
       toast('Dividend submitted for Treasurer approval ('+fmt(total)+' exceeds '+fmt(divApprovalThreshold)+' threshold)');
       UI.companyTab='dividends';render();return;
     }
@@ -6946,7 +6981,8 @@ async function submitClassApplication(parentTicker,classType,votesPerShare,share
     p_whitelist:whitelistIds||[],p_reason:reason||'',p_convert:false});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.classApps.push(app);
-  await logActivity('class_app',u.name+' applied for '+co.name+' Class '+classType+' ('+proposedTicker+')',{ticker:parentTicker,userId:u.id,userName:u.name});
+  if(serverRecords('rpc_submit_class_application'))afterServerEvent();
+  else await logActivity('class_app',u.name+' applied for '+co.name+' Class '+classType+' ('+proposedTicker+')',{ticker:parentTicker,userId:u.id,userName:u.name});
   clearDraft('cls-reason');toast('Class '+classType+' application submitted — awaiting Chairman approval');
   UI.companyTab='classes';render();
 }
@@ -7180,8 +7216,11 @@ async function postVote(parentTicker,question,optA,optB){
   // nobody else. DB.votes is not in the 20-second poll either, so it stayed
   // there until a full reload.
   DB.votes.unshift(v);
-  await logActivity('vote',co.name+' posted vote: '+question.trim(),{ticker:parentTicker,userId:u.id,userName:u.name});
-  await pushNotificationToHolders(parentTicker,'vote','🗳️ '+co.name+' posted a vote: '+question.trim());
+  if(serverRecords('rpc_post_vote'))afterServerEvent();
+  else{
+    await logActivity('vote',co.name+' posted vote: '+question.trim(),{ticker:parentTicker,userId:u.id,userName:u.name});
+    await pushNotificationToHolders(parentTicker,'vote','🗳️ '+co.name+' posted a vote: '+question.trim());
+  }
   toast('Vote posted');UI.companyTab='votes';render();
 }
 async function castVote(voteId,choice){
@@ -7214,8 +7253,11 @@ async function closeVote(voteId){
   const v=DB.votes.find(x=>x.id===voteId);if(v){
     v.status='closed';
     // Notify all who voted
-    const voters=[...new Set(DB.ballots.filter(b=>b.vote_id===voteId).map(b=>b.voter_id))];
-    for(const vid of voters) await pushNotification(vid,'vote_closed','🗳️ Vote closed: "'+v.question+'" — '+v.company_name,v.parent_ticker);
+    if(serverRecords('rpc_close_vote'))afterServerEvent();
+    else{
+      const voters=[...new Set(DB.ballots.filter(b=>b.vote_id===voteId).map(b=>b.voter_id))];
+      for(const vid of voters) await pushNotification(vid,'vote_closed','🗳️ Vote closed: "'+v.question+'" — '+v.company_name,v.parent_ticker);
+    }
   }
   toast('Vote closed');render();
 }
@@ -7613,11 +7655,14 @@ async function submitBugReport(){
     const rec=await sb.rpc('rpc_submit_bug_report',{p_description:desc,
       p_screenshot_url:screenshotUrl,p_page_url:window.location.href});
     DB.bugReports.unshift(rec);
-    const admins=DB.users.filter(u2=>u2.role==='chairman'||u2.role==='president');
-    for(const a of admins){
-      await pushNotification(a.id,'bug_report','🐛 Bug report from '+u.name+': '+desc.slice(0,80),null);
+    if(serverRecords('rpc_submit_bug_report'))afterServerEvent();
+    else{
+      const admins=DB.users.filter(u2=>u2.role==='chairman'||u2.role==='president');
+      for(const a of admins){
+        await pushNotification(a.id,'bug_report','🐛 Bug report from '+u.name+': '+desc.slice(0,80),null);
+      }
+      await logActivity('bug_report','🐛 '+u.name+' reported a bug: '+desc.slice(0,80),{userId:u.id,userName:u.name});
     }
-    await logActivity('bug_report','🐛 '+u.name+' reported a bug: '+desc.slice(0,80),{userId:u.id,userName:u.name});
     closeBugReportModal();
     clearDraft('bug-desc');toast('🐛 Bug report sent to the Chairman and President');
     render();
@@ -10081,8 +10126,11 @@ async function submitDelisting(ticker){
   clearDraft('delist-reason-'+ticker);
   // Shareholders are told immediately. Finding out only once the stock has
   // stopped trading is exactly the surprise this feature exists to prevent.
-  await pushNotificationToHolders(ticker,'halt','📋 '+co.name+' ('+ticker+') has applied to delist — '+(DELIST_KIND_LABEL[kind]||kind)+'. Reason: '+reason);
-  await logActivity('ipo',co.name+' ('+ticker+') applied to delist ('+(DELIST_KIND_LABEL[kind]||kind)+')',{ticker});
+  if(serverRecords('rpc_request_delisting'))afterServerEvent();
+  else{
+    await pushNotificationToHolders(ticker,'halt','📋 '+co.name+' ('+ticker+') has applied to delist — '+(DELIST_KIND_LABEL[kind]||kind)+'. Reason: '+reason);
+    await logActivity('ipo',co.name+' ('+ticker+') applied to delist ('+(DELIST_KIND_LABEL[kind]||kind)+')',{ticker});
+  }
   toast('Delisting application submitted — the President will review it');
   render();
 }

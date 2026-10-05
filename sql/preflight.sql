@@ -132,7 +132,7 @@ select jsonb_pretty(jsonb_build_object(
 
   -- ── 8. Are the fixes still in place ──
   --
-  -- Thirty-three markers from the migrations that matter most. Every one should be
+  -- Thirty-six markers from the migrations that matter most. Every one should be
   -- true. A false here means a function was replaced by hand afterwards and
   -- the fix went with it -- which is exactly how this codebase lost things
   -- before sql/ existed.
@@ -174,7 +174,10 @@ select jsonb_pretty(jsonb_build_object(
         ('margin calls write their own log and notice','rpc_margin_call_short', 'perform jex_ev_margin_call('),
         ('session changes write their own log and notices','rpc_admin_save_session', 'perform jex_ev_session('),
         ('halts write their own log and notices',  'rpc_admin_halt_stock', 'perform jex_ev_halt('),
-        ('delisting settlements tell who was paid','rpc_review_delisting', 'perform jex_ev_delisting_settled(')
+        ('delisting settlements tell who was paid','rpc_review_delisting', 'perform jex_ev_delisting_settled('),
+        ('votes write their own log and notices',  'rpc_post_vote', 'perform jex_ev_vote_posted('),
+        ('flags tell the Chairman and President',  'rpc_flag_account', 'perform jex_ev_flagged('),
+        ('placed orders are logged by the server', 'rpc_place_limit_order', 'perform jex_ev_limit_order(')
       ) m(label, fn, marker)),
 
   -- ── 8b. Fixes that are about data, not a line in a function ──

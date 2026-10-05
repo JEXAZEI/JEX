@@ -42,6 +42,10 @@ global.holdings=u=>u.holdings||{};
 global.getCo=t=>({ticker:t,is_index_fund:false,price:30,shares:1000,shares_avail:500});
 global.getFund=()=>({name:'F'});
 global.logActivity=async()=>{};
+// Before the server-events migrations the page writes its own log and
+// notifications; these tests exercise that path.
+global.serverRecords=()=>false;
+global.afterServerEvent=()=>{};
 global.settleLimitOrder=async()=>{};
 global.pushBalances=()=>{};
 global.snapshotNW=()=>{};

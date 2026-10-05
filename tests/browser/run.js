@@ -1300,6 +1300,30 @@ ${PRELUDE}
     return DB.limitOrders.length+' orders';
   });
 
+  // Batch 3: placing an order is logged by the page before the migration and
+  // by the server after it -- never both.
+  await step('a placed order is logged once: by the page before batch 3, by the server after', async ()=>{
+    const keep=SERVER_EVENTS;
+    const place=async()=>{
+      _lastOrderTime[UI.userId]=0;
+      const n0=stub.rpcCalls.length;
+      await placeLimitOrder('ACME','buy',1,1.25,null);
+      await new Promise(r=>setTimeout(r,700));
+      return stub.rpcCalls.slice(n0).map(c=>c.fn==='rpc_log_activity'?'log:'+c.params.p_type:c.fn);
+    };
+    try{
+      SERVER_EVENTS=new Set();
+      const before=await place();
+      if(!before.includes('log:limit_order')) throw new Error('before batch 3 the page did not log: '+before.join(','));
+      SERVER_EVENTS=new Set(['rpc_place_limit_order']);
+      const after=await place();
+      if(!after.includes('rpc_place_limit_order')) throw new Error('no order placed: '+after.join(','));
+      if(after.includes('log:limit_order')) throw new Error('the page logged it too: '+after.join(','));
+      if(!after.includes('rpc_get_my_notifications')) throw new Error('what the server wrote was never fetched: '+after.join(','));
+      return 'before: '+before.filter(x=>x.startsWith('log:')).join(',')+' | after: none from the page';
+    } finally { SERVER_EVENTS=keep; }
+  });
+
   await step('a vote is cast with the right voting power', async ()=>{
     UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='votes'; render();
     const shares=(ME().holdings||{}).ACME||0;

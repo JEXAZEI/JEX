@@ -128,5 +128,16 @@ called them and the `rpc_server_events()` switch.
   recorded however it was made and only when the status really changes; a
   circuit-breaker halt or resume is logged as the system's; squeeze short
   interest counts funds' shorts.
-- [ ] batch 3
+- [ ] batch 3 — `server_events_batch3.sql` written and tested on a Postgres 17
+  copy of production's nineteen bodies (exact CRLF bytes, batches 1 and 2
+  applied): every table identical before and after apart from the new news
+  claim column; 14 entries and their notices worded as the page's; one news
+  notice per article, author only. Page deployed first. A test now checks
+  that every log or notification call left in the page (82) runs only when
+  the server does not record that event -- what batch 4 needs. **Waiting on
+  the production run.** Changes found along the way: rpc_post_news has no
+  "notify" argument, so the box became rpc_notify_news_holders; a company is
+  named by its base listing (the owner of ACME also owns ACME.B, and the first
+  row by owner could be either); a fund's order is logged as "Growth Fund
+  placed..." rather than "Growth Fund's fund placed...".
 - [ ] batch 4
