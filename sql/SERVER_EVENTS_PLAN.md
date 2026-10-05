@@ -147,5 +147,8 @@ called them and the `rpc_server_events()` switch.
   scheduled changes logged and noticed with no email; 8 simultaneous ticks
   closed once; failing notices left the log entry. The page no longer writes
   or can write either. It was run before any live class activity had been
-  seen, so `smoke_server_events.sql` exercises the live path directly and
-  rolls itself back.
+  seen, so `smoke_server_events.sql` exercised the live path directly and
+  rolled itself back: in production the server logged a balance
+  adjustment, an announcement and a bug report, sent the bug-report notices
+  to the Chairman and President, kept the chain whole, and the web could
+  write neither. **The rebuild is complete.**
