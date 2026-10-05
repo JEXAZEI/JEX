@@ -87,6 +87,14 @@ for(const fn of ['adjustCash','adjustCompanyCash','depositToFund','withdrawFromF
 check('the officers\' refresh still feeds the Sheets activity tab',
       /DB\.activity=act;\s*\n\s*\/\/[^\n]*\n\s*pushToSheets\('activity',\{items:act\.slice\(0,10\)\}\);/.test(fnBody('afterServerEvent')||''));
 
+// ── price alerts: signed-in only ──
+const pa=fs.readFileSync(path.join(__dirname,'..','sql','price_alerts_signed_in.sql'),'utf8');
+check('a price alert needs a signed-in account',
+      /if not exists \(select 1 from jex_users where auth_uid = auth\.uid\(\)\) then raise exception ''Not authenticated''; end if;/.test(pa));
+check('...signed-out visitors cannot call it', /revoke execute on function public\.rpc_trigger_price_alert\(text\) from public, anon/.test(pa));
+check('...pinned to production\'s version with batch 3 applied', /'97c95f7488af4be6f23acc659608ec99'/.test(pa));
+check('...and a signed-out page does not ask', /async function checkPriceAlerts\(\)\{[\s\S]{0,120}if\(!UI\.userId\)return;/.test(src));
+
 // ── the live smoke test changes nothing ──
 const smoke=fs.readFileSync(path.join(__dirname,'..','sql','smoke_server_events.sql'),'utf8');
 check('the smoke test is one block that ends by raising, so it all rolls back',

@@ -55,6 +55,7 @@ global.toast=m=>{toasts.push(String(m));};
 global.fmt=n=>'$'+Number(n).toFixed(2);
 global.isOpen=()=>true;
 global.cu=()=>viewer;
+global.UI={userId:'u-signed-in'};   // triggering a price alert needs a signed-in account
 global.getUser=id=>[JANE,BOB,NOSY,CHAIR].find(u=>u.id===id)||null;
 global.getFund=id=>id===FUND.id?FUND:null;
 global.getCo=t=>DB.companies.find(c=>c.ticker===t)||null;

@@ -4381,6 +4381,8 @@ function applyMarginCallResult(r){
   pushTradeToSheets(r.trade);
 }
 async function checkPriceAlerts(){
+  // Triggering needs a signed-in account (price_alerts_signed_in.sql).
+  if(!UI.userId)return;
   const active=DB.priceAlerts.filter(a=>!a.triggered);
   for(const a of active){
     const co=getCo(a.ticker);if(!co)continue;
