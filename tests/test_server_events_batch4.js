@@ -87,5 +87,12 @@ for(const fn of ['adjustCash','adjustCompanyCash','depositToFund','withdrawFromF
 check('the officers\' refresh still feeds the Sheets activity tab',
       /DB\.activity=act;\s*\n\s*\/\/[^\n]*\n\s*pushToSheets\('activity',\{items:act\.slice\(0,10\)\}\);/.test(fnBody('afterServerEvent')||''));
 
+// ── the live smoke test changes nothing ──
+const smoke=fs.readFileSync(path.join(__dirname,'..','sql','smoke_server_events.sql'),'utf8');
+check('the smoke test is one block that ends by raising, so it all rolls back',
+      (smoke.match(/^do \$smoke\$/gm)||[]).length===1 && /raise exception 'SMOKE TEST RESULT \(rolled back -- nothing was kept\):%', v_out;\s*end\s*\$smoke\$;\s*$/.test(smoke));
+check('...acts as real accounts only for its own transaction', (smoke.match(/set_config\('request\.jwt\.claims?(\.sub)?', [^)]*, true\)/g)||[]).length===4);
+check('...and compares against the transaction start, which notifications are stamped with', /v_t0 timestamptz := now\(\);/.test(smoke));
+
 console.log(fails?('\n'+fails+' check(s) failed'):'\nall checks passed');
 process.exit(fails?1:0);
