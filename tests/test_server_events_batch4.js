@@ -91,7 +91,8 @@ check('the officers\' refresh still feeds the Sheets activity tab',
 const smoke=fs.readFileSync(path.join(__dirname,'..','sql','smoke_server_events.sql'),'utf8');
 check('the smoke test is one block that ends by raising, so it all rolls back',
       (smoke.match(/^do \$smoke\$/gm)||[]).length===1 && /raise exception 'SMOKE TEST RESULT \(rolled back -- nothing was kept\):%', v_out;\s*end\s*\$smoke\$;\s*$/.test(smoke));
-check('...acts as real accounts only for its own transaction', (smoke.match(/set_config\('request\.jwt\.claims?(\.sub)?', [^)]*, true\)/g)||[]).length===4);
+const sets=smoke.split('\n').filter(l=>/perform set_config\('request\.jwt\.claim/.test(l));
+check('...acts as real accounts only for its own transaction', sets.length===4 && sets.every(l=>/, true\);\s*$/.test(l)), sets.join(' | '));
 check('...and compares against the transaction start, which notifications are stamped with', /v_t0 timestamptz := now\(\);/.test(smoke));
 
 console.log(fails?('\n'+fails+' check(s) failed'):'\nall checks passed');
