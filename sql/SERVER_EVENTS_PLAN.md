@@ -114,16 +114,19 @@ called them and the `rpc_server_events()` switch.
   Changes found along the way: instant fills are now logged (the page never
   did) but don't notify; Treasurer-approved dividends carry the full holder
   message and name the company's owner.
-- [ ] batch 2 (with the short-squeeze alert) — `server_events_batch2.sql`
-  written and tested on a Postgres 17 copy of production's fifteen bodies
-  (exact CRLF bytes): every table identical before and after; 19 entries and
-  their notices worded as the page's; one session-open entry for 8
-  simultaneous opens; one squeeze alert for 8 simultaneous checks, not
-  emailed. Page deployed first. **Waiting on the production run.** Changes
-  found along the way: a session change is recorded however it was made (the
-  timer and schedule buttons used to record nothing) and only when the status
-  really changes; a circuit-breaker halt or resume is logged as the system's,
-  not the student's whose browser noticed; squeeze short interest now counts
-  funds' shorts.
+- [x] batch 2 (with the short-squeeze alert) — `server_events_batch2.sql`, run
+  October 2026: all fifteen record their own events, the page told about 27
+  functions, no helper callable from the web, the squeeze check open to
+  signed-in users only. Its first run failed harmlessly (`_b2_plan does not
+  exist`): the SQL editor does not promise separate statements share a
+  connection, so a temporary table made by one was gone for the next. The plan
+  moved inside the block, and a test now refuses temporary tables in any
+  migration. Tested on a Postgres 17 copy of production's exact bodies: every
+  table identical before and after, wording identical to the page's, one entry
+  for 8 simultaneous session opens, one squeeze alert for 8 simultaneous
+  checks, not emailed. Changes found along the way: a session change is
+  recorded however it was made and only when the status really changes; a
+  circuit-breaker halt or resume is logged as the system's; squeeze short
+  interest counts funds' shorts.
 - [ ] batch 3
 - [ ] batch 4
