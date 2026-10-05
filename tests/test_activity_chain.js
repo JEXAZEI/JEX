@@ -89,15 +89,18 @@ const builtOld=(()=>{let p='genesis';return chain.map(c=>{const v=oldHash(p,c);p
 tampered.forEach((c,i)=>{ if(oldHash(prevOld,c)!==builtOld[i])oldBreak=true; prevOld=builtOld[i]; });
 check('...where under the old formula it did not', oldBreak===false);
 
-// ── the client half, unchanged and deliberately so ──
-check('logActivity still sends the subject as parameters',
-      /p_user_id:extras\.userId\|\|null,\s*\n?\s*p_user_name:extras\.userName\|\|null/.test(src));
-check('...and the reason is written down where the next reader will find it',
-      /the log records who an entry\s*\n\s*\/\/ is ABOUT, which is often not the caller/.test(src));
-check('the chain is built server-side, not in the browser',
-      /The audit trail's hash chain is built server-side \(rpc_log_activity\)/.test(src));
-check('a failed log never breaks the action it was recording',
-      /catch\(e\)\{console\.warn\('Activity log failed:',e\);\}/.test(src));
+// ── the client half ──
+// The browser no longer writes the log at all: every entry comes from the
+// database function that did the thing (server_events_batch1-4.sql), and
+// rpc_log_activity is closed to the web. The chain the formula above checks
+// is built entirely server-side -- rpc_log_activity's formula, kept by
+// jex_log with 'server' as the writer.
+check('the page never writes the activity log', !/rpc_log_activity|logActivity\(/.test(src));
+const b1=fs.readFileSync(path.join(__dirname,'..','sql','server_events_batch1.sql'),'utf8');
+check('the server\'s entries hash the same fields, writer last',
+      /substr\(md5\(v_prev \|\| p_type \|\| v_desc \|\| coalesce\(p_amount::text, ''\) \|\| v_ts\s*\n?\s*\|\| coalesce\(v_subject, ''\) \|\| coalesce\(v_subject_name, ''\) \|\| coalesce\(v_ticker, ''\) \|\| 'server'\), 1, 8\)/.test(b1));
+const b4=fs.readFileSync(path.join(__dirname,'..','sql','server_events_batch4.sql'),'utf8');
+check('...and the web cannot call rpc_log_activity', /revoke execute on function public\.rpc_log_activity\(text,text,text,text,text,numeric\)/.test(b4));
 
 console.log(fails?('\n'+fails+' check(s) failed'):'\nall checks passed');
 process.exit(fails?1:0);

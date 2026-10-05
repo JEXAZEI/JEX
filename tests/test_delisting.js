@@ -79,8 +79,9 @@ check('review applies the server figures',
 check('...and does not compute a payout itself',
       !/payout_ratio\s*\*/.test(review) && !/shares\s*\*\s*price/.test(review),
       'the client is doing settlement arithmetic');
-check('...it notifies the holders the server says it paid',
-      /r\.payouts/.test(review) && /pushNotification\(/.test(review));
+// Paid holders are told by rpc_review_delisting itself (server_events_batch2.sql).
+check('...and fetches what the server told the holders it paid',
+      /r\.payouts/.test(review) && /afterServerEvent\(\)/.test(review) && !/pushNotification/.test(review));
 
 // ── behaviour ──
 let toasts=[],rpcCalls=[],confirmed=true;
@@ -96,7 +97,6 @@ global.getUser=id=>({id,name:'x',cash:0,holdings:{}});
 global.pushNotification=async()=>{};
 global.pushNotificationToHolders=async()=>{};
 global.logActivity=async()=>{};
-global.serverRecords=()=>false;
 global.afterServerEvent=()=>{};
 global.rpcErrorMessage=e=>String(e&&e.message||e);
 global.delistExposure=()=>({shares:769,holders:3,shorts:1});

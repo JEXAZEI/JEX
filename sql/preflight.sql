@@ -132,7 +132,7 @@ select jsonb_pretty(jsonb_build_object(
 
   -- ── 8. Are the fixes still in place ──
   --
-  -- Thirty-six markers from the migrations that matter most. Every one should be
+  -- Thirty-eight markers from the migrations that matter most. Every one should be
   -- true. A false here means a function was replaced by hand afterwards and
   -- the fix went with it -- which is exactly how this codebase lost things
   -- before sql/ existed.
@@ -177,7 +177,9 @@ select jsonb_pretty(jsonb_build_object(
         ('delisting settlements tell who was paid','rpc_review_delisting', 'perform jex_ev_delisting_settled('),
         ('votes write their own log and notices',  'rpc_post_vote', 'perform jex_ev_vote_posted('),
         ('flags tell the Chairman and President',  'rpc_flag_account', 'perform jex_ev_flagged('),
-        ('placed orders are logged by the server', 'rpc_place_limit_order', 'perform jex_ev_limit_order(')
+        ('placed orders are logged by the server', 'rpc_place_limit_order', 'perform jex_ev_limit_order('),
+        ('the schedule finishes opens and closes', 'rpc_session_tick', 'perform jex_ev_session_tick('),
+        ('a manual open tells after-hours owners', 'rpc_admin_save_session', 'jex_ev_after_hours_active(v_activated)')
       ) m(label, fn, marker)),
 
   -- ── 8b. Fixes that are about data, not a line in a function ──
@@ -203,6 +205,11 @@ select jsonb_pretty(jsonb_build_object(
   --                              constituents' opens give. False is how "-50%"
   --                              and "+99.93%" happened; opening the session
   --                              again, or restoring a snapshot, re-records it.
+  -- web_can_write_log            anon or authenticated can call
+  --                              rpc_log_activity or rpc_push_notification.
+  --                              Every entry and notice is written by the
+  --                              server since server_events_batch4.sql; a
+  --                              name here means a grant was put back.
   'data_fixes_holding', jsonb_build_object(
     'functions_writing_utc_times', (
       select coalesce(jsonb_agg(p.proname order by p.proname), '[]'::jsonb)
@@ -240,7 +247,13 @@ select jsonb_pretty(jsonb_build_object(
                = index_open_from(s.session_open_prices, c.index_classroom_id)), true)
         from jex_companies c cross join jex_session s
        where s.id = 1 and coalesce(c.is_index_fund, false) and c.status = 'listed'
-         and s.session_open_prices ? c.ticker)),
+         and s.session_open_prices ? c.ticker),
+    'web_can_write_log', (
+      select coalesce(jsonb_agg(p.proname order by p.proname), '[]'::jsonb)
+        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public' and p.proname in ('rpc_log_activity', 'rpc_push_notification')
+         and (has_function_privilege('anon', p.oid, 'execute')
+           or has_function_privilege('authenticated', p.oid, 'execute')))),
 
   -- ── 9. The security answer trigger ──
   --

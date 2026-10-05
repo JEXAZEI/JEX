@@ -45,16 +45,15 @@ function grabConst(name){
   throw new Error('unterminated: '+name);
 }
 
-let toasts=[],acts=[],thrown=null,called=0;
+let toasts=[],thrown=null,called=0;
 global.toast=m=>{toasts.push(String(m));};
 global.render=()=>{};
 global.fmt=n=>'$'+Number(n).toFixed(2);
 global.document={getElementById:()=>null};
-global.logActivity=async(...a)=>{acts.push(a);};
 // Before server_events_batch2.sql the page logs the approval; after it the
 // server does and the page only fetches it. Both are run below.
-let serverList=new Set(), refreshed=0;
-global.serverRecords=fn=>serverList.has(fn);
+// The server logs the approval (approve_registration); the page fetches it.
+let refreshed=0;
 global.afterServerEvent=()=>{refreshed++;};
 global.reportClientError=()=>{};
 global.INTERNAL_DB_ERROR=eval('('+grabConst('INTERNAL_DB_ERROR')
@@ -64,7 +63,7 @@ eval(grabFn('approveReg'));
 
 const PENDING={id:'p1',name:'Ada Lovelace',role:'student'};
 const reset=err=>{
-  toasts=[];acts=[];thrown=err;called=0;
+  toasts=[];thrown=err;called=0;refreshed=0;
   global.DB={pending:[{...PENDING}],users:[],session:{starting_cash:10000}};
   global.sb={rpc:async()=>{called++;if(thrown)throw thrown;return{id:'p1',name:'Ada Lovelace',role:'student',cash:10000};}};
 };
@@ -78,19 +77,9 @@ const stillQueued=()=>DB.pending.some(p=>p.id==='p1');
   await approveReg('p1',10000);
   check('an approval adds the user', DB.users.length===1 && DB.users[0].id==='p1');
   check('...and removes them from the queue', !stillQueued());
-  check('...and is logged', acts.length===1, JSON.stringify(acts));
+  check('...and fetches the entry the server logged', refreshed===1);
   check('...and says so', toasts.some(t=>/approved/i.test(t)), JSON.stringify(toasts));
 
-  // ── once the server logs approvals ──
-  serverList=new Set(['approve_registration']); reset(null); refreshed=0;
-  await approveReg('p1',10000);
-  check('server-recorded: the approval still lands', DB.users.length===1 && !stillQueued());
-  check('...the page writes no entry of its own', acts.length===0, JSON.stringify(acts));
-  check('...and fetches the server\'s', refreshed===1);
-  reset(err('network down')); refreshed=0;
-  await approveReg('p1',10000);
-  check('...a failed approval fetches nothing', refreshed===0);
-  serverList=new Set();
 
   // ── a genuine double-approval ──
   // The RPC reuses the pending id as the new user id, so a second approval
@@ -118,7 +107,7 @@ const stillQueued=()=>DB.pending.some(p=>p.id==='p1');
           !toasts.some(t=>/already approved/i.test(t)), JSON.stringify(toasts));
     check('...the student stays in the queue', stillQueued(), JSON.stringify(DB.pending));
     check('...no account is created', DB.users.length===0);
-    check('...nothing is written to the activity log', acts.length===0);
+    check('...and nothing logged is fetched', refreshed===0);
     check('...and the admin is told to try again',
           toasts.some(t=>/try again/i.test(t)), JSON.stringify(toasts));
   }

@@ -401,9 +401,8 @@ const RPC = {
   rpc_session_tick: ()=>({session:DATA.jex_session[0], changed:false}),
   rpc_snapshot_jxi: ()=>({id:'ih-x', value:1125, ts:TS, created_at:new Date().toISOString()}),
   rpc_snapshot_nw: ()=>({id:'nw-x', user_id:'u-stu', nw:8583, cash:8500, portfolio:250, ts:TS, created_at:new Date().toISOString()}),
-  rpc_log_activity: (p)=>({id:'ac-x', type:p.p_type, description:p.p_description, ticker:p.p_ticker,
-    user_id:p.p_user_id, user_name:p.p_user_name, amount:p.p_amount, ts:TS, prev_hash:'abc12345',
-    entry_hash:'def67890', created_at:new Date().toISOString()}),
+  // Closed to the web since server_events_batch4.sql: the page must never call it.
+  rpc_log_activity: ()=>reject('permission denied for function rpc_log_activity','42501'),
   rpc_expire_day_orders: ()=>({expired:[]}),
   rpc_activate_after_hours_orders: ()=>({activated:[]}),
   rpc_match_limit_order_book: ()=>({matched:false}),
@@ -678,15 +677,21 @@ const RPC = {
   },
   // ── The instructor's own daily workflow ──────────────
   rpc_admin_save_session: (p)=>{
+    // Like the real function since server_events_batch2.sql: a real change of
+    // status is announced by the server to every approved student.
+    const was=DATA.jex_session[0].status;
     Object.assign(DATA.jex_session[0], p.p_data||{});
+    const now=DATA.jex_session[0].status;
+    if(now!==was&&(now==='open'||now==='closed')){
+      const msg=now==='open'?'🟢 Trading session is now open!':'🔴 Trading session has closed.';
+      for(const u of DATA.jex_users.filter(u=>u.role==='student'&&u.status==='approved'))
+        DATA.jex_notifications.push({id:'nt-'+(_tradeSeq++), user_id:u.id, type:'session', message:msg,
+          ticker:null, read:false, ts:TS, created_at:nowIso(), sent_by:'server'});
+    }
     return {session: DATA.jex_session[0]};
   },
-  rpc_push_notification: (p)=>{
-    const rec={id:'nt-'+(_tradeSeq++), user_id:p.p_user_id, type:p.p_type, message:p.p_message,
-      ticker:p.p_ticker||null, read:false, ts:TS, created_at:nowIso()};
-    DATA.jex_notifications.push(rec);
-    return rec;
-  },
+  // Closed to the web since server_events_batch4.sql: the page must never call it.
+  rpc_push_notification: ()=>reject('permission denied for function rpc_push_notification','42501'),
   rpc_push_notification_all: (p)=>{
     const made=[];
     for(const u of DATA.jex_users){

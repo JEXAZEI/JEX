@@ -138,4 +138,14 @@ called them and the `rpc_server_events()` switch.
   to the page's. Changes found along the way: the news box became
   rpc_notify_news_holders; companies are named by their base listing; a
   fund's order reads "Growth Fund placed...".
-- [ ] batch 4
+- [ ] batch 4 — `server_events_batch4.sql` written and tested on a Postgres 17
+  copy of production as it stands (batches 1-3 applied, the scheduler's and
+  the two writers' exact bodies): on production's code a timed close left a
+  day order open and a scheduled open left an after-hours order queued -- with
+  batch 4 both were handled and their owners told; scheduled changes logged
+  and noticed with no email; 8 simultaneous ticks closed the session once;
+  every session notice failing still left the log entry; both writers refused
+  to anon and authenticated. The page no longer writes or can write either
+  (no logActivity, pushNotification or server-events switch left; the browser
+  suite checks 1,530 calls a run for any attempt). **Run after
+  `check_server_events.sql` shows live server entries with nothing doubled.**

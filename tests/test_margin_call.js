@@ -131,10 +131,13 @@ check('a failure never stops the rest of the poll', /continue;\n      \}/.test(p
 // that another student was just bought in, and at what price.
 check('the toast is gated to the owner or an admin',
       /me\.id===r\.user_id\|\|isAdmin\(me\)/.test(poll), poll);
-check('...while the owner always gets the durable notification',
-      /pushNotification\(r\.user_id,'margin_call'/.test(poll));
+// The owner's notification is written by rpc_margin_call_short itself
+// (server_events_batch1.sql); the poll only fetches it.
+const b1=fs.readFileSync(path.join(__dirname,'..','sql','server_events_batch1.sql'),'utf8');
+check('...while the owner always gets the durable notification, from the server',
+      /afterServerEvent\(\)/.test(poll) && /perform jex_notify\(p_user, 'margin_call',/.test(b1));
 check('the notification says what it cost them',
-      /Loss '\+fmt\(Math\.abs\(r\.pnl\)\)/.test(poll), poll);
+      /'\)\. Loss ' \|\| jex_fmt\(abs\(p_pnl\)\)/.test(b1));
 
 // ── applying the result ──
 const apply=grabFn('applyMarginCallResult');

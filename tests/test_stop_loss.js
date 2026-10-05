@@ -50,18 +50,16 @@ const JANE={id:'u-jane',name:'Jane Smith',role:'student',cash:1000,holdings:{ACM
 const BOB ={id:'u-bob', name:'Bob Jones',role:'student',cash:1000,holdings:{}};
 const CHAIR={id:'u-adm',name:'Chairperson',role:'chairman',cash:0,holdings:{}};
 
-let toasts=[],notified=[],viewer=BOB;
+let toasts=[],viewer=BOB;
 global.toast=m=>{toasts.push(String(m));};
 global.fmt=n=>'$'+Number(n).toFixed(2);
 global.isOpen=()=>true;
 global.getUser=id=>[JANE,BOB,CHAIR].find(u=>u.id===id)||null;
 global.cu=()=>viewer;
 global.getCo=t=>DB.companies.find(c=>c.ticker===t)||null;
-global.pushNotification=async(uid,kind,msg)=>{notified.push({uid,kind,msg});};
-let logged=0;
-global.logActivity=async()=>{logged++;};
-let serverList=new Set(), refreshed=0;
-global.serverRecords=fn=>serverList.has(fn);
+// The owner's notification and the log entry are written by the server with
+// the sale (server_events_batch1.sql); the page fetches them.
+let refreshed=0;
 global.afterServerEvent=()=>{refreshed++;};
 global.pushTradeToSheets=()=>{};
 // Trades made locally go in at the FRONT of DB.trades, which is newest-first.
@@ -76,7 +74,7 @@ global.isAdmin=eval('('+grabConst('isAdmin').replace(/^const isAdmin=/,'').repla
 eval(grabFn('checkStopLossOrders'));
 
 const reset=()=>{
-  toasts=[];notified=[];
+  toasts=[];refreshed=0;
   global.DB={companies:[{ticker:'ACME',price:9.80,shares_avail:400,price_history:[]}],
     trades:[],
     stopLossOrders:[{id:'sl1',user_id:'u-jane',ticker:'ACME',trigger_price:10,status:'active'}]};
@@ -94,8 +92,7 @@ const reset=()=>{
         !toasts.some(t=>/9\.80/.test(t)), JSON.stringify(toasts));
   check('the sale still went through on the classmate’s poll',
         DB.stopLossOrders[0].status==='triggered');
-  check('...and the owner still gets the notification',
-        notified.length===1 && notified[0].uid==='u-jane', JSON.stringify(notified));
+  check('...and the server\'s notice to the owner is fetched', refreshed===1);
 
   // ── the owner is told ──
   viewer=JANE; reset();
@@ -113,25 +110,13 @@ const reset=()=>{
   check('...including whose it was', toasts.length===1 && /Jane/.test(toasts[0]),
         JSON.stringify(toasts));
 
-  // ── once the server records stop-losses (server_events_batch1.sql) ──
-  serverList=new Set(['rpc_trigger_stop_loss']);
-  viewer=BOB; reset(); logged=0; refreshed=0;
-  await checkStopLossOrders();
-  check('server-recorded: the sale still goes through', DB.stopLossOrders[0].status==='triggered');
-  check('...the page sends no notification of its own', notified.length===0, JSON.stringify(notified));
-  check('...and writes no log entry of its own', logged===0);
-  check('...and fetches what the server wrote', refreshed===1);
-  viewer=JANE; reset();
-  await checkStopLossOrders();
-  check('...and the owner is still told on screen', toasts.length===1, JSON.stringify(toasts));
-  serverList=new Set();
 
   // ── the engine itself still behaves ──
   viewer=BOB; reset();
   DB.companies[0].price=11;                       // above the trigger
   await checkStopLossOrders();
   check('an order whose price has not crossed is left alone',
-        DB.stopLossOrders[0].status==='active' && notified.length===0);
+        DB.stopLossOrders[0].status==='active' && refreshed===0);
 
   viewer=BOB; reset();
   global.sb={rpc:async()=>({triggered:false,reason:'no_shares_held'})};

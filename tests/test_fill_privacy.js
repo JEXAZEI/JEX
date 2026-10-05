@@ -50,7 +50,7 @@ const NOSY ={id:'u-nosy',name:'Nosy Parker',role:'student'};
 const CHAIR={id:'u-adm', name:'Chairperson',role:'chairman'};
 const FUND ={id:'f1',name:'Growth Fund',manager_id:'u-jane'};
 
-let viewer=NOSY, toasts=[], acts=[], notes=[];
+let viewer=NOSY, toasts=[];
 global.toast=m=>{toasts.push(String(m));};
 global.fmt=n=>'$'+Number(n).toFixed(2);
 global.isOpen=()=>true;
@@ -60,12 +60,11 @@ global.getFund=id=>id===FUND.id?FUND:null;
 global.getCo=t=>DB.companies.find(c=>c.ticker===t)||null;
 global.applyLimitMatchResult=()=>{};
 global.applyLimitPoolFillResult=(id)=>{const o=DB.limitOrders.find(x=>x.id===id);if(o)o.status='filled';};
-global.logActivity=async(...a)=>{acts.push(a);};
-global.pushNotification=async(...a)=>{notes.push(a);};
 // Before server_events_batch1.sql the page records fills itself; after it,
 // the server does and the page only refreshes. Both are exercised below.
-let serverList=new Set(), refreshed=0;
-global.serverRecords=fn=>serverList.has(fn);
+// The fill's log entry and the owner's notification are written by the
+// server with the fill (server_events_batch1.sql); the page fetches them.
+let refreshed=0;
 global.afterServerEvent=()=>{refreshed++;};
 global.isAdmin=eval('('+grabConst('isAdmin').replace(/^const isAdmin=/,'').replace(/;$/,'')+')');
 eval(grabFn('myFillSide'));
@@ -77,7 +76,7 @@ const bookMatch={matched:true,fill_qty:5,fill_price:11.01,ticker:'ACME',
   buyer_type:'user',buyer_id:'u-jane',seller_type:'user',seller_id:'u-bob',
   bid_order_id:'b1',ask_order_id:'a1'};
 const setup=(mode)=>{
-  served=0; toasts=[]; acts=[]; notes=[];
+  served=0; toasts=[]; refreshed=0;
   global.DB={companies:[{ticker:'ACME',price:11.01}],limitOrders:[
     {id:'b1',user_id:'u-jane',ticker:'ACME',side:'buy',qty:5,limit_price:11.01,status:'open'}]};
   global.sb={rpc:async(fn)=>{
@@ -108,8 +107,7 @@ const setup=(mode)=>{
   // record every fill regardless of who happened to be polling.
   viewer=NOSY; setup('book');
   await checkLimitOrders();
-  check('the fill is still written to the activity log', acts.length===1,
-        JSON.stringify(acts));
+  check('the fill the server logged is fetched, whoever polled', refreshed>0);
 
   // ── a pool fill ──
   for(const [who,label,shown] of [[NOSY,'an uninvolved classmate',false],
@@ -123,20 +121,8 @@ const setup=(mode)=>{
 
   viewer=NOSY; setup('pool');
   await checkLimitOrders();
-  check('the owner still gets the notification even when a stranger polled',
-        notes.length===1 && notes[0][0]==='u-jane', JSON.stringify(notes));
+  check('the owner\'s notification is fetched even when a stranger polled', refreshed>0);
 
-  // ── once the server records fills, the page writes nothing itself ──
-  serverList=new Set(['rpc_match_limit_order_book','rpc_fill_limit_vs_pool']);
-  for(const mode of ['book','pool']){
-    viewer=JANE; setup(mode); refreshed=0;
-    await checkLimitOrders();
-    check(mode+' fill recorded by the server: the page logs nothing', acts.length===0, JSON.stringify(acts));
-    check('...notifies nobody', notes.length===0, JSON.stringify(notes));
-    check('...fetches what the server wrote', refreshed>0);
-    check('...and still tells the owner on screen', toasts.length>0, JSON.stringify(toasts));
-  }
-  serverList=new Set();
 
   // ── a fund's manager counts as a participant ──
   check('a fund is mine when I manage it',
@@ -158,7 +144,7 @@ const setup=(mode)=>{
   // alert somebody else set is noise to everyone but them.
   eval(grabFn('checkPriceAlerts'));
   const setupAlert=()=>{
-    toasts=[]; notes=[];
+    toasts=[]; refreshed=0;
     global.DB={companies:[{ticker:'ACME',price:12}],
       priceAlerts:[{id:'a1',user_id:'u-jane',ticker:'ACME',direction:'above',target_price:11,triggered:false}]};
     global.sb={rpc:async()=>({triggered:true,user_id:'u-jane',ticker:'ACME',
@@ -174,9 +160,8 @@ const setup=(mode)=>{
   }
   viewer=NOSY; setupAlert();
   await checkPriceAlerts();
-  check('the alert still fires and notifies its owner from a stranger’s poll',
-        DB.priceAlerts[0].triggered===true && notes.length===1 && notes[0][0]==='u-jane',
-        JSON.stringify(notes));
+  check('the alert still fires from a stranger’s poll, and the server tells its owner',
+        DB.priceAlerts[0].triggered===true && refreshed>0);
   check('...and the target price is not shown to the stranger',
         !toasts.some(t=>/11/.test(t)), JSON.stringify(toasts));
 

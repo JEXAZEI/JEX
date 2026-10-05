@@ -31,22 +31,13 @@ check('leftover table grants revoked', /revoke truncate, trigger, references on 
 check('refuses unless the live body is the production version', /v_fp <> '7a38c217cc13a60d7ab3f4c3ff477fa8'/.test(sql));
 check('"already applied" marker is text only the new body contains', /position\('logged_by' in v_src\) > 0/.test(sql) && /logged_by/.test(body));
 
-// ── the app's calls fit the rules ──
-const fns=[...src.matchAll(/^(?:async )?function ([A-Za-z_]+)\(/gm)].map(m=>({at:m.index,name:m[1]}));
-const fnAt=at=>{let n='(top)';for(const f of fns){if(f.at<=at)n=f.name;else break;}return n;};
-const calls=[...src.matchAll(/logActivity\(\s*'([^']*)'/g)].map(m=>({type:m[1],fn:fnAt(m.index)}));
-check('found the app\'s activity calls', calls.length>=35, String(calls.length));
-for(const t of [...new Set(calls.map(c=>c.type))].sort())
-  check('"'+t+'" is a plain word the server accepts', /^[a-z_]{1,40}$/.test(t));
-const officerFns={setSession:/if\(!isChairman\(cu\(\)\)\)/,adjustStockPrice:/if\(!isChairman\(cu\(\)\)\)/,
-  adjustCash:/if\(!isAdmin\(cu\(\)\)\)/,adjustCompanyCash:/if\(!isAdmin\(cu\(\)\)\)/,
-  removeShareClass:/if\(!isAdmin\(cu\(\)\)\)/,doRestoreSnapshot:/if\(!isAdmin\(cu\(\)\)\)/,
-  postMinutes:/rpc_post_minutes/,approveReg:/approve_registration/};
-for(const c of calls.filter(c=>offList.includes(c.type))){
-  check(c.type+' is logged from '+c.fn+', which only an officer reaches', !!officerFns[c.fn]);
-  const at=src.search(new RegExp('^(?:async )?function '+c.fn+'\\(','m'));
-  if(officerFns[c.fn])check('...'+c.fn+' is gated before it logs', officerFns[c.fn].test(src.slice(at,at+2500)));
-}
+// ── the app writes nothing; the server's entries fit the rules ──
+check('the page never writes an activity entry itself', !/rpc_log_activity|logActivity\(/.test(src));
+const ev=['server_events_batch1.sql','server_events_batch2.sql','server_events_batch3.sql','server_events_batch4.sql']
+  .map(f=>fs.readFileSync(path.join(__dirname,'..','sql',f),'utf8')).join('\n');
+const types=[...new Set([...ev.matchAll(/jex_log\('([^']*)'/g)].map(m=>m[1]))].sort();
+check('found the server\'s entry types', types.length>=25, types.join(','));
+for(const t of types)check('"'+t+'" is a plain word', /^[a-z_]{1,40}$/.test(t));
 
 // ── the page ──
 function grab(name){

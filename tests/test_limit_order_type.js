@@ -44,7 +44,6 @@ global.getFund=()=>({name:'F'});
 global.logActivity=async()=>{};
 // Before the server-events migrations the page writes its own log and
 // notifications; these tests exercise that path.
-global.serverRecords=()=>false;
 global.afterServerEvent=()=>{};
 global.settleLimitOrder=async()=>{};
 global.pushBalances=()=>{};

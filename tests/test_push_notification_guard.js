@@ -1,10 +1,8 @@
 // rpc_push_notification let any signed-in account send any text to any
 // student, and email it from the exchange's own account. See
-// sql/push_notification_guard.sql. These checks keep the server's rules and
-// the app's calls in step, because a mismatch fails SILENTLY: the app swallows
-// notification errors, so a type the server refuses is simply never delivered.
-// That is exactly how 'margin_call' went undelivered from the day margin calls
-// shipped.
+// sql/push_notification_guard.sql. Since server_events_batch4.sql the web
+// cannot call it at all; the rules below still describe it, and the server's
+// own notifications are checked against them.
 const fs=require('fs'),path=require('path');
 const src=fs.readFileSync(path.join(__dirname,'..','app.js'),'utf8');
 const sql=fs.readFileSync(path.join(__dirname,'..','sql','push_notification_guard.sql'),'utf8');
@@ -19,41 +17,26 @@ const arr=name=>{
 const allowed=arr('v_allowed_types'),important=arr('v_important');
 const officerSends=arr('v_officer_sends'),officerReceives=arr('v_officer_receives');
 
-// Every type the app sends, with the function that sends it.
-const calls=[];
-const fnAt=i=>{
-  const before=src.slice(0,i);
-  const all=[...before.matchAll(/^(?:async )?function ([A-Za-z_]+)\(/gm)];
-  return all.length?all[all.length-1][1]:'(top level)';
-};
-for(const m of src.matchAll(/pushNotification(ToAll|ToHolders)?\(\s*(?:[^,()]+(?:\([^()]*\))?\s*,\s*)?'([a-z_]+)'/g)){
-  // pushNotification(user,'type',...)  pushNotificationToAll('type',...)  pushNotificationToHolders(ticker,'type',...)
-  calls.push({type:m[2],fn:fnAt(m.index)});
-}
-const types=[...new Set(calls.map(c=>c.type))].sort();
-check('found the app\'s notification calls', calls.length>=30, String(calls.length));
-
-for(const t of types)
-  check('the server accepts "'+t+'", which the app sends', allowed.includes(t));
-check('margin_call is accepted, and emailed', allowed.includes('margin_call')&&important.includes('margin_call'));
-
-// Officer-only types must only be sent from functions that officers alone reach.
-// Each of these is gated -- client-side and, for reviewIPO/postMinutes, by the
-// RPC it calls first -- so a student's browser never gets as far as sending.
-const officerOnlyFns=['setSession','togglePracticeMode','adjustStockPrice','reviewIPO','relistCompany','postMinutes'];
-for(const c of calls.filter(c=>officerSends.includes(c.type)))
-  check(c.type+' is sent from '+c.fn+', which only an officer reaches', officerOnlyFns.includes(c.fn));
-const gate={setSession:/if\(!isChairman\(cu\(\)\)\)/,togglePracticeMode:/if\(!isAdmin\(cu\(\)\)\)/,
-  adjustStockPrice:/if\(!isChairman\(cu\(\)\)\)/,relistCompany:/if\(!isAdmin\(cu\(\)\)\)/,
-  reviewIPO:/rpc_review_ipo/,postMinutes:/rpc_post_minutes/};
-for(const [fn,re] of Object.entries(gate)){
-  const i=src.search(new RegExp('^(?:async )?function '+fn+'\\(','m'));
-  check(fn+' is gated before it notifies', i>=0&&re.test(src.slice(i,i+900)));
-}
-
-// Officer-addressed types go only to officers.
-for(const m of src.matchAll(/const admins=DB\.users\.filter\(u2=>u2\.role==='chairman'\|\|u2\.role==='president'\);\s*for\(const a of admins\)\{\s*await pushNotification\(a\.id,'([a-z_]+)'/g))
-  check(m[1]+' is addressed to the Chairman and President', officerReceives.includes(m[1]));
+// The app no longer sends notifications at all: every one is written by the
+// database function that did the thing (server_events_batch1-4.sql), and
+// rpc_push_notification is closed to the web. What used to be checked against
+// the app's calls is now checked against the server's.
+check('the page never sends a notification itself', !/rpc_push_notification|pushNotification\w*\(/.test(src));
+const ev=['server_events_batch1.sql','server_events_batch2.sql','server_events_batch3.sql','server_events_batch4.sql']
+  .map(f=>fs.readFileSync(path.join(__dirname,'..','sql',f),'utf8')).join('\n');
+// The type is the second argument of jex_notify and jex_notify_holders, the
+// first of jex_notify_students.
+const sent=[...new Set([
+  ...[...ev.matchAll(/jex_notify(?:_holders)?\((?:[^,()]|\([^()]*\))+,\s*'([a-z_]+)'/g)].map(m=>m[1]),
+  ...[...ev.matchAll(/jex_notify_students\(\s*'([a-z_]+)'/g)].map(m=>m[1])])].sort();
+check('found the server\'s notification types', sent.length>=20, sent.join(','));
+for(const t of sent)check('"'+t+'" is a type the exchange already knew', allowed.includes(t)||t==='squeeze');
+const imp=(ev.match(/v_important text\[\] := array\[([^\]]*)\]/)||[])[1]||'';
+check('the server emails exactly the types the guard emailed',
+      JSON.stringify(imp.match(/'([a-z_]+)'/g).map(x=>x.slice(1,-1)).sort())===JSON.stringify(important.slice().sort()));
+check('...and a squeeze alert is not one of them', !important.includes('squeeze') && !imp.includes("'squeeze'"));
+const b4=fs.readFileSync(path.join(__dirname,'..','sql','server_events_batch4.sql'),'utf8');
+check('the web cannot call rpc_push_notification', /public\.rpc_push_notification\(text,text,text,text\) from public, anon, authenticated/.test(b4));
 
 // The email.
 check('email from a non-officer to someone else carries no student-written text',

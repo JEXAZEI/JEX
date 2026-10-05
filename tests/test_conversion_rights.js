@@ -228,7 +228,8 @@ check('it updates both share counts from the RPC result',
       /cls\.shares=r2\.class_shares/.test(conv)&&/parent\.shares=r2\.parent_shares/.test(conv));
 check('it touches neither price -- a conversion is a swap, not a dilution',
       !/\.price=/.test(conv));
-check('it logs the conversion to the audit trail', /logActivity\('class_convert'/.test(conv));
+// The conversion is logged by rpc_convert_share_class itself (server_events_batch1.sql).
+check('it fetches the conversion the server logged', /afterServerEvent\(\)/.test(conv));
 
 console.log('\n=== the shareholders table ===');
 // Summing raw share counts across classes is a mixed unit the moment a ratio is

@@ -17,8 +17,8 @@
 -- chain_breaks_24h     entries whose "previous" link does not point at the
 --                      entry before them. Should be 0.
 -- page_still_writing   entries written by browsers in the last day, by type.
---                      After batch 3 this should only ever be types no
---                      migration covers; batch 4 waits until it is empty.
+--                      Should be empty: since batch 3 the page writes no
+--                      entries, and after batch 4 it cannot.
 -- ============================================================
 select jsonb_pretty(jsonb_build_object(
 

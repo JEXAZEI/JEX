@@ -36,7 +36,7 @@ check('the Treasurer-approved path applies the drop too',
       /const dropsA=applyExDividend\(r\)\?r\.new_prices:null;/.test(src),
       'the largest dividends in the app are the ones that go through that path');
 check('the direct path applies the drop',
-      /const drops=r\.new_prices\|\|null;\s*\n\s*applyExDividend\(r\);/.test(src));
+      /\n\s*applyExDividend\(r\);\s*\n\s*afterServerEvent\(\);/.test(src));
 check('the preview counts the student-run funds',
       /const fundCut=fundDividendCut\(allT,perShare\);/.test(src));
 check('...and adds them into the total the decisions are made from',

@@ -1300,28 +1300,19 @@ ${PRELUDE}
     return DB.limitOrders.length+' orders';
   });
 
-  // Batch 3: placing an order is logged by the page before the migration and
-  // by the server after it -- never both.
-  await step('a placed order is logged once: by the page before batch 3, by the server after', async ()=>{
-    const keep=SERVER_EVENTS;
-    const place=async()=>{
-      _lastOrderTime[UI.userId]=0;
-      const n0=stub.rpcCalls.length;
-      await placeLimitOrder('ACME','buy',1,1.25,null);
-      await new Promise(r=>setTimeout(r,700));
-      return stub.rpcCalls.slice(n0).map(c=>c.fn==='rpc_log_activity'?'log:'+c.params.p_type:c.fn);
-    };
-    try{
-      SERVER_EVENTS=new Set();
-      const before=await place();
-      if(!before.includes('log:limit_order')) throw new Error('before batch 3 the page did not log: '+before.join(','));
-      SERVER_EVENTS=new Set(['rpc_place_limit_order']);
-      const after=await place();
-      if(!after.includes('rpc_place_limit_order')) throw new Error('no order placed: '+after.join(','));
-      if(after.includes('log:limit_order')) throw new Error('the page logged it too: '+after.join(','));
-      if(!after.includes('rpc_get_my_notifications')) throw new Error('what the server wrote was never fetched: '+after.join(','));
-      return 'before: '+before.filter(x=>x.startsWith('log:')).join(',')+' | after: none from the page';
-    } finally { SERVER_EVENTS=keep; }
+  // The server logs a placed order (server_events_batch3.sql); the page only
+  // fetches it, and can no longer write the log at all.
+  await step('a placed order is logged by the server, never by the page', async ()=>{
+    _lastOrderTime[UI.userId]=0;
+    const n0=stub.rpcCalls.length;
+    await placeLimitOrder('ACME','buy',1,1.25,null);
+    await new Promise(r=>setTimeout(r,700));
+    const calls=stub.rpcCalls.slice(n0).map(c=>c.fn);
+    if(!calls.includes('rpc_place_limit_order')) throw new Error('no order placed: '+calls.join(','));
+    const own=calls.filter(f=>f==='rpc_log_activity'||f==='rpc_push_notification');
+    if(own.length) throw new Error('the page wrote '+own.join(','));
+    if(!calls.includes('rpc_get_my_notifications')) throw new Error('what the server wrote was never fetched: '+calls.join(','));
+    return calls.join(' > ');
   });
 
   await step('a vote is cast with the right voting power', async ()=>{
@@ -1518,64 +1509,41 @@ ${PRELUDE}
     return expUnits+' units @ NAV '+nav0;
   });
 
-  // sql/server_events_batch1.sql: once a function writes its own log entry
-  // and notifications, the page must not write a second copy -- and before the
-  // migration (an empty list) it must keep writing its own.
-  await step('a deposit is logged once: by the page before the migration, by the server after', async ()=>{
-    const keep=SERVER_EVENTS;
-    const callsDuring=async()=>{
-      UI.userId='u-stu2';
-      // The page's own spacing between money moves would refuse the second.
-      _lastOrderTime['u-stu2']=0;
-      const n0=stub.rpcCalls.length;
-      await depositToFund('f-1', 25);
-      await new Promise(r=>setTimeout(r,700));
-      // Other polls run meanwhile (limit fills log too), so only deposit
-      // entries count.
-      return stub.rpcCalls.slice(n0).map(c=>c.fn==='rpc_log_activity'?'log:'+(c.params&&c.params.p_type):c.fn);
-    };
-    try{
-      SERVER_EVENTS=new Set();
-      const before=await callsDuring();
-      if(!before.includes('log:fund_deposit')) throw new Error('before the migration the page did not log: '+before.join(','));
-      SERVER_EVENTS=new Set(['rpc_fund_deposit']);
-      const after=await callsDuring();
-      if(!after.includes('rpc_fund_deposit')) throw new Error('no deposit was made: '+after.join(','));
-      if(after.includes('log:fund_deposit')) throw new Error('the page logged it too: '+after.join(','));
-      if(!after.includes('rpc_get_my_notifications')) throw new Error('what the server wrote was never fetched: '+after.join(','));
-      return 'before: '+before.join(' > ')+' | after: '+after.join(' > ');
-    } finally { SERVER_EVENTS=keep; }
+  // A deposit is logged by rpc_fund_deposit itself (server_events_batch1.sql).
+  await step('a deposit is logged by the server, never by the page', async ()=>{
+    UI.userId='u-stu2';
+    // The page's own spacing between money moves would refuse a second one.
+    _lastOrderTime['u-stu2']=0;
+    const n0=stub.rpcCalls.length;
+    await depositToFund('f-1', 25);
+    await new Promise(r=>setTimeout(r,700));
+    const calls=stub.rpcCalls.slice(n0).map(c=>c.fn);
+    if(!calls.includes('rpc_fund_deposit')) throw new Error('no deposit was made: '+calls.join(','));
+    const own=calls.filter(f=>f==='rpc_log_activity'||f==='rpc_push_notification');
+    if(own.length) throw new Error('the page wrote '+own.join(','));
+    if(!calls.includes('rpc_get_my_notifications')) throw new Error('what the server wrote was never fetched: '+calls.join(','));
+    return calls.join(' > ');
   });
 
-  // Batch 2: an officer's halt and resume. Before the migration the page logs
-  // and notifies every student itself; after it, none of that comes from the
-  // page, and the officer's activity list is refreshed from the server.
-  await step('a halt and resume are recorded once: by the page before batch 2, by the server after', async ()=>{
-    const keep={ev:SERVER_EVENTS, user:UI.userId, confirm:window.confirm};
-    const run=async()=>{
+  // An officer's halt and resume are logged and announced by the functions
+  // themselves (server_events_batch2.sql); the officer's activity list is
+  // refreshed from the server.
+  await step('a halt and resume are recorded by the server, never by the page', async ()=>{
+    const keep={user:UI.userId, confirm:window.confirm};
+    try{
+      UI.userId='u-chair'; window.confirm=()=>true;
       const n0=stub.rpcCalls.length;
       await haltStock('ACME','Checking a news report');
       await resumeStock('ACME');
       await new Promise(r=>setTimeout(r,700));
-      return stub.rpcCalls.slice(n0).map(c=>c.fn==='rpc_log_activity'?'log:'+c.params.p_type
-        :c.fn==='rpc_push_notification'?'notify:'+c.params.p_type:c.fn);
-    };
-    try{
-      UI.userId='u-chair'; window.confirm=()=>true;
-      SERVER_EVENTS=new Set();
-      const before=await run();
-      if(!before.includes('log:halt')||!before.includes('log:resume')) throw new Error('before batch 2 the page did not log: '+before.join(','));
-      if(!before.includes('notify:halt')) throw new Error('before batch 2 nobody was told: '+before.join(','));
-      SERVER_EVENTS=new Set(['rpc_admin_halt_stock','rpc_admin_resume_stock']);
-      const after=await run();
-      if(!after.includes('rpc_admin_halt_stock')||!after.includes('rpc_admin_resume_stock')) throw new Error('no halt or resume: '+after.join(','));
-      const own=after.filter(x=>x==='log:halt'||x==='log:resume'||x==='notify:halt'||x==='notify:resume');
-      if(own.length) throw new Error('the page still wrote '+own.join(','));
-      if(!after.includes('rpc_admin_list_activity')) throw new Error("the officer's activity list was not refreshed: "+after.join(","));
+      const calls=stub.rpcCalls.slice(n0).map(c=>c.fn);
+      if(!calls.includes('rpc_admin_halt_stock')||!calls.includes('rpc_admin_resume_stock')) throw new Error('no halt or resume: '+calls.join(','));
+      const own=calls.filter(f=>f==='rpc_log_activity'||f==='rpc_push_notification');
+      if(own.length) throw new Error('the page wrote '+own.join(','));
+      if(!calls.includes('rpc_admin_list_activity')) throw new Error("the officer's activity list was not refreshed: "+calls.join(','));
       if(isHalted('ACME')) throw new Error('ACME left halted');
-      const n=x=>before.filter(y=>y===x).length;
-      return 'before: '+n('log:halt')+' halt log, '+n('notify:halt')+' halt notices | after: none from the page';
-    } finally { SERVER_EVENTS=keep.ev; UI.userId=keep.user; window.confirm=keep.confirm; render(); }
+      return calls.filter(f=>!/^rpc_(match|fill|snapshot)/.test(f)).join(' > ');
+    } finally { UI.userId=keep.user; window.confirm=keep.confirm; render(); }
   });
 
   await step('depositing into a fund does not destroy net worth', async ()=>{
@@ -2950,6 +2918,15 @@ ${PRELUDE}
     if(secrets.length) throw new Error('password material reached the client for '+
       secrets.map(u=>u.username).join(','));
     return withEmail.length+' of '+DB.users.length+' rows carry an email (own only)';
+  });
+
+  // Since server_events_batch4.sql the web cannot write the activity log or
+  // notifications. A call would be refused and swallowed, so look for it over
+  // everything this run has done -- every page, role, trade and fuzz step.
+  await step('nothing in the whole run tried to write the log or a notification', ()=>{
+    const bad=stub.rpcCalls.filter(c=>c.fn==='rpc_log_activity'||c.fn==='rpc_push_notification');
+    if(bad.length) throw new Error(bad.length+' calls: '+bad.slice(0,3).map(c=>c.fn+'('+((c.params||{}).p_type||'')+')').join(', '));
+    return stub.rpcCalls.length+' calls checked';
   });
 
   await step('logout renders the login screen', ()=>{

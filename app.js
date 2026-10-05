@@ -580,7 +580,6 @@ async function loadAll(){
     // to render a list nobody scrolls to the bottom of.
     sb.get('jex_announcements','order=created_at.desc&limit=100'),
     sb.get('jex_halts','order=created_at.asc'),
-    loadServerEvents(),   // never throws; see SERVER_EVENTS
   ]);
   // Apply phase 1 immediately so login renders fast
   DB.users=users;
@@ -1648,8 +1647,7 @@ async function reviewDivApproval(id,approve){
     catch(e){return toast(rpcErrorMessage(e));}
     if(!r.rejected)return toast('This request was already reviewed');
     da.status='rejected';da.approved_by=u.name;
-    if(serverRecords('rpc_reject_dividend_approval'))afterServerEvent();
-    else await pushNotification(da.requested_by,'div_approval','❌ Your dividend request for '+da.company_name+' was rejected by the Treasurer.',da.ticker);
+    afterServerEvent();
     toast('Dividend rejected');render();return;
   }
   // Approving DOES move money -- rpc_pay_dividend does its own atomic claim
@@ -1671,11 +1669,7 @@ async function reviewDivApproval(id,approve){
   // through here -- so it was the largest drops that went unshown.
   const dropsA=applyExDividend(r)?r.new_prices:null;
   if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker:da.ticker,company_name:da.company_name,per_share:da.per_share,total:r.total,note:da.note||'Treasurer-approved dividend',payouts:r.payouts,jxi_pass_through:r.jxi_pass_through||[],ts:ts()});
-  if(serverRecords('rpc_pay_dividend'))afterServerEvent();
-  else{
-    await logActivity('dividend',da.company_name+' paid dividend '+fmt(da.per_share)+'/share — total '+fmt(r.total),{ticker:da.ticker,userId:r.owner_id,userName:u.name,amount:r.total});
-    await pushNotificationToHolders(da.ticker,'dividend','💰 '+da.company_name+' paid a dividend of '+fmt(da.per_share)+'/share');
-  }
+  afterServerEvent();
   pushBalances();
   toast(da.company_name+' paid '+fmt(da.per_share)+'/share (Treasurer-approved)'
     +(dropsA&&dropsA[da.ticker]!=null
@@ -1724,8 +1718,7 @@ async function togglePracticeMode(){
     }
     await saveSession({practice_mode:now,practice_snapshot_id:null});
   }
-  if(serverRecords('rpc_admin_save_session'))afterServerEvent();
-  else await pushNotificationToAll('session',now?'🎮 Practice mode started — trades do not count toward rankings.':'✅ Practice mode ended — real trading resumes.');
+  afterServerEvent();
   toast(now?'Practice mode ON':'Practice mode OFF');render();
 }
 // Locks the exchange to Chairman/President and explicitly-flagged test
@@ -1774,7 +1767,7 @@ async function saveEmailJSConfig(){
 // to any client after this -- rpc_admin_save_email_secret only ever tells
 // the caller back whether one is set (jex_session.emailjs_secret_configured),
 // never the value itself. Needed because sending now happens server-side
-// (rpc_push_notification via pg_net), which EmailJS requires the private
+// (jex_notify via pg_net), which EmailJS requires the private
 // key for since there's no browser Origin header to satisfy its default
 // same-origin check.
 async function saveEmailJSSecret(){
@@ -1868,8 +1861,7 @@ async function doRestoreSnapshot(snapshotId){
   catch(e){toast(rpcErrorMessage(e));return false;}
   DB.limitOrders=DB.limitOrders.filter(o=>o.status!=='open'&&o.status!=='after_hours');
   DB.stopLossOrders=[];
-  if(serverRecords('rpc_admin_restore_snapshot'))afterServerEvent();
-  else await logActivity('snapshot','Snapshot restored: '+snap.label,{userId:cu()?.id,userName:cu()?.name});
+  afterServerEvent();
   await loadAll();
   const tradesMsg=r&&r.removed_trades?' ('+r.removed_trades+' trade'+(r.removed_trades!==1?'s':'')+' rolled back)':'';
   toast('✓ Snapshot restored: '+snap.label+tradesMsg);
@@ -2097,7 +2089,6 @@ async function pushBalances(){
   }));
   await pushToSheets('companies',{rows:companyRows});
 }
-let _sessionOpenedAt=null;
 async function setSession(status){
   if(!isChairman(cu()))return toast('Only the Chairman or President can control the trading session');
   const label=status==='open'?'Session open':status==='paused'?'Session paused':'Session closed';
@@ -2107,45 +2098,13 @@ async function setSession(status){
   const overriding=DB.session.weekly_active&&status!=='open';
   await saveSession({status,label,ends_at:null,scheduled_open:null,scheduled_close:null,weekly_active:false,weekly_override:overriding?true:DB.session.weekly_override});
   const u=cu();
-  let description='Session '+status+(u?' by '+u.name:'');
-  if(status==='closed'&&_sessionOpenedAt){
-    const mins=Math.round((Date.now()-_sessionOpenedAt)/60000);
-    description+=' — ran for '+mins+' minute'+(mins!==1?'s':'');
-    _sessionOpenedAt=null;
-  }
-  if(status==='open')_sessionOpenedAt=Date.now();
-  // The server logs the change and tells everyone when the status really
-  // changes (server_events_batch2.sql); the page does it only before that.
-  const serverSession=serverRecords('rpc_admin_save_session');
-  if(serverSession)afterServerEvent();
-  else await logActivity('session',description,{userId:u?.id,userName:u?.name});
+  // The server logs the change -- with how long the session ran -- and tells
+  // everyone, when the status really changes (rpc_admin_save_session).
+  afterServerEvent();
   if(status==='open'){
-    if(!serverSession){
-      await pushNotificationToAll('session','🟢 Trading session is now open!');
-      // Role-specific officer notifications
-      for(const officer of DB.users.filter(x=>['secretary','treasurer','compliance_officer'].includes(x.role))){
-        const msgs={
-          secretary:'📋 Session opened — post any meeting minutes or official notices now.',
-          treasurer:'💰 Session opened — monitor company cash levels and dividend activity.',
-          compliance_officer:'🔍 Session opened — watch for unusual trading patterns or price anomalies.'
-        };
-        await pushNotification(officer.id,'session',msgs[officer.role]||'🟢 Session opened');
-      }
-    }
     activateAfterHoursOrders();recordSessionOpenPrices();
   }
   if(status==='closed'){
-    if(!serverSession){
-      await pushNotificationToAll('session','🔴 Trading session has closed.');
-      for(const officer of DB.users.filter(x=>['secretary','treasurer','compliance_officer'].includes(x.role))){
-        const msgs={
-          secretary:'📋 Session closed — prepare and post meeting minutes for today\'s session.',
-          treasurer:'📊 Session closed — review the cash flow report and check for budget warnings.',
-          compliance_officer:'🔍 Session closed — review the activity log for any suspicious patterns.'
-        };
-        await pushNotification(officer.id,'session',msgs[officer.role]||'🔴 Session closed');
-      }
-    }
     // Expire day orders. Runs server-side (rpc_expire_day_orders), which
     // re-checks that the session really is closed and does the whole batch
     // in one statement -- the raw status patch here ran against an open
@@ -2153,18 +2112,12 @@ async function setSession(status){
     // any student's order at any time.
     let expired=[];
     try{expired=(await sb.rpc('rpc_expire_day_orders',{}))?.expired||[];}catch(e){console.warn('Expire day orders failed:',e);}
-    const serverExpiry=serverRecords('rpc_expire_day_orders');
     for(const o of expired){
       const local=DB.limitOrders.find(x=>x.id===o.id);if(local)local.status='expired';
-      if(!serverExpiry)await pushNotification(o.user_id,'limit_fill','📋 Day order expired at session close: '+o.qty+'×'+o.ticker+' @ '+fmt(o.limit_price),o.ticker);
     }
-    if(serverExpiry&&expired.length)afterServerEvent();
+    if(expired.length)afterServerEvent();
     if(expired.length)toast(expired.length+' day order'+(expired.length!==1?'s':'')+' expired at session close');
-    // Freeze leaderboard snapshot
-    const students2=DB.users.filter(s=>s.role==='student'&&s.status==='approved');
-    const snapshot=students2.map(s=>({name:s.name,nw:nw(s),id:s.id,classroom_id:s.classroom_id,sharpe:calcSharpe(s.id)})).sort((a,b)=>b.nw-a.nw);
-    await saveSession({leaderboard_snapshot:snapshot});
-    // Freeze leaderboard
+    // Freeze leaderboard (it was saved twice, identically)
     const lbStudents=DB.users.filter(s=>s.role==='student'&&s.status==='approved');
     const lbSnap2=lbStudents.map(s=>({name:s.name,nw:nw(s),id:s.id,classroom_id:s.classroom_id,sharpe:calcSharpe(s.id)})).sort((a,b)=>b.nw-a.nw);
     await saveSession({leaderboard_snapshot:lbSnap2});
@@ -2495,7 +2448,6 @@ async function autoRefresh(){
   const minGap=realtimeHealthy()?60000:18000;
   if(now-_lastRefresh<minGap)return;
   _lastRefresh=now;
-  if(!_serverEventsKnown)loadServerEvents();
   try{
     // Only reload lightweight tables that change frequently
     const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports,newFunds,newUsers]=await Promise.all([
@@ -3122,8 +3074,7 @@ async function approveReg(id,startCash){
       +' They are still waiting, so try again.');
   }
   DB.users.push(u);DB.pending=DB.pending.filter(x=>x.id!==id);
-  if(serverRecords('approve_registration'))afterServerEvent();
-  else await logActivity('registration',r.name+' approved ('+r.role+') with '+fmt(startCash),{userId:r.id,userName:r.name,amount:startCash});
+  afterServerEvent();
 
   toast(r.name+' approved with '+fmt(startCash));render();
 }
@@ -3509,14 +3460,10 @@ async function postNews(ticker,headline,body){
   catch(e){return toast(rpcErrorMessage(e));}
   DB.news.unshift(rec);
   if(document.getElementById('news-notify')?.checked){
-    // Since server_events_batch3.sql the server tells holders, from the stored
-    // article: the author only, within 10 minutes of posting, once.
-    const serverNews=serverRecords('rpc_notify_news_holders');
-    if(serverNews){
-      try{const n=await sb.rpc('rpc_notify_news_holders',{p_news_id:rec.id});if(n&&n.sent)afterServerEvent();}
-      catch(e){toast('News posted, but shareholders could not be notified — '+rpcErrorMessage(e));}
-    }
-    if(!serverNews)await pushNotificationToHolders(ticker,'news','📰 '+co.name+': '+headline.trim());
+    // The server tells holders, from the stored article: the author only,
+    // within 10 minutes of posting, once (rpc_notify_news_holders).
+    try{const n=await sb.rpc('rpc_notify_news_holders',{p_news_id:rec.id});if(n&&n.sent)afterServerEvent();}
+    catch(e){toast('News posted, but shareholders could not be notified — '+rpcErrorMessage(e));}
   }
   clearDraft('news-body');toast('News posted');UI.companyTab='news';render();
 }
@@ -3535,32 +3482,13 @@ async function deleteNews(id){
 }
 
 // ── Events the server records itself ────────────────────
-// Since sql/server_events_batch1.sql, a function that moves money or shares
-// writes its own activity entry and notifications, in the same transaction,
-// from what it actually did -- the page used to describe the result after
-// the fact, so a browser could describe a fill or a dividend that never
-// happened. The server names those functions (rpc_server_events) and the page
-// skips its own copy for exactly those, so each event is recorded once
-// whichever version of the SQL is live: before the migration the list is
-// empty and the page records everything, as it always has.
-// Until the server has answered, autoRefresh asks again: a tab whose first
-// ask failed on a blip would otherwise write a second copy of every event for
-// as long as it stays open, and a tab open while the migration is run picks
-// the list up without a reload.
-let SERVER_EVENTS=new Set(), _serverEventsKnown=false;
-async function loadServerEvents(){
-  try{
-    const r=await sb.rpc('rpc_server_events',{});
-    SERVER_EVENTS=new Set(Array.isArray(r)?r:[]);
-    _serverEventsKnown=Array.isArray(r);
-  }catch(e){/* not deployed yet, or unreachable: the page records everything */}
-}
-function serverRecords(fn){return SERVER_EVENTS.has(fn);}
-// The entry and notifications the server just wrote are not in this page's
-// copy -- logActivity/pushNotification used to put them there. Fetch them
-// once, shortly after (a matching sweep can settle many orders in a row), and
-// fire the browser push for anything new addressed to this user, which is what
-// pushNotification did when this tab wrote it.
+// Every activity entry and notification is written by the database function
+// that did the thing, in the same transaction, from what it actually did
+// (sql/server_events_batch1-4.sql). The browser cannot write either any more.
+// What the server just wrote is not in this page's copy, so it is fetched
+// once, shortly after (a matching sweep can settle many orders in a row): the
+// activity list for officers, and this user's notifications -- with the
+// browser push for anything new addressed to them.
 let _serverEventTimer=null;
 function afterServerEvent(){
   if(_serverEventTimer)return;
@@ -3571,7 +3499,11 @@ function afterServerEvent(){
       isAdmin(cu())?safeRpc('rpc_admin_list_activity',{p_limit:100}):null,
       UI.userId?safeRpc('rpc_get_my_notifications',{p_limit:50}):null,
     ]);
-    if(Array.isArray(act))DB.activity=act;
+    if(Array.isArray(act)){
+      DB.activity=act;
+      // The Sheets activity tab used to be fed by each browser's own entries.
+      pushToSheets('activity',{items:act.slice(0,10)});
+    }
     if(Array.isArray(notes)){
       DB.notifications=notes;
       for(const n of notes)
@@ -3582,27 +3514,6 @@ function afterServerEvent(){
       else{const tb=document.querySelector('.user-pill');if(tb)tb.outerHTML=renderTopbar();}
     }
   },400);
-}
-
-// ── Activity log ────────────────────────────────────────
-async function logActivity(type,description,extras={}){
-  try{
-    // The audit trail's hash chain is built server-side (rpc_log_activity).
-    // It used to be computed here, in the browser, against DB.activity's
-    // local copy -- tamper-evidence produced by the party you are guarding
-    // against is not evidence, and the open INSERT grant meant rows could
-    // be planted with any prev_hash/entry_hash the caller liked. user_id
-    // and user_name stay parameters because the log records who an entry
-    // is ABOUT, which is often not the caller (an admin approving a
-    // student's IPO logs it against the student).
-    const rec=await sb.rpc('rpc_log_activity',{p_type:type,p_description:description,
-      p_ticker:extras.ticker||null,p_user_id:extras.userId||null,
-      p_user_name:extras.userName||null,p_amount:extras.amount??null});
-    if(!rec)return;
-    DB.activity.unshift(rec);
-    if(DB.activity.length>200)DB.activity=DB.activity.slice(0,200);
-    pushToSheets('activity',{items:DB.activity.slice(0,10)});
-  }catch(e){console.warn('Activity log failed:',e);}
 }
 
 // ── Announcements ───────────────────────────────────────
@@ -3617,8 +3528,7 @@ async function postAnnouncement(title,body,level){
   try{rec=await sb.rpc('rpc_post_announcement',{p_title:title.trim(),p_body:(body||'').trim(),p_level:level||'info'});}
   catch(e){return toast(rpcErrorMessage(e));}
   if(rec)DB.announcements.unshift(rec);   // see postSessionRecap: never store a null
-  if(serverRecords('rpc_post_announcement'))afterServerEvent();
-  else await logActivity('announcement','Announcement posted: '+title.trim(),{userId:u.id,userName:u.name});
+  afterServerEvent();
   clearDraft('ann-body');toast('Announcement posted');render();
 }
 async function deleteAnnouncement(id){
@@ -3677,31 +3587,14 @@ async function respondToInvite(memberId,accept){
   m.status=accept?'accepted':'declined';
 
   const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
-  const u=cu();
   if(accept&&co)_teamContactsLoaded.delete(co.ticker);
 
-  const serverInvite=serverRecords('rpc_respond_to_invite');
-  if(serverInvite)afterServerEvent();
+  afterServerEvent();
   if(accept&&co){
     // jex_company_members is already patched above — that's the source of truth
     // No need to also patch co.founders
-    if(!serverInvite){
-      await logActivity('cofound',u.name+' joined '+co.name+' as a founder',{ticker:co.ticker,userId:u.id,userName:u.name});
-      await pushNotification(
-        m.company_user_id,'invite',
-        '✅ '+u.name+' accepted your founder invitation and has joined '+co.name+'!',
-        co.ticker
-      );
-    }
     toast('You joined '+co.name+' as a founder!');
   } else if(!accept&&co){
-    if(!serverInvite){
-      await pushNotification(
-        m.company_user_id,'invite',
-        '❌ '+u.name+' declined your founder invitation for '+co.name+'.',
-        co.ticker
-      );
-    }
     toast('Invitation declined');
   }
   render();
@@ -3738,8 +3631,7 @@ async function requestFounderAllocation(ticker,studentId,shares,reason){
   try{
     rec=await sb.rpc('rpc_request_founder_allocation',{p_ticker:ticker,p_student_id:studentId,p_shares:shares,p_reason:reason||''});
     DB.founderAllocations.unshift(rec);   // newest first, as loaded
-    if(serverRecords('rpc_request_founder_allocation'))afterServerEvent();
-    else await logActivity('founder_alloc',companyName+' requested '+shares+' '+classLabel+' founder shares for '+student.name,{ticker});
+    afterServerEvent();
     toast('✓ Allocation request submitted: '+shares+'×'+ticker+' for '+student.name);
     render();
   }catch(err){
@@ -3778,15 +3670,10 @@ async function reviewFounderAllocation(id,approve){
     const localStudent=getUser(a.student_id);
     if(localStudent)localStudent.holdings=r.holdings;
     const co=getCo(a.ticker);if(co)co.shares_avail=r.shares_avail;
-    if(serverRecords('rpc_review_founder_allocation'))afterServerEvent();
-    else{
-      await pushNotification(a.student_id,'founder_alloc','🎁 '+a.shares+' founder shares of '+a.company_name+' ('+a.ticker+') have been added to your portfolio!',a.ticker);
-      await logActivity('founder_alloc',a.student_name+' granted '+a.shares+' founder shares of '+a.company_name,{ticker:a.ticker,amount:a.shares});
-    }
+    afterServerEvent();
     toast('✓ '+a.student_name+' granted '+a.shares+'×'+a.ticker+' — portfolio updated');
   } else {
-    if(serverRecords('rpc_review_founder_allocation'))afterServerEvent();
-    else await pushNotification(a.student_id,'founder_alloc','❌ Your founder share request for '+a.shares+'×'+a.ticker+' in '+a.company_name+' was rejected.');
+    afterServerEvent();
     toast('Allocation rejected');
   }
   render();
@@ -3822,14 +3709,7 @@ async function adjustStockPrice(ticker,pct,reason){
   if(r.session_open_prices)DB.session.session_open_prices=r.session_open_prices;
   const rec={id:uid(),ticker,company_name:co.name,pct,old_price:r.old_price,new_price:r.price,reason:(reason||'').trim(),applied_by:u.name,ts:ts()};
   if(!DB.priceAdjustments)DB.priceAdjustments=[];DB.priceAdjustments.unshift(rec);
-  const msg=(pct>=0?'📈':'📉')+' '+co.name+' ('+ticker+') price '+(pct>=0?'boosted by +':'cut by ')+Math.abs(pct)+'%'+(reason?' — '+reason.trim():'');
-  const holderIds=DB.users.filter(hu=>hu.role==='student'&&(holdings(hu)[ticker]||0)>0).map(hu=>hu.id);
-  if(serverRecords('rpc_adjust_stock_price'))afterServerEvent();
-  else{
-    await pushNotificationToHolders(ticker,'price_adj',msg);
-    await pushNotificationToAll('price_adj',msg,holderIds);
-    await logActivity('price_adj',msg,{ticker,userId:u.id,userName:u.name,amount:r.price-oldPrice});
-  }
+  afterServerEvent();
   toast(ticker+' '+(pct>=0?'boosted':'cut')+' by '+Math.abs(pct)+'% → '+fmt(r.price));render();
 }
 
@@ -3879,13 +3759,7 @@ async function removeFounder(memberId){
   try{await sb.rpc('rpc_remove_founder',{p_member_id:memberId});}
   catch(e){return toast(rpcErrorMessage(e));}
   m.status='removed';
-  const co=DB.companies.find(c=>c.owner_id===m.company_user_id);
-  const u=cu();
-  if(serverRecords('rpc_remove_founder'))afterServerEvent();
-  else if(co){
-    await pushNotification(m.student_id,'invite','❌ You have been removed as a founder of '+co.name+'.',co.ticker);
-    await logActivity('cofound',name+' removed as founder of '+co.name,{ticker:co.ticker,userId:u.id,userName:u.name});
-  }
+  afterServerEvent();
   toast(name+' removed as founder');render();
 }
 async function sendFounderInvite(ownerId,studentId){
@@ -3908,12 +3782,7 @@ async function sendFounderInvite(ownerId,studentId){
   try{rec=await sb.rpc('rpc_send_founder_invite',{p_owner_id:ownerId,p_student_id:studentId});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.companyMembers.push(rec);
-  if(serverRecords('rpc_send_founder_invite'))afterServerEvent();
-  else await pushNotification(
-    studentId,'invite',
-    '🤝 '+u.name+' has invited you to join '+co.name+' as a founder. Accept or decline below.',
-    co.ticker
-  );
+  afterServerEvent();
   toast('Invitation sent to '+student.name);render();
 }
 
@@ -3938,15 +3807,7 @@ async function flagAccount(targetId,targetName,targetType,reason){
   try{rec=await sb.rpc('rpc_flag_account',{p_target_id:targetId,p_target_type:targetType,p_reason:reason});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.flags.push(rec);
-  if(serverRecords('rpc_flag_account'))afterServerEvent();
-  else{
-    // Notify Chairman and President
-    const admins=DB.users.filter(u2=>u2.role==='chairman'||u2.role==='president');
-    for(const a of admins){
-      await pushNotification(a.id,'flag','🚩 Compliance flag: '+targetName+' ('+targetType+') — '+reason.trim(),null);
-    }
-    await logActivity('flag','🚩 '+u.name+' flagged '+targetName+' ('+targetType+'): '+reason.trim(),{userId:u.id,userName:u.name});
-  }
+  afterServerEvent();
   clearDraft('flag-reason');toast('🚩 '+targetName+' flagged and Chairman notified');render();
 }
 async function resolveFlag(flagId,action,note){
@@ -3959,8 +3820,7 @@ async function resolveFlag(flagId,action,note){
   catch(e){return toast(rpcErrorMessage(e));}
   if(!r.resolved)return toast('This flag was already resolved');
   f.status=action;f.resolution_note=(note||'').trim();f.resolved_by=u.name;
-  if(serverRecords('rpc_admin_resolve_flag'))afterServerEvent();
-  else await logActivity('flag_resolve',u.name+' '+(action==='resolved'?'resolved':'dismissed')+' flag on '+f.target_name+(note?' — '+note:''),{userId:u.id,userName:u.name});
+  afterServerEvent();
   toast('Flag '+(action==='resolved'?'resolved':'dismissed'));render();
 }
 function flagForm(targetId,targetType){
@@ -4222,21 +4082,18 @@ function calcHealthScore(co){
 
 // Short squeeze detection
 //
-// The browser only spots a likely candidate. Since server_events_batch2.sql
-// the server decides: rpc_check_short_squeeze re-checks the move and the short
-// interest on its own data and claims the alert for that company for the day,
-// so every student gets one copy however many tabs are open -- as its own
-// 'squeeze' type, which is not emailed. Before that migration this falls back
-// to the old per-browser alert.
+// The browser only spots a likely candidate; the server decides.
+// rpc_check_short_squeeze re-checks the move and the short interest (students'
+// and funds' shorts) on its own data and claims the alert for that company
+// for the day, so every student gets one copy however many tabs are open --
+// as its own 'squeeze' type, which is not emailed.
 const _squeezeAsking=new Set();
 function checkShortSqueezes(){
   if(!isOpen())return;
-  const server=serverRecords('rpc_check_short_squeeze');
   DB.companies.filter(c=>c.status==='listed'&&!c.is_index_fund).forEach(co=>{
     const shortOf=h=>(h&&h.shorts&&h.shorts[co.ticker]?Number(h.shorts[co.ticker].qty)||0:0);
-    // Funds short too, and the server counts them.
     const totalShorted=DB.users.filter(u=>u.role==='student').reduce((s,u)=>s+shortOf(u),0)
-      +(server?(DB.funds||[]).reduce((s,f)=>s+shortOf(f),0):0);
+      +(DB.funds||[]).reduce((s,f)=>s+shortOf(f),0);
     const shortPct=co.shares>0?totalShorted/co.shares:0;
     if(shortPct<0.15)return; // not enough short interest
     const priceChgPct=priceChg(co)/100;
@@ -4244,18 +4101,13 @@ function checkShortSqueezes(){
     const key='squeeze_'+co.ticker+'_'+new Date().toDateString();
     let seen=null;try{seen=localStorage.getItem(key);}catch(e){}
     if(seen)return; // already settled for today in this browser
-    if(server){
-      if(_squeezeAsking.has(co.ticker))return;
-      _squeezeAsking.add(co.ticker);
-      sb.rpc('rpc_check_short_squeeze',{p_ticker:co.ticker}).then(r=>{
-        // Sent, or someone else's browser already did: either way, settled.
-        if(r&&(r.sent||r.reason==='already_sent')){try{localStorage.setItem(key,'1');}catch(e){}}
-        if(r&&r.sent)afterServerEvent();
-      }).catch(()=>{}).finally(()=>_squeezeAsking.delete(co.ticker));
-      return;
-    }
-    try{localStorage.setItem(key,'1');}catch(e){}
-    pushNotificationToAll('halt','🔥 Short squeeze alert: '+co.name+' ('+co.ticker+') is up '+Math.round(priceChgPct*100)+'% with '+Math.round(shortPct*100)+'% short interest. Short sellers may be forced to cover.');
+    if(_squeezeAsking.has(co.ticker))return;
+    _squeezeAsking.add(co.ticker);
+    sb.rpc('rpc_check_short_squeeze',{p_ticker:co.ticker}).then(r=>{
+      // Sent, or someone else's browser already did: either way, settled.
+      if(r&&(r.sent||r.reason==='already_sent')){try{localStorage.setItem(key,'1');}catch(e){}}
+      if(r&&r.sent)afterServerEvent();
+    }).catch(()=>{}).finally(()=>_squeezeAsking.delete(co.ticker));
   });
 }
 
@@ -4322,11 +4174,7 @@ async function checkStopLossOrders(){
     co.price=r.price;co.shares_avail=r.shares_avail;co.price_history=r.price_history;
     if(r.trade)recordLocalTrade(r.trade);
     pushTradeToSheets(r.trade);
-    if(serverRecords('rpc_trigger_stop_loss'))afterServerEvent();
-    else{
-      await pushNotification(r.user_id,'stop_loss','🛑 Stop-loss triggered: sold '+r.sell_qty+'×'+sl.ticker+' @ '+fmt(r.price)+' (trigger: '+fmt(sl.trigger_price)+')',sl.ticker);
-      await logActivity('stop_loss',(u?u.name:'Someone')+' stop-loss triggered on '+sl.ticker+' @ '+fmt(r.price),{ticker:sl.ticker,userId:r.user_id,userName:u?u.name:'',amount:r.sell_qty*r.price});
-    }
+    afterServerEvent();
     // Whose screen this appears on matters. Every logged-in client polls and
     // triggers ANY due stop-loss -- that is the whole point of the design,
     // since there is no server-side cron -- so without this gate the toast
@@ -4335,8 +4183,8 @@ async function checkStopLossOrders(){
     // another student's position, broadcast to a classmate for doing nothing
     // but leaving a tab open.
     //
-    // The owner still gets the notification (pushNotification above), which is
-    // the durable, private channel. Admins keep the live toast because
+    // The owner still gets the notification (written by the server with the
+    // sale), which is the durable, private channel. Admins keep the live toast because
     // watching the market react is part of running the session.
     const me=cu();
     if(me&&(me.id===r.user_id||isAdmin(me))){
@@ -4463,15 +4311,7 @@ async function checkMarginCalls(){
       if(!r||!r.called)continue;
       applyMarginCallResult(r);
       const who=getUser(r.user_id);
-      if(serverRecords('rpc_margin_call_short'))afterServerEvent();
-      else{
-        await pushNotification(r.user_id,'margin_call',
-          '\u26a0\ufe0f Margin call: your short of '+r.qty+'\u00d7'+ticker+' was closed at '+fmt(r.price)
-          +' (opened at '+fmt(r.avg_price)+'). Loss '+fmt(Math.abs(r.pnl))+' of the '+fmt(r.collateral)+' you posted.',ticker);
-        await logActivity('margin_call',(who?who.name:'Someone')+"'s short of "+r.qty+'\u00d7'+ticker
-          +' was closed by a margin call @ '+fmt(r.price),
-          {ticker,userId:r.user_id,userName:who?who.name:'',amount:r.qty*r.price});
-      }
+      afterServerEvent();
       // Same rule as the stop-loss toast: the person it happened to, and
       // admins running the session. Not whichever classmate's tab noticed.
       const me=cu();
@@ -4507,16 +4347,7 @@ async function checkMarginCalls(){
       // The manager is told, because they are the one who can act. Investors
       // see it in the fund's activity feed rather than as a personal alert --
       // it is not their position, it is the fund's.
-      if(serverRecords('rpc_margin_call_fund_short'))afterServerEvent();
-      else{
-        if(r.manager_id)
-          await pushNotification(r.manager_id,'margin_call',
-            '\u26a0\ufe0f Margin call: '+r.fund_name+"'s short of "+r.qty+'\u00d7'+ticker+' was closed at '+fmt(r.price)
-            +' (opened at '+fmt(r.avg_price)+'). Loss '+fmt(Math.abs(r.pnl))+' of the '+fmt(r.collateral)+' the fund posted.',ticker);
-        await logActivity('margin_call',r.fund_name+"'s short of "+r.qty+'\u00d7'+ticker
-          +' was closed by a margin call @ '+fmt(r.price),
-          {ticker,userId:r.manager_id,userName:r.fund_name,amount:r.qty*r.price});
-      }
+      afterServerEvent();
       const me2=cu();
       if(me2&&(me2.id===r.manager_id||isAdmin(me2)))
         toast('Margin call: '+r.fund_name+"'s short of "+r.qty+'\u00d7'+ticker+' closed @ '+fmt(r.price));
@@ -4565,8 +4396,7 @@ async function checkPriceAlerts(){
     try{r=await sb.rpc('rpc_trigger_price_alert',{p_id:a.id});}catch(e){continue;}
     if(!r.triggered){if(r.reason==='already_triggered_or_missing')a.triggered=true;continue;}
     a.triggered=true;
-    if(serverRecords('rpc_trigger_price_alert'))afterServerEvent();
-    else await pushNotification(r.user_id,'price_alert','🎯 Price alert: '+r.ticker+' is '+r.direction+' '+fmt(r.target_price)+' (now '+fmt(r.price)+')',r.ticker);
+    afterServerEvent();
     // Same rule as fills and stop-losses: every client polls every alert, so
     // without this the toast lands wherever the poll ran. Holdings and cash
     // are public in JEX by design, but a target price is not -- it is a
@@ -4700,8 +4530,8 @@ if(typeof Notification!=='undefined'&&Notification.permission==='granted')_pushE
 
 // ── Email via EmailJS ────────────────────────────────────
 // sendEmailNotification()/emailjs.send() is gone -- the EmailJS private key
-// now lives server-only (jex_email_secrets) and dispatch happens inside
-// rpc_push_notification() via pg_net (see email-pii-exposure-fix migration).
+// lives server-only (jex_email_secrets) and mail goes out from the server's
+// own notification helper (jex_notify) via pg_net, under the same rules.
 
 const PUSH_TITLES={
   dividend:'💰 Dividend received',halt:'⚠️ Trading halted',
@@ -4712,30 +4542,6 @@ const PUSH_TITLES={
   founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised',bug_report:'🐛 Bug report',contact_admin:'✉️ New message',
   margin_call:'⚠️ Margin call',squeeze:'🔥 Short squeeze'
 };
-async function pushNotification(userId, type, message, ticker=null){
-  try{
-    // jex_notifications INSERT is revoked from anon/authenticated entirely
-    // now (see the email-pii-exposure-fix migration) -- this RPC is the
-    // only way to create one, and does the recipient's email dispatch
-    // server-side (pg_net -> EmailJS) in the same call, best-effort.
-    const rec=await sb.rpc('rpc_push_notification',{p_user_id:userId,p_type:type,p_message:message,p_ticker:ticker});
-    if(userId===UI.userId){
-      DB.notifications.unshift(rec);
-      // Fire browser push for current user
-      showBrowserPush(PUSH_TITLES[type]||'Notification',message);
-    }
-  }catch(e){console.warn('Notification failed:',e);}
-}
-
-
-async function pushNotificationToHolders(ticker,type,message){
-  const holders=DB.users.filter(u=>u.role==='student'&&(holdings(u)[ticker]||0)>0);
-  for(const u of holders) await pushNotification(u.id,type,message,ticker);
-}
-async function pushNotificationToAll(type,message,excludeIds=[]){
-  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved'&&!excludeIds.includes(u.id));
-  for(const u of students) await pushNotification(u.id,type,message);
-}
 async function markAllRead(){
   const unread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read);
   // Runs server-side (rpc_mark_notifications_read), scoped to the
@@ -4834,14 +4640,7 @@ async function haltStock(ticker,reason,systemTriggered=false){
   catch(e){return toast(rpcErrorMessage(e));}
   const rec=r.halt;
   DB.halts.push(rec);
-  if(serverRecords('rpc_admin_halt_stock'))afterServerEvent();
-  else{
-    await logActivity('halt',ticker+' trading halted — '+rec.reason,{ticker,userId:u?.id,userName:rec.halted_by});
-    // Notify all students who hold this stock
-    const haltedHolderIds=DB.users.filter(hu=>hu.role==='student'&&(holdings(hu)[ticker]||0)>0).map(hu=>hu.id);
-    await pushNotificationToHolders(ticker,'halt','⚠️ Trading halted on '+ticker+': '+rec.reason);
-    await pushNotificationToAll('halt','⚠️ '+ticker+' trading has been halted: '+rec.reason,haltedHolderIds);
-  }
+  afterServerEvent();
   toast(ticker+' halted');render();
 }
 async function resumeStock(ticker,systemTriggered=false){
@@ -4871,11 +4670,7 @@ async function resumeStock(ticker,systemTriggered=false){
   }
   if(r&&r.session)Object.assign(DB.session,r.session);
   DB.halts=DB.halts.filter(h=>h.ticker!==ticker);
-  if(serverRecords('rpc_admin_resume_stock'))afterServerEvent();
-  else{
-    await logActivity('resume',ticker+' trading resumed',{ticker,userId:u?.id,userName:systemTriggered?'System (Circuit Breaker)':u.name});
-    await pushNotificationToAll('resume','✅ '+ticker+' trading has resumed');
-  }
+  afterServerEvent();
   toast(ticker+' trading resumed');render();
 }
 
@@ -5071,11 +4866,10 @@ async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
     toast('After-hours order queued: '+qty+'×'+ticker+' @ '+fmt(limitPrice)+' — activates when session opens');
     render();return;
   }
-  if(serverRecords('rpc_place_limit_order'))afterServerEvent();
-  else await logActivity('limit_order',(fundId?getFund(fundId)?.name+"'s fund":cu().name)+' placed limit '+side+' '+qty+'×'+ticker+' @ '+fmt(limitPrice),{ticker,amount:limitPrice});
+  afterServerEvent();
   const filledQty=await settleLimitOrder(r.order,orderType==='fok');
   // Fills here were never logged by the page; the server logs them now.
-  if(filledQty>0&&(serverRecords('rpc_match_limit_order_book')||serverRecords('rpc_fill_limit_vs_pool')))afterServerEvent();
+  if(filledQty>0)afterServerEvent();
   if(filledQty>=qty)toast('Limit order fully filled!');
   else if(filledQty>0)toast('Partial fill: '+filledQty+' matched, '+(qty-filledQty)+' queued @ '+fmt(limitPrice));
   // A fill-or-kill that did not fill used to say nothing whatsoever, so the
@@ -5104,12 +4898,9 @@ async function activateAfterHoursOrders(){
   let activated=[];
   try{activated=(await sb.rpc('rpc_activate_after_hours_orders',{}))?.activated||[];}catch(e){console.warn('Activate after-hours failed:',e);return;}
   if(!activated.length)return;
-  const serverAfterHours=serverRecords('rpc_activate_after_hours_orders');
-  if(serverAfterHours)afterServerEvent();
+  afterServerEvent();
   for(const o of activated){
     const local=DB.limitOrders.find(x=>x.id===o.id);if(local)local.status='open';
-    const u=getUser(o.user_id);
-    if(u&&!serverAfterHours)await pushNotification(u.id,'after_hours','⏰ Your after-hours '+o.side+' order for '+o.qty+'×'+o.ticker+' @ '+fmt(o.limit_price)+' is now active',o.ticker);
   }
   toast(activated.length+' after-hours order'+(activated.length!==1?'s':'')+' activated');
   render();
@@ -5154,8 +4945,7 @@ async function checkLimitOrders(){
       applyLimitMatchResult(r);
       const buyerName=r.buyer_type==='fund'?(getFund(r.buyer_id)?.name||'a fund'):(getUser(r.buyer_id)?.name||'someone');
       const sellerName=r.seller_type==='fund'?(getFund(r.seller_id)?.name||'a fund'):(getUser(r.seller_id)?.name||'someone');
-      if(serverRecords('rpc_match_limit_order_book'))afterServerEvent();
-      else await logActivity('limit_fill',buyerName+' ↔ '+sellerName+': '+r.fill_qty+'×'+ticker+' @ '+fmt(r.fill_price),{ticker,amount:r.fill_price});
+      afterServerEvent();
       if(myFillSide(r.buyer_type,r.buyer_id)||myFillSide(r.seller_type,r.seller_id)||isAdmin(cu()))
         toast(r.fill_qty+'×'+ticker+' matched: '+buyerName+' bought from '+sellerName+' @ '+fmt(r.fill_price));
     }
@@ -5170,11 +4960,7 @@ async function checkLimitOrders(){
       const qty=o.qty;
       applyLimitPoolFillResult(o.id,r);
       const ownerName=r.owner_type==='fund'?(getFund(r.owner_id)?.name||'a fund'):(getUser(r.owner_id)?.name||'someone');
-      if(serverRecords('rpc_fill_limit_vs_pool'))afterServerEvent();
-      else{
-        await logActivity('limit_fill',ownerName+"'s limit "+o.side+" "+qty+"×"+ticker+" filled vs JEX pool @ "+fmt(r.fill_price),{ticker,amount:r.fill_price});
-        if(r.owner_type==='user')await pushNotification(r.owner_id,'limit_fill','⚡ Limit '+o.side+' filled: '+qty+'×'+ticker+' @ '+fmt(r.fill_price),ticker);
-      }
+      afterServerEvent();
       if(myFillSide(r.owner_type,r.owner_id)||isAdmin(cu()))
         toast(ownerName+"'s limit order filled: "+qty+"×"+ticker+" @ "+fmt(r.fill_price));
     }
@@ -5464,8 +5250,7 @@ async function createFund(name,feePct){
   try{rec=await sb.rpc('rpc_create_fund',{p_name:name.trim(),p_fee_pct:feePct});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.funds.push(rec);
-  if(serverRecords('rpc_create_fund'))afterServerEvent();
-  else await logActivity('fund_create',u.name+' launched a new fund: '+rec.name+' ('+rec.fee_pct+'% performance fee)',{userId:u.id,userName:u.name});
+  afterServerEvent();
   toast('Fund launched');UI.fundPage=rec.id;render();
 }
 async function closeFund(fundId){
@@ -5501,8 +5286,7 @@ async function depositToFund(fundId,amount){
   catch(e){return toast(rpcErrorMessage(e));}
   u.cash=r.cash;u.fund_units=r.fund_units;
   f.cash=r.fund_cash;f.units_outstanding=r.units_outstanding;
-  if(serverRecords('rpc_fund_deposit'))afterServerEvent();
-  else await logActivity('fund_deposit',u.name+' deposited '+fmt(amount)+' into '+f.name,{userId:u.id,userName:u.name,amount});
+  afterServerEvent();
   toast('Deposited '+fmt(amount)+' into '+f.name);render();
 }
 async function withdrawFromFund(fundId,unitsStr){
@@ -5525,8 +5309,7 @@ async function withdrawFromFund(fundId,unitsStr){
   u.cash=r.cash;u.fund_units=r.fund_units;
   f.cash=r.fund_cash;f.units_outstanding=r.units_outstanding;
   if(r.fee>0&&r.manager_id){const manager=getUser(r.manager_id);if(manager)manager.cash=r.manager_cash;}
-  if(serverRecords('rpc_fund_withdraw'))afterServerEvent();
-  else await logActivity('fund_withdraw',u.name+' withdrew '+fmt(r.net)+' from '+f.name+(r.fee?' (performance fee '+fmt(r.fee)+' to '+f.manager_name+')':''),{userId:u.id,userName:u.name,amount:r.net});
+  afterServerEvent();
   toast('Withdrew '+fmt(r.net)+' from '+f.name+(r.fee?' (after '+fmt(r.fee)+' performance fee)':''));render();
 }
 // Fund manager trades are executed server-side (rpc_fund_buy/sell -- see
@@ -5663,11 +5446,7 @@ async function postFinancials(ticker,period,revenue,profit,summary){
   try{r=await sb.rpc('rpc_post_financials',{p_ticker:ticker,p_period:period.trim(),p_revenue:revenue,p_profit:profit,p_summary:summary.trim()});}
   catch(e){return toast(rpcErrorMessage(e));}
   co.financials=r.financials;
-  if(serverRecords('rpc_post_financials'))afterServerEvent();
-  else{
-    await pushNotificationToHolders(ticker,'financials','📊 '+co.name+' ('+ticker+') posted financial results for '+r.entry.period+': Revenue '+fmt(revenue)+', Profit '+fmt(profit));
-    await logActivity('financials',co.name+' posted financials for '+r.entry.period+' — Rev '+fmt(revenue)+', Profit '+fmt(profit),{ticker,amount:revenue});
-  }
+  afterServerEvent();
   clearDraft('fin-summary');toast('Financial report posted');render();
 }
 async function updateFundingGoal(ticker,goal,useOfFunds){
@@ -5881,8 +5660,7 @@ async function issueDividend(ticker,perShare,note){
         p_note:(document.getElementById('div-note')?.value||'').trim()});}
       catch(e){return toast(rpcErrorMessage(e));}
       DB.divApprovals.push(req);
-      if(serverRecords('rpc_request_dividend_approval'))afterServerEvent();
-      else await pushNotification(treasurer.id,'div_approval','💰 Dividend approval needed: '+co.name+' wants to pay '+fmt(total)+' total ('+fmt(perShare)+'/share)',ticker);
+      afterServerEvent();
       toast('Dividend submitted for Treasurer approval ('+fmt(total)+' exceeds '+fmt(divApprovalThreshold)+' threshold)');
       UI.companyTab='dividends';render();return;
     }
@@ -5926,21 +5704,11 @@ async function issueDividend(ticker,perShare,note){
   //
   // Which means a student is about to watch their portfolio fall by exactly
   // what they were just paid, and will reasonably conclude the app is broken.
-  // So the message says both numbers. This is the one second in the whole
-  // course when everyone is looking, and the sentence IS the lesson.
-  //
-  // Guarded on r.new_prices so the client is correct whether or not the
-  // dividend migration has been applied yet.
-  const drops=r.new_prices||null;
+  // So the holders' notice says both numbers -- the server writes it with the
+  // payout (jex_ev_dividend). This is the one second in the whole course when
+  // everyone is looking, and the sentence IS the lesson.
   applyExDividend(r);
-  const exNote=drops&&drops[ticker]!=null
-    ? ' '+ticker+' fell '+fmt(perShare)+' to '+fmt(drops[ticker])+' — the cash came out of the company, so your total is unchanged. That is what a dividend is.'
-    : '';
-  if(serverRecords('rpc_pay_dividend'))afterServerEvent();
-  else{
-    await logActivity('dividend',co.name+' paid dividend '+fmt(perShare)+'/share — total '+fmt(r.total),{ticker,userId:owner.id,userName:owner.name,amount:r.total});
-    await pushNotificationToHolders(ticker,'dividend','💰 '+co.name+' paid a dividend of '+fmt(perShare)+'/share.'+exNote);
-  }
+  afterServerEvent();
   pushBalances();
   toast(co.name+' paid '+fmt(perShare)+'/share');UI.companyTab='dividends';render();
 }
@@ -6036,16 +5804,11 @@ async function reviewIPO(id,approve){
   if(r.approved){
     DB.companies.push(r.company);
     const owner=getUser(r.user_id);if(owner)owner.app_status='approved';
-    if(serverRecords('rpc_review_ipo'))afterServerEvent();
-    else{
-      await logActivity('ipo',r.name+' ('+r.ticker+') listed on JEX @ '+fmt(r.price),{ticker:r.ticker,userId:r.user_id,amount:r.price});
-      await pushNotification(r.user_id,'ipo','🎉 Your IPO has been approved! '+r.name+' ('+r.ticker+') is now listed on JEX.',r.ticker);
-    }
+    afterServerEvent();
     toast('✓ '+r.name+' ('+r.ticker+') is now listed on JEX!');
   } else {
     const owner=getUser(r.user_id);if(owner)owner.app_status='rejected';
-    if(serverRecords('rpc_review_ipo'))afterServerEvent();
-    else await pushNotification(r.user_id,'ipo','❌ Your IPO application for '+r.name+' was rejected.');
+    afterServerEvent();
     toast('IPO application rejected');
   }
   render();
@@ -6180,8 +5943,7 @@ async function removeShareClass(ticker){
     DB.news=DB.news.filter(n=>n.ticker!==ticker);
   }
   DB.classApps=DB.classApps.filter(a=>a.proposed_ticker!==ticker);
-  if(serverRecords('rpc_admin_remove_share_class'))afterServerEvent();
-  else await logActivity('class_removed',(isConversion?'Class '+meta.class+' stripped from':'Share class '+ticker+' removed from')+' '+meta?.company_name,{ticker});
+  afterServerEvent();
   toast(isConversion?ticker+' class stripped — stock remains listed':ticker+' class removed and delisted');
   render();
 }
@@ -6196,20 +5958,13 @@ async function delistCompany(ticker,silent=false){
   try{r=await sb.rpc('rpc_admin_delist_company',{p_ticker:ticker});}
   catch(e){return toast(rpcErrorMessage(e));}
   co.status='delisted';
-  const serverDelist=serverRecords('rpc_admin_delist_company');
-  for(const {id,user_id} of r.cancelled_orders){
+  for(const {id} of r.cancelled_orders){
     const o=DB.limitOrders.find(x=>x.id===id);if(o)o.status='cancelled';
-    if(!serverDelist)await pushNotification(user_id,'halt','📋 Limit order cancelled — '+ticker+' has been delisted.',ticker);
   }
   for(const id of r.cancelled_stop_loss){
     const s=(DB.stopLossOrders||[]).find(x=>x.id===id);if(s)s.status='cancelled';
   }
-  if(serverDelist)afterServerEvent();
-  else{
-    // Notify shareholders
-    await pushNotificationToHolders(ticker,'halt','⚠️ '+co.name+' ('+ticker+') has been delisted from JEX.');
-    await logActivity('ipo',co.name+' ('+ticker+') delisted',{ticker});
-  }
+  afterServerEvent();
   if(!silent){toast(co.name+' delisted — company can reapply for IPO');render();}
 }
 async function relistCompany(ticker){
@@ -6224,8 +5979,7 @@ async function relistCompany(ticker){
   catch(e){return toast(rpcErrorMessage(e));}
   co.status='unlisted';co.shares_avail=r.shares_avail;co.price_history=r.price_history;
   const owner=getUser(r.owner_id);if(owner)owner.app_status='none';
-  if(serverRecords('rpc_admin_relist_company'))afterServerEvent();
-  else await pushNotification(co.owner_id,'ipo','🔄 Your company '+co.name+' has been reset — you can now submit a new IPO application.',ticker);
+  afterServerEvent();
   toast(co.name+' reset — owner can now submit a new IPO application');
   render();
 }
@@ -6981,8 +6735,7 @@ async function submitClassApplication(parentTicker,classType,votesPerShare,share
     p_whitelist:whitelistIds||[],p_reason:reason||'',p_convert:false});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.classApps.push(app);
-  if(serverRecords('rpc_submit_class_application'))afterServerEvent();
-  else await logActivity('class_app',u.name+' applied for '+co.name+' Class '+classType+' ('+proposedTicker+')',{ticker:parentTicker,userId:u.id,userName:u.name});
+  afterServerEvent();
   clearDraft('cls-reason');toast('Class '+classType+' application submitted — awaiting Chairman approval');
   UI.companyTab='classes';render();
 }
@@ -7120,9 +6873,7 @@ async function convertShareClass(ticker,qty){
   if(r2.holdings)holder.holdings=r2.holdings;
   const cls=getCo(r2.class_ticker);if(cls&&r2.class_shares!=null)cls.shares=r2.class_shares;
   if(r2.parent_shares!=null)parent.shares=r2.parent_shares;
-  if(serverRecords('rpc_convert_share_class'))afterServerEvent();
-  else await logActivity('class_convert',u.name+' converted '+r2.converted+' '+r2.class_ticker+' into '+r2.received+' '+r2.parent_ticker,
-    {ticker:r2.parent_ticker,userId:u.id,userName:u.name});
+  afterServerEvent();
   toast('Converted '+r2.converted+' '+r2.class_ticker+' into '+r2.received+' '+r2.parent_ticker);
   pushBalances();render();
 }
@@ -7142,13 +6893,11 @@ async function reviewClassApp(id,approve){
   if(r.approved){
     DB.shareClasses.push(r.share_class);
     if(r.is_conversion){
-      if(serverRecords('rpc_review_class_application'))afterServerEvent();
-      else await logActivity('class_approved',app.company_name+' '+app.proposed_ticker+' converted to Class '+app.class,{ticker:app.proposed_ticker});
+      afterServerEvent();
       toast(app.company_name+' ('+app.proposed_ticker+') converted to Class '+app.class+'!');
     } else {
       DB.companies.push(r.company);
-      if(serverRecords('rpc_review_class_application'))afterServerEvent();
-      else await logActivity('class_approved',app.company_name+' Class '+app.class+' ('+app.proposed_ticker+') listed',{ticker:app.proposed_ticker});
+      afterServerEvent();
       toast(app.company_name+' Class '+app.class+' listed as '+app.proposed_ticker+'!');
     }
   } else {
@@ -7216,11 +6965,7 @@ async function postVote(parentTicker,question,optA,optB){
   // nobody else. DB.votes is not in the 20-second poll either, so it stayed
   // there until a full reload.
   DB.votes.unshift(v);
-  if(serverRecords('rpc_post_vote'))afterServerEvent();
-  else{
-    await logActivity('vote',co.name+' posted vote: '+question.trim(),{ticker:parentTicker,userId:u.id,userName:u.name});
-    await pushNotificationToHolders(parentTicker,'vote','🗳️ '+co.name+' posted a vote: '+question.trim());
-  }
+  afterServerEvent();
   toast('Vote posted');UI.companyTab='votes';render();
 }
 async function castVote(voteId,choice){
@@ -7253,11 +6998,7 @@ async function closeVote(voteId){
   const v=DB.votes.find(x=>x.id===voteId);if(v){
     v.status='closed';
     // Notify all who voted
-    if(serverRecords('rpc_close_vote'))afterServerEvent();
-    else{
-      const voters=[...new Set(DB.ballots.filter(b=>b.vote_id===voteId).map(b=>b.voter_id))];
-      for(const vid of voters) await pushNotification(vid,'vote_closed','🗳️ Vote closed: "'+v.question+'" — '+v.company_name,v.parent_ticker);
-    }
+    afterServerEvent();
   }
   toast('Vote closed');render();
 }
@@ -7655,14 +7396,7 @@ async function submitBugReport(){
     const rec=await sb.rpc('rpc_submit_bug_report',{p_description:desc,
       p_screenshot_url:screenshotUrl,p_page_url:window.location.href});
     DB.bugReports.unshift(rec);
-    if(serverRecords('rpc_submit_bug_report'))afterServerEvent();
-    else{
-      const admins=DB.users.filter(u2=>u2.role==='chairman'||u2.role==='president');
-      for(const a of admins){
-        await pushNotification(a.id,'bug_report','🐛 Bug report from '+u.name+': '+desc.slice(0,80),null);
-      }
-      await logActivity('bug_report','🐛 '+u.name+' reported a bug: '+desc.slice(0,80),{userId:u.id,userName:u.name});
-    }
+    afterServerEvent();
     closeBugReportModal();
     clearDraft('bug-desc');toast('🐛 Bug report sent to the Chairman and President');
     render();
@@ -10126,11 +9860,7 @@ async function submitDelisting(ticker){
   clearDraft('delist-reason-'+ticker);
   // Shareholders are told immediately. Finding out only once the stock has
   // stopped trading is exactly the surprise this feature exists to prevent.
-  if(serverRecords('rpc_request_delisting'))afterServerEvent();
-  else{
-    await pushNotificationToHolders(ticker,'halt','📋 '+co.name+' ('+ticker+') has applied to delist — '+(DELIST_KIND_LABEL[kind]||kind)+'. Reason: '+reason);
-    await logActivity('ipo',co.name+' ('+ticker+') applied to delist ('+(DELIST_KIND_LABEL[kind]||kind)+')',{ticker});
-  }
+  afterServerEvent();
   toast('Delisting application submitted — the President will review it');
   render();
 }
@@ -10183,22 +9913,13 @@ async function reviewDelisting(id,approve){
   }
   const owner=getUser(r.owner_id);
   if(owner){owner.cash=r.owner_cash;if(owner.holdings)delete owner.holdings[app.ticker];}
-  const serverSettle=serverRecords('rpc_review_delisting');
-  for(const {id:oid,user_id} of r.cancelled_orders||[]){
+  for(const {id:oid} of r.cancelled_orders||[]){
     const o=DB.limitOrders.find(x=>x.id===oid);if(o)o.status='cancelled';
-    if(!serverSettle)await pushNotification(user_id,'halt','📋 Limit order cancelled — '+app.ticker+' has been delisted.',app.ticker);
   }
   for(const sid of r.cancelled_stop_loss||[]){
     const st=(DB.stopLossOrders||[]).find(x=>x.id===sid);if(st)st.status='cancelled';
   }
-  if(serverSettle)afterServerEvent();
-  else{
-    for(const p of r.payouts||[]){
-      if(!p.id)continue;
-      await pushNotification(p.id,'halt','💵 '+app.ticker+' delisted — you were paid '+fmt(p.paid)+' for '+p.qty+' share'+(p.qty===1?'':'s')+'.',app.ticker);
-    }
-    await logActivity('ipo',app.ticker+' delisted — '+(DELIST_KIND_LABEL[app.kind]||app.kind)+' at '+fmt(r.settlement_price)+' per share',{ticker:app.ticker});
-  }
+  afterServerEvent();
   toast(app.ticker+' delisted — '+fmt(r.total_paid)+' paid to '+r.shareholders_paid+' holder(s)'
     +(Number(r.shortfall)>0?', '+fmt(r.shortfall)+' unpaid':''));
   render();
@@ -10342,8 +10063,7 @@ async function adjustCompanyCash(uid2){
   try{newCash=await sb.rpc('admin_adjust_cash',{p_target_id:uid2,p_op:op,p_amount:amt});}
   catch(e){return toast('Failed to adjust balance: '+(e.message||e));}
   u.cash=newCash;
-  if(serverRecords('admin_adjust_cash'))afterServerEvent();
-  else await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
+  afterServerEvent();
   toast(u.name+"'s balance updated to "+fmt(newCash));render();
 }
 async function adjustCash(uid2){
@@ -10358,8 +10078,7 @@ async function adjustCash(uid2){
   try{newCash=await sb.rpc('admin_adjust_cash',{p_target_id:uid2,p_op:op,p_amount:amt});}
   catch(e){return toast('Failed to adjust balance: '+(e.message||e));}
   u.cash=newCash;
-  if(serverRecords('admin_adjust_cash'))afterServerEvent();
-  else await logActivity('balance_adj',op==='add'?'+'+fmt(amt)+' added to '+u.name:op==='subtract'?'-'+fmt(amt)+' removed from '+u.name:''+u.name+"'s balance set to "+fmt(newCash),{userId:uid2,userName:u.name,amount:newCash-prev});
+  afterServerEvent();
   pushBalances();
   toast(u.name+"'s balance updated to "+fmt(newCash));render();
 }
@@ -11184,11 +10903,7 @@ async function postMinutes(title,body){
   try{rec=await sb.rpc('rpc_post_minutes',{p_title:title.trim(),p_body:body.trim()});}
   catch(e){return toast(rpcErrorMessage(e));}
   if(rec)DB.minutes.unshift(rec);   // see postSessionRecap: never store a null
-  if(serverRecords('rpc_post_minutes'))afterServerEvent();
-  else{
-    await logActivity('minutes','Meeting minutes posted: '+title.trim(),{userId:u.id,userName:u.name});
-    await pushNotificationToAll('minutes','📋 New meeting minutes posted: '+title.trim());
-  }
+  afterServerEvent();
   clearDraft('min-body');toast('Meeting minutes posted');render();
 }
 async function deleteMinutes(id){

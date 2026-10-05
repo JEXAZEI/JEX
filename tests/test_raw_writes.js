@@ -13,7 +13,7 @@ function extractFn(name){
   for(;i<src.length;i++){ if(src[i]==='{')d++; else if(src[i]==='}'){d--; if(d===0)return src.slice(start,i+1);} }
   throw new Error('unbalanced: '+name);
 }
-for(const fn of ['logActivity','flagAccount','submitIPO','activateAfterHoursOrders'])
+for(const fn of ['flagAccount','submitIPO','activateAfterHoursOrders'])
   eval(extractFn(fn).replace('async function '+fn,fn+'=async function'));
 
 let fails=0;
@@ -35,10 +35,6 @@ global.uid=()=>'client-generated-id';
 global.ts=()=>'client ts';
 global.rpcErrorMessage=e=>e.message;
 global.clearDraft=()=>{};   // submit paths drop the saved draft
-global.pushNotification=async()=>{};
-// Before the server-events migrations the page writes its own log and
-// notifications; these tests exercise that path.
-global.serverRecords=()=>false;
 global.afterServerEvent=()=>{};
 global.pushToSheets=()=>{};
 global.sb={
@@ -48,21 +44,13 @@ global.sb={
 };
 
 (async()=>{
-  console.log('=== logActivity: chain built server-side ===');
-  reset();
-  rpcImpl=(fn,p)=>({id:'srv-a1',type:p.p_type,description:p.p_description,prev_hash:'abc12345',entry_hash:'def67890',ts:'Aug 20, 1:00:00 PM'});
-  await logActivity('ipo','Ana listed ACME',{ticker:'ACME',userId:'u9',userName:'Bo',amount:12.5});
-  check('calls rpc_log_activity', rpcCalls.length===1&&rpcCalls[0].fn==='rpc_log_activity');
-  check('no raw POST', posts.length===0);
-  check('sends no prev_hash or entry_hash', !('p_prev_hash' in rpcCalls[0].p)&&!('p_entry_hash' in rpcCalls[0].p));
-  check('still passes the subject (not the caller) through', rpcCalls[0].p.p_user_id==='u9'&&rpcCalls[0].p.p_user_name==='Bo');
-  check('server row is what lands in DB.activity', DB.activity[0].id==='srv-a1'&&DB.activity[0].entry_hash==='def67890');
-  reset(); rpcImpl=()=>{throw new Error('boom');};
-  await logActivity('x','y',{});
-  check('a failing log never throws into its caller', DB.activity.length===0);
-  reset(); rpcImpl=()=>null;
-  await logActivity('x','y',{});
-  check('null result appends nothing', DB.activity.length===0);
+  console.log('=== the activity log: written by the server only ===');
+  // The page used to call rpc_log_activity itself; since server_events_batch4.sql
+  // every entry comes from the function that did the thing, and the web cannot
+  // call it at all.
+  const pageSrc=require('fs').readFileSync(require('path').join(__dirname,'..','app.js'),'utf8');
+  check('the page never calls rpc_log_activity', !/rpc_log_activity/.test(pageSrc));
+  check('...nor rpc_push_notification', !/rpc_push_notification/.test(pageSrc));
 
   console.log('\n=== flagAccount ===');
   reset(); rpcImpl=()=>({id:'srv-f1',target_id:'u2',flagged_by:'u1',status:'open'});

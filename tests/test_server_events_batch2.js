@@ -71,7 +71,9 @@ check('...and only signed-in users can ask',
 check('...thresholds match the page: 15% short, up more than 10%',
       /v_pct < 0\.15 or v_chg <= 0\.10/.test(code) && /if\(shortPct<0\.15\)return;/.test(src) && /if\(!\(priceChgPct>0\.1\)\)return;/.test(src));
 
-// ── the wording is the page's ──
+// ── the wording ──
+// Written to match what the page used to send; the page no longer writes any
+// of it (server_events_batch4.sql), so these guard the migration's own text.
 for(const frag of ['🟢 Trading session is now open!','🔴 Trading session has closed.',
   '📋 Session opened — post any meeting minutes or official notices now.',
   '💰 Session opened — monitor company cash levels and dividend activity.',
@@ -88,83 +90,13 @@ for(const frag of ['🟢 Trading session is now open!','🔴 Trading session has
   ' stripped from','Share class ',' removed from',' approved (',') with ','Snapshot restored: ',
   'Meeting minutes posted: ','📋 New meeting minutes posted: ','Announcement posted: ',' flag on ',
   '🔥 Short squeeze alert: ','% short interest. Short sellers may be forced to cover.']){
-  check('same words on both sides: "'+frag.trim()+'"', unq(code).includes(frag) && (src.includes(frag)||src.includes(frag.replace("'","\\'"))));
+  check('the server writes: "'+frag.trim()+'"', unq(code).includes(frag));
 }
 check('...including the apostrophe in the Secretary\'s close notice',
-      unq(code).includes("📋 Session closed — prepare and post meeting minutes for today's session.")
-      && src.includes("📋 Session closed — prepare and post meeting minutes for today\\'s session."));
+      unq(code).includes("📋 Session closed — prepare and post meeting minutes for today's session."));
 
-// ── the page defers for every one ──
-// Each page-side log/notification of a batch 2 event is reached only when the
-// server does not record the function that did it.
-const SITES=[
-  ["logActivity('session'",'rpc_admin_save_session'],
-  ["pushNotificationToAll('session'",'rpc_admin_save_session'],
-  ["pushNotification(officer.id,'session'",'rpc_admin_save_session'],
-  ["'📋 Day order expired at session close: '",'rpc_expire_day_orders'],
-  ["logActivity('halt'",'rpc_admin_halt_stock'],
-  ["'⚠️ Trading halted on '",'rpc_admin_halt_stock'],
-  ["' trading has been halted: '",'rpc_admin_halt_stock'],
-  ["logActivity('resume'",'rpc_admin_resume_stock'],
-  ["pushNotificationToAll('resume'",'rpc_admin_resume_stock'],
-  ["') has been delisted from JEX.'",'rpc_admin_delist_company'],
-  ["logActivity('ipo',co.name+' ('+ticker+') delisted'",'rpc_admin_delist_company'],
-  ["'🔄 Your company '",'rpc_admin_relist_company'],
-  ["' delisted — you were paid '",'rpc_review_delisting'],
-  ["logActivity('ipo',app.ticker+' delisted — '",'rpc_review_delisting'],
-  ["logActivity('ipo',r.name+",'rpc_review_ipo'],
-  ["'🎉 Your IPO has been approved! '",'rpc_review_ipo'],
-  ["'❌ Your IPO application for '",'rpc_review_ipo'],
-  ["logActivity('class_approved'",'rpc_review_class_application'],
-  ["logActivity('class_removed'",'rpc_admin_remove_share_class'],
-  ["logActivity('registration'",'approve_registration'],
-  ["logActivity('snapshot','Snapshot restored: '",'rpc_admin_restore_snapshot'],
-  ["logActivity('minutes'",'rpc_post_minutes'],
-  ["pushNotificationToAll('minutes'",'rpc_post_minutes'],
-  ["logActivity('announcement'",'rpc_post_announcement'],
-  ["logActivity('flag_resolve'",'rpc_admin_resolve_flag'],
-];
-// A call is guarded when the nearest guard before it -- `if(!X)` for a
-// const X=serverRecords('fn'), or `serverRecords('fn'))afterServerEvent();
-// else` -- either encloses it in a block or is the statement directly in
-// front of it. The nearest one: an earlier guard on the same flag, for a
-// different block, does not count.
-function guarded(at,fn){
-  const wide=src.slice(Math.max(0,at-3000),at), base=Math.max(0,at-3000);
-  const bound=[...wide.matchAll(new RegExp("const (\\w+)=serverRecords\\('"+fn+"'\\);",'g'))].pop();
-  const pats=[new RegExp("serverRecords\\('"+fn+"'\\)\\)afterServerEvent\\(\\);\\s*else",'g')];
-  if(bound)pats.push(new RegExp('if\\(!'+bound[1]+'\\)','g'),new RegExp('if\\('+bound[1]+'\\)afterServerEvent\\(\\);\\s*else','g'));
-  let last=null;
-  for(const re of pats)for(const m of wide.matchAll(re))if(!last||m.index>last.index)last={index:m.index,end:m.index+m[0].length};
-  if(!last)return false;
-  const rest=src.slice(base+last.end,at);
-  if(/^\s*(await\s+)?$/.test(rest))return true;              // the very next statement
-  if(!/^\s*\{/.test(rest))return false;
-  let d=0;
-  for(const ch of rest.slice(rest.indexOf('{'))){if(ch==='{')d++;else if(ch==='}'&&--d<1)return false;}
-  return d>=1;                                                   // still inside its block
-}
-// "Limit order cancelled" appears twice: admin delist and reviewed delisting.
-for(const [needle,fn] of SITES.concat([["'📋 Limit order cancelled — '",null]])){
-  let at=src.indexOf(needle), n=0;
-  check('found '+needle, at>=0);
-  while(at>=0){
-    n++;
-    const before=src.slice(Math.max(0,at-900),at);
-    const f=fn||(/rpc_review_delisting/.test(before)?'rpc_review_delisting':'rpc_admin_delist_company');
-    // A message fragment sits inside its call: judge from where the call starts.
-    const head=src.slice(Math.max(0,at-200),at);
-    const calls=[...head.matchAll(/(?:await\s+)?(?:pushNotification\w*|logActivity)\(/g)];
-    const callAt=needle.startsWith("'")&&calls.length?at-head.length+calls.pop().index:at;
-    check(needle+' #'+n+' defers to '+f, guarded(callAt,f), src.slice(at-120,at+40));
-    at=src.indexOf(needle,at+1);
-  }
-}
 const sq=src.slice(src.indexOf('function checkShortSqueezes('),src.indexOf('function checkShortSqueezes(')+2600);
-check('the squeeze alert asks the server once the server decides',
-      /const server=serverRecords\('rpc_check_short_squeeze'\);/.test(sq) && /if\(server\)\{[\s\S]*?sb\.rpc\('rpc_check_short_squeeze'[\s\S]*?return;\s*\}/.test(sq));
-check('...and only falls back to the old alert before the migration',
-      sq.indexOf("pushNotificationToAll('halt','🔥 Short squeeze alert: '")>sq.indexOf('if(server){'));
+check('the squeeze alert is the server\'s to send', /sb\.rpc\('rpc_check_short_squeeze'/.test(sq) && !/pushNotification/.test(sq));
 check('...stops asking once it is settled for the day', /r\.sent\|\|r\.reason==='already_sent'/.test(sq));
 check('...and asks once at a time per company', /_squeezeAsking\.has\(co\.ticker\)/.test(sq));
 check('a squeeze has its own icon and push title', /squeeze:'🔥'\}/.test(src) && /squeeze:'🔥 Short squeeze'/.test(src));
@@ -175,12 +107,9 @@ const DB={companies:[{ticker:'ACME',name:'Acme',status:'listed',shares:1000,pric
   users:[{role:'student',shorts:{ACME:{qty:100}}}],funds:[{shorts:{ACME:{qty:60}}}],
   session:{session_open_prices:{ACME:10}}};
 const isOpen=()=>true;
-let serverList=new Set(['rpc_check_short_squeeze']);
-const serverRecords=fn=>serverList.has(fn);
 const afterServerEvent=()=>{refreshed++;};
 const priceChg=c=>(c.price-DB.session.session_open_prices[c.ticker])/DB.session.session_open_prices[c.ticker]*100;
 const localStorage={getItem:k=>store[k]||null,setItem:(k,v)=>{store[k]=v;}};
-const pushNotificationToAll=(...a)=>{pushed.push(a);};
 let answer={sent:true};
 const sb={rpc:async(fn,p)=>{rpcs.push(p.p_ticker);return answer;}};
 const start=src.indexOf('const _squeezeAsking=');
@@ -200,13 +129,6 @@ const tick=()=>new Promise(r=>setTimeout(r,10));
   store={};answer={sent:false,reason:'not_crossed'};
   checkShortSqueezes();await tick();checkShortSqueezes();await tick();
   check('not crossed on the server: it asks again next tick', rpcs.length===3, JSON.stringify(rpcs));
-  store={};serverList=new Set();rpcs=[];
-  checkShortSqueezes();await tick();
-  check('before the migration the old alert still goes out', pushed.length===0 && rpcs.length===0,
-        'students alone are 10%: '+JSON.stringify(pushed));
-  DB.users[0].shorts.ACME.qty=200;store={};
-  checkShortSqueezes();await tick();
-  check('...counting students only, as it always did', pushed.length===1 && /16%|20%/.test(pushed[0][1]), JSON.stringify(pushed));
   console.log(fails?('\n'+fails+' check(s) failed'):'\nall checks passed');
   process.exit(fails?1:0);
 })();

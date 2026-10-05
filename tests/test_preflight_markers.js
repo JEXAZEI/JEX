@@ -26,8 +26,8 @@ const block=pre.slice(pre.indexOf("'fixes_still_applied'"),pre.indexOf(') m(labe
 const rows=[...block.matchAll(/\(\s*'((?:[^']|'')*)'\s*,\s*'((?:[^']|'')*)'\s*,\s*'((?:[^']|'')*)'\s*\)/g)]
   .map(m=>({label:unq(m[1]),fn:unq(m[2]),marker:unq(m[3])}));
 
-check('the preflight lists 36 markers', rows.length===36, String(rows.length));
-check('the header says how many there are', /Thirty-six markers/.test(pre));
+check('the preflight lists 38 markers', rows.length===38, String(rows.length));
+check('the header says how many there are', /Thirty-eight markers/.test(pre));
 for(const r of rows){
   check(r.fn+': "'+r.label+'" is text a migration really wrote', haystack.includes(r.marker), r.marker);
 }
@@ -37,6 +37,7 @@ check('preflight flags any function still writing UTC times',
       /'functions_writing_utc_times'/.test(pre) && /p\.prosrc ~ 'to_char\\\(\\s\*now\\\(\\\)\\s\*,'/.test(pre));
 check('...any dilution the chart would draw as a crash', /'unmarked_dilutions'/.test(pre));
 check('...and a stale JXI open', /'jxi_open_is_honest'/.test(pre) && /index_open_from\(s\.session_open_prices/.test(pre));
+check('...and the web regaining the log or notifications', /'web_can_write_log'/.test(pre) && /has_function_privilege\('authenticated', p\.oid, 'execute'\)/.test(pre));
 check('preflight changes nothing: no insert, update, delete or DDL',
       !/^\s*(insert|update|delete|create|alter|drop|truncate)\b/im.test(pre.split('\n').filter(l=>!/^\s*--/.test(l)).join('\n')));
 

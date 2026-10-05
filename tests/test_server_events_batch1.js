@@ -49,8 +49,10 @@ check('recording never undoes a trade: every event function warns instead of fai
 check('an order that fills the moment it is placed does not notify (or email) its owner',
       /p_placed < now\(\) - interval '1 minute'/.test(code));
 
-// ── the wording is the page's ──
-// Fragments that appear in both: if either side is reworded, this fails.
+// ── the wording ──
+// Written to match what the page used to send, word for word. The page no
+// longer writes any of it (server_events_batch4.sql), so these fragments
+// guard the migration's own text.
 const unq=s=>s.replace(/''/g,"'");
 for(const frag of [" paid dividend ","/share — total ","💰 "," paid a dividend of ",
   " — the cash came out of the company, so your total is unchanged. That is what a dividend is.",
@@ -60,34 +62,9 @@ for(const frag of [" paid dividend ","/share — total ","💰 "," paid a divide
   "🛑 Stop-loss triggered: sold "," (trigger: "," stop-loss triggered on ",
   " was closed by a margin call @ "," (opened at ","). Loss "," you posted."," the fund posted.",
   " converted "," price ","boosted by +","cut by "]){
-  check('same words on both sides: "'+frag.trim()+'"', unq(code).includes(frag) && src.includes(frag));
+  check('the server writes: "'+frag.trim()+'"', unq(code).includes(frag));
 }
-check('margin call text matches the page (it writes \\u escapes)',
-      unq(code).includes('⚠️ Margin call: your short of ') && src.includes("'\\u26a0\\ufe0f Margin call: your short of '"));
-
-// ── the page defers for every one ──
-// Each page-side log/notification of a batch 1 event sits in the else-branch
-// of a serverRecords() check for the function that did it.
-const TYPES={balance_adj:'admin_adjust_cash',fund_deposit:'rpc_fund_deposit',fund_withdraw:'rpc_fund_withdraw',
-  dividend:'rpc_pay_dividend',price_adj:'rpc_adjust_stock_price',stop_loss:'rpc_trigger_stop_loss',
-  class_convert:'rpc_convert_share_class',margin_call:'rpc_margin_call_',limit_fill:'rpc_'};
-for(const [type,fn] of Object.entries(TYPES)){
-  const re=new RegExp("(?:logActivity|pushNotification(?:ToHolders|ToAll)?)\\((?:[^,()]+,)?'"+type+"'",'g');
-  for(const m of src.matchAll(re)){
-    const before=src.slice(Math.max(0,m.index-700),m.index);
-    // The one limit_fill notice no batch 1 function causes: a day order
-    // expiring at the close.
-    if(type==='limit_fill'&&src.slice(m.index,m.index+120).includes('Day order expired'))continue;
-    const gate=before.lastIndexOf("serverRecords('"+fn);
-    check(type+' at offset '+m.index+' defers to the server', gate>=0 && /\)\)afterServerEvent\(\);\s*else/.test(before.slice(gate)),
-          src.slice(m.index,m.index+80));
-  }
-}
-check('the instant fills the page never logged now refresh what the server logged',
-      /filledQty>0&&\(serverRecords\('rpc_match_limit_order_book'\)\|\|serverRecords\('rpc_fill_limit_vs_pool'\)\)\)afterServerEvent\(\)/.test(src));
-check('the Treasurer\'s reject notice is not a batch 1 event and stays',
-      /pushNotification\(da\.requested_by,'div_approval'/.test(src));
-check('the list is asked for at boot', /loadServerEvents\(\),\s+\/\/ never throws/.test(src));
+check('the server writes the margin call notice', unq(code).includes('⚠️ Margin call: your short of '));
 
 // ── the page's half, run ──
 function grab(name){
@@ -96,7 +73,8 @@ function grab(name){
   let i=src.indexOf('{',m.index),d=0;
   for(let j=i;j<src.length;j++){if(src[j]==='{')d++;else if(src[j]==='}'&&--d===0)return src.slice(m.index,j+1);}
 }
-let SERVER_EVENTS=new Set(), _serverEventsKnown=false, _serverEventTimer=null;
+let _serverEventTimer=null, sheets=[];
+const pushToSheets=(t,p)=>{sheets.push(t+':'+(p.items||[]).length);};
 let rpcCalls=[], pushes=[], renders=0, me={id:'u1',role:'student'};
 const UI={userId:'u1'};
 const PUSH_TITLES={stop_loss:'🛑 Stop-loss triggered'};
@@ -111,30 +89,10 @@ const safeRpc=async(fn,p)=>{rpcCalls.push(fn);
   if(fn==='rpc_get_my_notifications')return serverNotes;
   if(fn==='rpc_admin_list_activity')return [{id:'a1'},{id:'a0'}];
   return null;};
-eval(grab('loadServerEvents'));eval(grab('serverRecords'));eval(grab('afterServerEvent'));
+eval(grab('afterServerEvent'));
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 
 (async()=>{
-  sb={rpc:async()=>{throw new Error('Could not find the function rpc_server_events');}};
-  await loadServerEvents();
-  check('before the migration the list is empty, so the page records everything', SERVER_EVENTS.size===0 && !serverRecords('rpc_pay_dividend'));
-  sb={rpc:async()=>['rpc_pay_dividend','rpc_trigger_stop_loss']};
-  await loadServerEvents();
-  check('after it, the page defers for exactly the listed functions',
-        serverRecords('rpc_pay_dividend') && serverRecords('rpc_trigger_stop_loss') && !serverRecords('rpc_fund_deposit'));
-  sb={rpc:async()=>null};
-  await loadServerEvents();
-  check('a null answer is treated as "nothing listed"', SERVER_EVENTS.size===0);
-  check('...and asked again later, like a failure', _serverEventsKnown===false);
-  sb={rpc:async()=>[]};
-  await loadServerEvents();
-  check('an empty list is an answer: stop asking', _serverEventsKnown===true && SERVER_EVENTS.size===0);
-  sb={rpc:async()=>{throw new Error('network');}};
-  _serverEventsKnown=true; SERVER_EVENTS=new Set(['rpc_pay_dividend']);
-  await loadServerEvents();
-  check('a failed re-ask keeps the list it had', SERVER_EVENTS.has('rpc_pay_dividend'));
-  check('autoRefresh asks again until the server has answered', /_lastRefresh=now;\s+if\(!_serverEventsKnown\)loadServerEvents\(\);/.test(src));
-
   // A matching sweep can settle many orders in a row: one fetch, not many.
   serverNotes=[{id:'n0',user_id:'u1',read:false,message:'old'},
                {id:'n1',user_id:'u1',read:false,type:'stop_loss',message:'sold 10'},
@@ -153,6 +111,7 @@ const wait=ms=>new Promise(r=>setTimeout(r,ms));
   afterServerEvent();await wait(600);
   check('an officer\'s activity list picks up the server\'s entry', DB.activity.length===2 && DB.activity[0].id==='a1');
   check('...and a second refresh pushes nothing already seen', pushes.length===0);
+  check('...and feeds the Sheets activity tab, which the page\'s own entries used to', sheets.includes('activity:2'), sheets.join(','));
 
   me=null;UI.userId=null;rpcCalls=[];
   afterServerEvent();await wait(600);
