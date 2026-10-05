@@ -28,6 +28,15 @@ check('the plan covers exactly the fifteen', fns.length===15 && FIFTEEN.every(f=
 check('one fingerprint per function',
       fns.every(f=>new Set(rows.filter(r=>r.fn===f).map(r=>r.md5)).size===1));
 check('edits are numbered in order', rows.every((r,i)=>r.seq===i+1), rows.map(r=>r.seq).join(','));
+// The Supabase SQL editor does not promise separate statements share a
+// connection: batch 2 first held its plan in a temporary table, and in
+// production the next statement could not see it. No migration may rely on
+// state carried between statements.
+for(const f of fs.readdirSync(path.join(__dirname,'..','sql')).filter(f=>f.endsWith('.sql'))){
+  const body=fs.readFileSync(path.join(__dirname,'..','sql',f),'utf8').split('\n').filter(l=>!/^\s*--/.test(l)).join('\n');
+  check(f+' keeps no state between statements (no temporary tables)', !/create\s+temp(orary)?\s+table/i.test(body));
+}
+check('the plan is held inside the migration block', /select jsonb_agg\(to_jsonb\(p\) order by p\.seq\) into v_plan/.test(code) && !/_b2_plan/.test(code));
 check('refuses to run before batch 1', /run server_events_batch1\.sql first/.test(code));
 check('a mismatch aborts before anything is created',
       code.indexOf('is not the version this was written against')<code.indexOf('alter table public.jex_companies'));

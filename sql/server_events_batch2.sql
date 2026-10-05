@@ -48,71 +48,75 @@
 -- is best-effort: a failure is a WARNING and never undoes the action.
 -- ============================================================
 
-drop table if exists _b2_plan;
-create temp table _b2_plan (seq int, fn text, md5 text, anchor text, ins text, pos text);
--- {nl} is the function's own line ending. Anchors and insertions carry their
--- indentation.
-insert into _b2_plan values
- (1, 'rpc_admin_save_session', 'a46cb0851b5b36e7b1b71162f0e2a7d6',
-  '  v_session record;', '  v_was jex_session%rowtype;', 'after'),
- (2, 'rpc_admin_save_session', 'a46cb0851b5b36e7b1b71162f0e2a7d6',
-  '  update jex_session set', '  select * into v_was from jex_session where id = 1 for update;', 'before'),
- (3, 'rpc_admin_save_session', 'a46cb0851b5b36e7b1b71162f0e2a7d6',
-  '  return jsonb_build_object(''session'', to_jsonb(v_session));',
-  '  perform jex_ev_session(v_uid, v_was.status, v_session.status, v_was.practice_mode, v_session.practice_mode, v_was.session_started_at);', 'before'),
- (4, 'rpc_expire_day_orders', '987cee18fe3c791b4fc4d5fa908c38c1',
-  '  return jsonb_build_object(''expired'', v_ids);', '  perform jex_ev_day_orders_expired(v_ids);', 'before'),
- (5, 'rpc_admin_halt_stock', '9ffdde5af93c78a9afc8fc82dd324df6',
-  '  return jsonb_build_object(''halt'', v_row,', '  perform jex_ev_halt(p_ticker, v_reason, v_halted_by, v_uid, p_system_triggered);', 'before'),
- (6, 'rpc_admin_resume_stock', '808ff8190dae60932a62733d80c4581c',
-  '  return jsonb_build_object(''resumed'', true,', '  perform jex_ev_resume(p_ticker, v_uid, p_system_triggered);', 'before'),
- (7, 'rpc_admin_delist_company', '55647c94db778a8b2a89995fa1ddf7ca',
-  '  return jsonb_build_object(''delisted'', true,', '  perform jex_ev_delist(p_ticker, v_cancelled_orders);', 'before'),
- (8, 'rpc_admin_relist_company', '550ad00fed6d5dfcb3155d40df98a66f',
-  '  return jsonb_build_object(''shares_avail'',', '  perform jex_ev_relist(p_ticker, v_co.owner_id, v_co.name);', 'before'),
- (9, 'rpc_review_delisting', '95244c26ac11d556c01fc8270d5fea4d',
-  '  return jsonb_build_object({nl}    ''approved'', true,',
-  '  perform jex_ev_delisting_settled(v_app.ticker, v_app.kind, v_price, v_payouts, v_cancelled_orders);', 'before'),
- (10, 'rpc_review_ipo', 'ef6e57bb2f99e693978ec2d74de63a10',
-  '    return jsonb_build_object(''approved'', true, ''company'', v_co,',
-  '    perform jex_ev_ipo(true, v_app.user_id, v_app.name, v_app.ticker, v_app.price);', 'before'),
- (11, 'rpc_review_ipo', 'ef6e57bb2f99e693978ec2d74de63a10',
-  '    return jsonb_build_object(''approved'', false, ''user_id'', v_app.user_id,',
-  '    perform jex_ev_ipo(false, v_app.user_id, v_app.name, v_app.ticker, v_app.price);', 'before'),
- (12, 'rpc_review_class_application', '6afdba4564a6de15c10e331c2e7a6111',
-  '      return jsonb_build_object(''approved'', true, ''is_conversion'', true,',
-  '      perform jex_ev_class_approved(v_app.company_name, v_app.proposed_ticker, v_app.class, true);', 'before'),
- (13, 'rpc_review_class_application', '6afdba4564a6de15c10e331c2e7a6111',
-  '      return jsonb_build_object(''approved'', true, ''is_conversion'', false,',
-  '      perform jex_ev_class_approved(v_app.company_name, v_app.proposed_ticker, v_app.class, false);', 'before'),
- (14, 'rpc_admin_remove_share_class', 'e7d0dd0f9095ebf409d4e8947c48d7be',
-  '  return jsonb_build_object(''removed'', true,',
-  '  perform jex_ev_class_removed(p_ticker, v_is_conversion, v_meta.class, v_meta.company_name);', 'before'),
- (15, 'approve_registration', '23360fd00ea284218a7e4812f225f362',
-  '  return jsonb_build_object(', '  perform jex_ev_registration(v_user.id, v_user.name, v_user.role, p_starting_cash);', 'before'),
- (16, 'rpc_admin_restore_snapshot', '8701746e9d0e9b653e29e76e7a95db94',
-  '  return jsonb_build_object(''restored_users'',', '  perform jex_ev_snapshot_restored(v_uid, v_snap.label);', 'before'),
- (17, 'rpc_post_minutes', '9320caac984d16568250e6e612b205e3',
-  '  return v_row;', '  perform jex_ev_minutes(v_uid, v_name, v_row->>''title'');', 'before'),
- (18, 'rpc_post_announcement', '6762cb14191428af93a843bb5f8b6ece',
-  '  return v_row;', '  perform jex_ev_announcement(v_uid, v_name, v_row->>''title'');', 'before'),
- (19, 'rpc_admin_resolve_flag', 'ef2c36ae735f9a49f5c06f4de5df07e8',
-  '  return jsonb_build_object(''resolved'', true);', '  perform jex_ev_flag_resolved(p_flag_id, p_action, p_note, v_uid, v_name);', 'before');
-
 do $mig$
 declare
   r record;
   e record;
+  v_plan jsonb;
   v_src text; v_fp text; v_new text; v_nl text; v_a text; v_i text;
   v_n int;
   v_patched int := 0;
 begin
+  -- The edits: function, its production fingerprint, the text to find (with
+  -- its indentation; {nl} is the function's own line ending), the line to
+  -- add, and whether it goes before or after. Held here, inside the block,
+  -- because the SQL editor does not promise separate statements share a
+  -- connection -- a temporary table made by one was gone for the next.
+  select jsonb_agg(to_jsonb(p) order by p.seq) into v_plan
+    from (values
+ (1, 'rpc_admin_save_session', 'a46cb0851b5b36e7b1b71162f0e2a7d6',
+  '  v_session record;', '  v_was jex_session%rowtype;', 'after'),
+   (2, 'rpc_admin_save_session', 'a46cb0851b5b36e7b1b71162f0e2a7d6',
+  '  update jex_session set', '  select * into v_was from jex_session where id = 1 for update;', 'before'),
+   (3, 'rpc_admin_save_session', 'a46cb0851b5b36e7b1b71162f0e2a7d6',
+  '  return jsonb_build_object(''session'', to_jsonb(v_session));',
+  '  perform jex_ev_session(v_uid, v_was.status, v_session.status, v_was.practice_mode, v_session.practice_mode, v_was.session_started_at);', 'before'),
+   (4, 'rpc_expire_day_orders', '987cee18fe3c791b4fc4d5fa908c38c1',
+  '  return jsonb_build_object(''expired'', v_ids);', '  perform jex_ev_day_orders_expired(v_ids);', 'before'),
+   (5, 'rpc_admin_halt_stock', '9ffdde5af93c78a9afc8fc82dd324df6',
+  '  return jsonb_build_object(''halt'', v_row,', '  perform jex_ev_halt(p_ticker, v_reason, v_halted_by, v_uid, p_system_triggered);', 'before'),
+   (6, 'rpc_admin_resume_stock', '808ff8190dae60932a62733d80c4581c',
+  '  return jsonb_build_object(''resumed'', true,', '  perform jex_ev_resume(p_ticker, v_uid, p_system_triggered);', 'before'),
+   (7, 'rpc_admin_delist_company', '55647c94db778a8b2a89995fa1ddf7ca',
+  '  return jsonb_build_object(''delisted'', true,', '  perform jex_ev_delist(p_ticker, v_cancelled_orders);', 'before'),
+   (8, 'rpc_admin_relist_company', '550ad00fed6d5dfcb3155d40df98a66f',
+  '  return jsonb_build_object(''shares_avail'',', '  perform jex_ev_relist(p_ticker, v_co.owner_id, v_co.name);', 'before'),
+   (9, 'rpc_review_delisting', '95244c26ac11d556c01fc8270d5fea4d',
+  '  return jsonb_build_object({nl}    ''approved'', true,',
+  '  perform jex_ev_delisting_settled(v_app.ticker, v_app.kind, v_price, v_payouts, v_cancelled_orders);', 'before'),
+   (10, 'rpc_review_ipo', 'ef6e57bb2f99e693978ec2d74de63a10',
+  '    return jsonb_build_object(''approved'', true, ''company'', v_co,',
+  '    perform jex_ev_ipo(true, v_app.user_id, v_app.name, v_app.ticker, v_app.price);', 'before'),
+   (11, 'rpc_review_ipo', 'ef6e57bb2f99e693978ec2d74de63a10',
+  '    return jsonb_build_object(''approved'', false, ''user_id'', v_app.user_id,',
+  '    perform jex_ev_ipo(false, v_app.user_id, v_app.name, v_app.ticker, v_app.price);', 'before'),
+   (12, 'rpc_review_class_application', '6afdba4564a6de15c10e331c2e7a6111',
+  '      return jsonb_build_object(''approved'', true, ''is_conversion'', true,',
+  '      perform jex_ev_class_approved(v_app.company_name, v_app.proposed_ticker, v_app.class, true);', 'before'),
+   (13, 'rpc_review_class_application', '6afdba4564a6de15c10e331c2e7a6111',
+  '      return jsonb_build_object(''approved'', true, ''is_conversion'', false,',
+  '      perform jex_ev_class_approved(v_app.company_name, v_app.proposed_ticker, v_app.class, false);', 'before'),
+   (14, 'rpc_admin_remove_share_class', 'e7d0dd0f9095ebf409d4e8947c48d7be',
+  '  return jsonb_build_object(''removed'', true,',
+  '  perform jex_ev_class_removed(p_ticker, v_is_conversion, v_meta.class, v_meta.company_name);', 'before'),
+   (15, 'approve_registration', '23360fd00ea284218a7e4812f225f362',
+  '  return jsonb_build_object(', '  perform jex_ev_registration(v_user.id, v_user.name, v_user.role, p_starting_cash);', 'before'),
+   (16, 'rpc_admin_restore_snapshot', '8701746e9d0e9b653e29e76e7a95db94',
+  '  return jsonb_build_object(''restored_users'',', '  perform jex_ev_snapshot_restored(v_uid, v_snap.label);', 'before'),
+   (17, 'rpc_post_minutes', '9320caac984d16568250e6e612b205e3',
+  '  return v_row;', '  perform jex_ev_minutes(v_uid, v_name, v_row->>''title'');', 'before'),
+   (18, 'rpc_post_announcement', '6762cb14191428af93a843bb5f8b6ece',
+  '  return v_row;', '  perform jex_ev_announcement(v_uid, v_name, v_row->>''title'');', 'before'),
+   (19, 'rpc_admin_resolve_flag', 'ef2c36ae735f9a49f5c06f4de5df07e8',
+  '  return jsonb_build_object(''resolved'', true);', '  perform jex_ev_flag_resolved(p_flag_id, p_action, p_note, v_uid, v_name);', 'before')
+    ) as p(seq, fn, md5, anchor, ins, pos);
+
   -- ── 1. batch 1 is in, and every function is done or exactly as expected ──
   if not exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
                   where n.nspname = 'public' and p.proname = 'jex_log') then
     raise exception 'ABORT: run server_events_batch1.sql first. Nothing changed.';
   end if;
-  for r in select distinct fn, md5 from _b2_plan loop
+  for r in select distinct x.fn, x.md5 from jsonb_to_recordset(v_plan) as x(seq int, fn text, md5 text, anchor text, ins text, pos text) loop
     v_src := null; v_fp := null;
     select p.prosrc, md5(replace(p.prosrc, chr(13), '')) into v_src, v_fp
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -123,7 +127,7 @@ begin
       raise exception 'ABORT: % is not the version this was written against (md5 %). Nothing changed -- paste this error back.', r.fn, v_fp;
     end if;
     v_nl := case when position(chr(13) in v_src) > 0 then chr(13) || chr(10) else chr(10) end;
-    for e in select * from _b2_plan where fn = r.fn order by seq loop
+    for e in select * from jsonb_to_recordset(v_plan) as x(seq int, fn text, md5 text, anchor text, ins text, pos text) where x.fn = r.fn order by x.seq loop
       v_a := replace(e.anchor, '{nl}', v_nl);
       v_n := (length(v_src) - length(replace(v_src, v_a, ''))) / length(v_a);
       if v_n <> 1 then
@@ -497,7 +501,7 @@ $fn$;
   execute 'grant execute on function public.rpc_check_short_squeeze(text) to authenticated';
 
   -- ── 4. the edits ──
-  for r in select distinct fn from _b2_plan order by fn loop
+  for r in select distinct x.fn from jsonb_to_recordset(v_plan) as x(seq int, fn text, md5 text, anchor text, ins text, pos text) order by x.fn loop
     select p.prosrc, pg_get_functiondef(p.oid) into v_src, v_i
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
      where n.nspname = 'public' and p.proname = r.fn;
@@ -507,7 +511,7 @@ $fn$;
     end if;
     v_nl := case when position(chr(13) in v_src) > 0 then chr(13) || chr(10) else chr(10) end;
     v_new := v_src;
-    for e in select * from _b2_plan where fn = r.fn order by seq loop
+    for e in select * from jsonb_to_recordset(v_plan) as x(seq int, fn text, md5 text, anchor text, ins text, pos text) where x.fn = r.fn order by x.seq loop
       v_a := replace(e.anchor, '{nl}', v_nl);
       if e.pos = 'before' then
         v_new := replace(v_new, v_a, e.ins || v_nl || v_a);
@@ -523,7 +527,6 @@ $fn$;
 end
 $mig$;
 
-drop table if exists _b2_plan;
 
 -- ── verification ──
 --
