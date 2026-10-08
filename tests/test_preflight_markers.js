@@ -38,6 +38,15 @@ check('preflight flags any function still writing UTC times',
 check('...any dilution the chart would draw as a crash', /'unmarked_dilutions'/.test(pre));
 check('...and a stale JXI open', /'jxi_open_is_honest'/.test(pre) && /index_open_from\(s\.session_open_prices/.test(pre));
 check('...and the web regaining the log or notifications', /'web_can_write_log'/.test(pre) && /has_function_privilege\('authenticated', p\.oid, 'execute'\)/.test(pre));
+check('...and whether the server is recording: last entry, entries and notices by type',
+      /'server_events', jsonb_build_object\(/.test(pre) && /'last_server_entry'/.test(pre)
+      && /'entries_24h'/.test(pre) && /'notices_24h'/.test(pre));
+check('...anything written twice, anything browsers still write, and chain breaks',
+      /'written_twice_24h'/.test(pre) && /'page_still_writing'/.test(pre) && /'chain_breaks_24h'/.test(pre));
+check('...and how EmailJS answered the server\'s mail',
+      /'emails_24h'/.test(pre) && /'email_errors'/.test(pre) && /from net\._http_response r/.test(pre));
+check('...reading pg_net\'s table only through to_jsonb, whose columns shift between versions',
+      !/r\.(status_code|created|content|error_msg)\b/.test(pre));
 check('preflight changes nothing: no insert, update, delete or DDL',
       !/^\s*(insert|update|delete|create|alter|drop|truncate)\b/im.test(pre.split('\n').filter(l=>!/^\s*--/.test(l)).join('\n')));
 

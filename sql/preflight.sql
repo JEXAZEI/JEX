@@ -265,6 +265,73 @@ select jsonb_pretty(jsonb_build_object(
     'trigger_on_users',   (select count(*) > 0 from pg_trigger t join pg_class c on c.oid = t.tgrelid
                             where c.relname = 'jex_users' and t.tgenabled = 'O' and not t.tgisinternal),
     'answers_in_plaintext', (select count(*) from jex_users
-                              where sec_a is not null and sec_a !~ '^[0-9a-f]{64}$'))
+                              where sec_a is not null and sec_a !~ '^[0-9a-f]{64}$')),
+
+  -- ── 10. The server is recording, and the mail is going out ──
+  --
+  -- Every activity entry and notification is written by the database
+  -- function that did the thing (server_events_batch1-4.sql) -- and a failure
+  -- to record is a warning, never an undone trade, so it is silent. This is
+  -- where it shows. Run it after a class as well as before one.
+  --
+  -- last_server_entry    when the server last wrote an entry (Arizona time).
+  --                      Old while classes have been running means it stopped.
+  -- entries_24h          entries the server wrote in the last day, by type
+  -- notices_24h          notifications it sent in the last day, by type
+  -- written_twice_24h    an event logged by the server AND by a browser within a
+  --                      minute. Should be 0 -- browsers cannot write since batch 4.
+  -- page_still_writing   entries browsers wrote in the last day. Should be {}.
+  -- chain_breaks_24h     entries whose "previous" link skips the one before. 0.
+  -- emails_24h           how EmailJS answered the server's mail, by HTTP status.
+  --                      200 is sent. pg_net keeps these for a few hours, so an
+  --                      empty {} the morning after is normal.
+  -- email_errors         what EmailJS said when it refused, if it did.
+  'server_events', jsonb_build_object(
+    'last_server_entry', (
+      select to_char(max(created_at) at time zone 'America/Phoenix', 'Dy Mon FMDD, FMHH12:MI AM')
+        from jex_activity where logged_by = 'server'),
+    'entries_24h', (
+      select coalesce(jsonb_object_agg(type, n), '{}'::jsonb)
+        from (select type, count(*) as n from jex_activity
+               where logged_by = 'server' and created_at > now() - interval '1 day'
+               group by type) x),
+    'notices_24h', (
+      select coalesce(jsonb_object_agg(type, n), '{}'::jsonb)
+        from (select type, count(*) as n from jex_notifications
+               where sent_by = 'server' and created_at > now() - interval '1 day'
+               group by type) x),
+    'written_twice_24h', (
+      select count(*) from jex_activity s
+        join jex_activity b
+          on b.type = s.type and b.description = s.description
+         and b.logged_by is distinct from 'server'
+         and abs(extract(epoch from (b.created_at - s.created_at))) < 60
+       where s.logged_by = 'server' and s.created_at > now() - interval '1 day'),
+    'page_still_writing', (
+      select coalesce(jsonb_object_agg(type, n), '{}'::jsonb)
+        from (select type, count(*) as n from jex_activity
+               where logged_by is not null and logged_by <> 'server'
+                 and created_at > now() - interval '1 day'
+               group by type) x),
+    'chain_breaks_24h', (
+      select count(*) from (
+        select created_at, prev_hash, lag(coalesce(entry_hash, id)) over (order by created_at) as before
+          from jex_activity where type <> 'snapshot') c
+       where c.created_at > now() - interval '1 day'
+         and c.before is not null and c.prev_hash is distinct from c.before),
+    -- Read through to_jsonb so this depends on nothing but the table: its
+    -- columns have shifted between pg_net versions.
+    'emails_24h', (
+      select coalesce(jsonb_object_agg(status, n), '{}'::jsonb)
+        from (select coalesce(to_jsonb(r)->>'status_code', 'no answer') as status, count(*) as n
+                from net._http_response r
+               where (to_jsonb(r)->>'created')::timestamptz > now() - interval '1 day'
+               group by 1) x),
+    'email_errors', (
+      select coalesce(jsonb_agg(distinct left(coalesce(nullif(to_jsonb(r)->>'content', ''), to_jsonb(r)->>'error_msg',
+                                                        'no answer from EmailJS'), 160)), '[]'::jsonb)
+        from net._http_response r
+       where (to_jsonb(r)->>'created')::timestamptz > now() - interval '1 day'
+         and coalesce((to_jsonb(r)->>'status_code')::int, 0) not between 200 and 299))
 
 )) as preflight;

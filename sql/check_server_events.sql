@@ -3,6 +3,10 @@
 --
 -- READ ONLY. Changes nothing.
 --
+-- preflight.sql now carries these checks too (section 10, server_events),
+-- along with how EmailJS answered the server's mail. This file stays for a
+-- quick look on its own.
+--
 -- Run after a few real actions (an announcement, a balance adjustment, a
 -- trade that fills a limit order) to confirm the server-recorded events are
 -- live and nothing is recorded twice.
