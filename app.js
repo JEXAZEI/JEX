@@ -2462,12 +2462,14 @@ async function autoRefresh(){
       sb.get('jex_limit_orders','order=created_at.asc'),
       sb.get('jex_company_members','order=created_at.asc'),
       sb.get('jex_founder_allocations','order=created_at.desc'),
-      safeRpc('rpc_admin_list_flags').then(r=>r||[]),
+      // Officer-only: the server refuses everyone else, so a student's tab
+      // asking every refresh was a wasted request each time.
+      isAdmin(cu())?safeRpc('rpc_admin_list_flags').then(r=>r||[]):Promise.resolve(DB.flags||[]),
     sb.get('jex_classrooms','order=created_at.asc'),
     sb.get('jex_stop_loss','status=eq.active&order=created_at.asc'),
       sb.get('jex_minutes','order=created_at.desc&limit=50'),
       sb.get('jex_dividend_approvals','order=created_at.desc&limit=100'),
-      safeRpc('rpc_admin_list_bug_reports').then(r=>r||[]),
+      isAdmin(cu())?safeRpc('rpc_admin_list_bug_reports').then(r=>r||[]):Promise.resolve(DB.bugReports||[]),
       sb.get('jex_funds','order=created_at.asc'),
       // Other people's cash/holdings/shorts were fetched once at boot and then
       // never again: jex_users is deliberately NOT in the realtime publication
@@ -2495,7 +2497,7 @@ async function autoRefresh(){
     // Chairman/President only (see loadAll) -- keeps newly-arrived pending
     // registrations' emails visible without a full reload; a no-op safeRpc
     // resolves to null for everyone else.
-    const emailMap=await safeRpc('rpc_admin_get_all_emails');
+    const emailMap=isAdmin(cu())?await safeRpc('rpc_admin_get_all_emails'):null;
     if(emailMap){
       const uMap=new Map(emailMap.users.map(e=>[e.id,e.email]));
       const pMap=new Map(emailMap.pending.map(e=>[e.id,e.email]));
@@ -4933,13 +4935,35 @@ function myFillSide(type,id){
   if(type==='fund')return getFund(id)?.manager_id===me.id;
   return id===me.id;
 }
+// Whether rpc_match_limit_order_book could find a pair for this ticker: some
+// open buy at or above some open sell, from different owners -- the server's
+// own rule, where a fund's order belongs to its manager. Every tab polls every
+// 3 seconds, and asking regardless was 20 requests a minute per idle tab, each
+// taking the company row's lock that trades wait on. This only ever skips a
+// ticker the server would answer "no_cross" for: an order whose owner this tab
+// cannot tell (an unknown fund) counts as a different owner, so it is asked.
+function bookOwner(o){
+  if(!o.fund_id)return o.user_id;
+  const f=getFund(o.fund_id);
+  return f?(f.manager_id||o.user_id):'fund:'+o.fund_id;
+}
+function bookCrosses(orders){
+  const buys=orders.filter(o=>o.side==='buy'), sells=orders.filter(o=>o.side==='sell');
+  for(const b of buys)for(const a of sells)
+    if(Number(a.limit_price)<=Number(b.limit_price)&&bookOwner(a)!==bookOwner(b))return true;
+  return false;
+}
 async function checkLimitOrders(){
   if(!isOpen())return;
   const openOrders=DB.limitOrders.filter(o=>o.status==='open');
   if(!openOrders.length)return;
   const tickers=[...new Set(openOrders.map(o=>o.ticker))];
   for(const ticker of tickers){
-    for(let i=0;i<50;i++){
+    // The book is asked only when it can match -- refused server-side while
+    // halted, and pointless while nothing crosses. The pool check below runs
+    // either way: a resting order fills against the pool on its own.
+    const askBook=!isHalted(ticker)&&bookCrosses(openOrders.filter(o=>o.ticker===ticker));
+    for(let i=0;askBook&&i<50;i++){
       let r;
       try{r=await sb.rpc('rpc_match_limit_order_book',{p_ticker:ticker});}
       catch(e){break;}

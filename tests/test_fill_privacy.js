@@ -69,6 +69,9 @@ let refreshed=0;
 global.afterServerEvent=()=>{refreshed++;};
 global.isAdmin=eval('('+grabConst('isAdmin').replace(/^const isAdmin=/,'').replace(/;$/,'')+')');
 eval(grabFn('myFillSide'));
+global.isHalted=t=>(global.HALTED||[]).includes(t);
+eval(grabFn('bookOwner'));eval(grabFn('bookCrosses'));
+global.bookOwner=bookOwner;global.bookCrosses=bookCrosses;
 eval(grabFn('checkLimitOrders'));
 
 // One book match between Jane and Bob, then nothing further to match.
@@ -76,11 +79,16 @@ let served=0;
 const bookMatch={matched:true,fill_qty:5,fill_price:11.01,ticker:'ACME',
   buyer_type:'user',buyer_id:'u-jane',seller_type:'user',seller_id:'u-bob',
   bid_order_id:'b1',ask_order_id:'a1'};
+let rpcLog=[];
 const setup=(mode)=>{
+  rpcLog=[];
   served=0; toasts=[]; refreshed=0;
   global.DB={companies:[{ticker:'ACME',price:11.01}],limitOrders:[
-    {id:'b1',user_id:'u-jane',ticker:'ACME',side:'buy',qty:5,limit_price:11.01,status:'open'}]};
-  global.sb={rpc:async(fn)=>{
+    {id:'b1',user_id:'u-jane',ticker:'ACME',side:'buy',qty:5,limit_price:11.01,status:'open'}].concat(
+    // A book match needs Bob's ask resting against Jane's bid.
+    mode==='book'?[{id:'a1',user_id:'u-bob',ticker:'ACME',side:'sell',qty:5,limit_price:11.01,status:'open'}]:[])};
+  global.HALTED=[];
+  global.sb={rpc:async(fn)=>{rpcLog.push(fn);
     if(fn==='rpc_match_limit_order_book') return (mode==='book'&&served++===0)?bookMatch:{matched:false};
     if(fn==='rpc_fill_limit_vs_pool') return mode==='pool'
       ? {filled:true,fill_qty:3,fill_price:11.01,owner_type:'user',owner_id:'u-jane'}
@@ -124,6 +132,34 @@ const setup=(mode)=>{
   await checkLimitOrders();
   check('the owner\'s notification is fetched even when a stranger polled', refreshed>0);
 
+
+  // ── the book is asked only when it can match ──
+  // Every tab polls every 3s; asking regardless was 20 requests a minute per
+  // idle tab, each taking the company lock that trades wait on.
+  const bookAsked=()=>rpcLog.filter(f=>f==='rpc_match_limit_order_book').length;
+  const order=(id,user,side,price,extra)=>Object.assign({id,user_id:user,ticker:'ACME',side,qty:1,limit_price:price,status:'open'},extra||{});
+  for(const [label,orders,expect] of [
+    ['a bid alone',                         [order('x1','u-jane','buy',11)],0],
+    ['a bid below the ask',                 [order('x1','u-jane','buy',10),order('x2','u-bob','sell',11)],0],
+    ['a bid meeting the ask',               [order('x1','u-jane','buy',11),order('x2','u-bob','sell',11)],1],
+    ['a bid above the ask',                 [order('x1','u-jane','buy',12),order('x2','u-bob','sell',11)],1],
+    ['prices given as text',                [order('x1','u-jane','buy','12.5'),order('x2','u-bob','sell','9.75')],1],
+    ['one person on both sides',            [order('x1','u-jane','buy',12),order('x2','u-jane','sell',11)],0],
+    ['a manager against their own fund',    [order('x1','u-jane','buy',12),order('x2','u-jane','sell',11,{fund_id:'f1'})],0],
+    ['a fund this tab does not know',       [order('x1','u-jane','buy',12),order('x2','u-jane','sell',11,{fund_id:'f-unknown'})],1],
+  ]){
+    viewer=NOSY; setup('none'); DB.limitOrders=orders; DB.companies[0].price=50;   // no pool fill in play
+    await checkLimitOrders();
+    check('book: '+label+(expect?' -- asked':' -- not asked'), bookAsked()===expect, rpcLog.join(','));
+  }
+  viewer=NOSY; setup('none'); global.HALTED=['ACME'];
+  DB.limitOrders=[order('x1','u-jane','buy',12),order('x2','u-bob','sell',11)];
+  await checkLimitOrders();
+  check('book: a halted ticker is not asked', bookAsked()===0, rpcLog.join(','));
+  viewer=NOSY; setup('pool');
+  await checkLimitOrders();
+  check('a resting order still fills against the pool when nothing crosses',
+        bookAsked()===0 && rpcLog.includes('rpc_fill_limit_vs_pool') && DB.limitOrders[0].status==='filled', rpcLog.join(','));
 
   // ── a fund's manager counts as a participant ──
   check('a fund is mine when I manage it',
