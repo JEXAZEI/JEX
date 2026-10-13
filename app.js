@@ -2178,7 +2178,10 @@ function saveWeeklySchedule(){
 // entirely server-side by rpc_session_tick(), which re-derives it from
 // jex_session's own stored fields and the real server clock rather than
 // trusting each client's local Date.now()/timezone math. This function
-// just applies whatever the server decided.
+// just applies whatever the server decided. pg_cron runs the same decision
+// every 15 seconds (sql/server_timer.sql), so the schedule keeps time with
+// no browser open; a tick here then usually finds nothing to change, and the
+// fresh read below is what notices the server's open or close.
 // Boots the currently logged-in user the moment Dev Mode locks them out --
 // same "reach every client within one 15s tick" guarantee every other
 // admin action on this poll already has (see the header comment below).
@@ -4464,7 +4467,8 @@ async function checkCircuitBreakers(){
 // before the 5 minutes were up, leaving the stock halted indefinitely with
 // no other automatic path back. rpc_admin_resume_stock still re-validates
 // the real elapsed time itself, so a client with a stale/slow clock can't
-// force an early resume.
+// force an early resume. pg_cron now lifts these on the server too, every 15
+// seconds (sql/server_timer.sql); whichever gets there first lifts it, once.
 async function checkCircuitBreakerAutoResume(){
   if(!UI.userId)return;
   const now=Date.now();

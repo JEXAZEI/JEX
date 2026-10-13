@@ -132,15 +132,15 @@ select jsonb_pretty(jsonb_build_object(
 
   -- ── 8. Are the fixes still in place ──
   --
-  -- Thirty-nine markers from the migrations that matter most. Every one should be
+  -- Forty-two markers from the migrations that matter most. Every one should be
   -- true. A false here means a function was replaced by hand afterwards and
   -- the fix went with it -- which is exactly how this codebase lost things
   -- before sql/ existed.
   'fixes_still_applied', (
     select jsonb_object_agg(m.label, coalesce(
-             (select position(m.marker in p.prosrc) > 0
+             (select bool_or(position(m.marker in p.prosrc) > 0)
                 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-               where n.nspname = 'public' and p.proname = m.fn limit 1), false))
+               where n.nspname = 'public' and p.proname = m.fn), false))
       from (values
         ('approve_registration needs an officer', 'approve_registration', 'v_caller_role text;'),
         ('forgot password works',                 'reset_migrated_password', 'verify_legacy_security_answer(p_user_id, p_answer)'),
@@ -178,9 +178,12 @@ select jsonb_pretty(jsonb_build_object(
         ('votes write their own log and notices',  'rpc_post_vote', 'perform jex_ev_vote_posted('),
         ('flags tell the Chairman and President',  'rpc_flag_account', 'perform jex_ev_flagged('),
         ('placed orders are logged by the server', 'rpc_place_limit_order', 'perform jex_ev_limit_order('),
-        ('the schedule finishes opens and closes', 'rpc_session_tick', 'perform jex_ev_session_tick('),
+        ('the schedule finishes opens and closes', 'jex_session_tick_core', 'perform jex_ev_session_tick('),
         ('a manual open tells after-hours owners', 'rpc_admin_save_session', 'jex_ev_after_hours_active(v_activated)'),
-        ('price alerts need a signed-in account',  'rpc_trigger_price_alert', 'if not exists (select 1 from jex_users where auth_uid = auth.uid()) then raise exception')
+        ('price alerts need a signed-in account',  'rpc_trigger_price_alert', 'if not exists (select 1 from jex_users where auth_uid = auth.uid()) then raise exception'),
+        ('a manual open sends no email',           'jex_ev_session', 'or p_old is not distinct from'),
+        ('the schedule runs on the server''s clock','rpc_session_tick', 'return jex_session_tick_core();'),
+        ('a halt is lifted once',                  'rpc_admin_resume_stock', 'where ticker = p_ticker for update;')
       ) m(label, fn, marker)),
 
   -- ── 8b. Fixes that are about data, not a line in a function ──
@@ -332,6 +335,44 @@ select jsonb_pretty(jsonb_build_object(
                                                         'no answer from EmailJS'), 160)), '[]'::jsonb)
         from net._http_response r
        where (to_jsonb(r)->>'created')::timestamptz > now() - interval '1 day'
-         and coalesce((to_jsonb(r)->>'status_code')::int, 0) not between 200 and 299))
+         and coalesce((to_jsonb(r)->>'status_code')::int, 0) not between 200 and 299)),
+
+  -- ── 11. The server's own clock ──
+  --
+  -- pg_cron runs the schedule and lifts circuit-breaker halts every 15
+  -- seconds, with or without a browser open (server_timer.sql). If it stops,
+  -- scheduled opens and closes quietly go back to needing a signed-in tab.
+  --
+  -- jobs         each JEX job: its schedule, whether it is on, and its last
+  --              run (Arizona time) and result. The two 15-second jobs
+  --              should show a run from the last minute, "succeeded".
+  -- failed_24h   runs that failed in the last day, by job, with the latest
+  --              error. Should be {}.
+  --
+  -- Read through query_to_xml so this file still runs where pg_cron is not
+  -- installed (it then says so), and through base64 so an error message
+  -- containing < or & comes back as written.
+  'server_timer', case when to_regclass('cron.job') is null
+    then to_jsonb('not set up -- run server_timer.sql'::text)
+    else convert_from(decode((xpath('/row/j/text()', query_to_xml($q$
+      select encode(convert_to(jsonb_build_object(
+        'jobs', (
+          select coalesce(jsonb_object_agg(j.jobname, jsonb_build_object(
+                   'schedule', j.schedule, 'on', j.active,
+                   'last_run', (select to_char(max(d.start_time) at time zone 'America/Phoenix', 'Dy Mon FMDD, FMHH12:MI:SS AM')
+                                  from cron.job_run_details d where d.jobid = j.jobid),
+                   'last_result', (select d.status from cron.job_run_details d
+                                    where d.jobid = j.jobid order by d.start_time desc limit 1))), '{}'::jsonb)
+            from cron.job j where j.jobname like 'jex-%'),
+        'failed_24h', (
+          select coalesce(jsonb_object_agg(x.jobname, jsonb_build_object('runs', x.n, 'latest_error', x.msg)), '{}'::jsonb)
+            from (select j.jobname, count(*) as n,
+                         (array_agg(left(d.return_message, 160) order by d.start_time desc))[1] as msg
+                    from cron.job_run_details d join cron.job j on j.jobid = d.jobid
+                   where j.jobname like 'jex-%' and d.status = 'failed'
+                     and d.start_time > now() - interval '1 day'
+                   group by j.jobname) x)
+      )::text, 'UTF8'), 'base64') as j
+    $q$, false, true, '')))[1]::text, 'base64'), 'UTF8')::jsonb end
 
 )) as preflight;
