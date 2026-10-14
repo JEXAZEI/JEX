@@ -36,8 +36,7 @@ Send only these when asked for "the SQL". Remove a file from this list once
 its result has come back green. `preflight.sql` is read-only and is run before
 each class, so it is never on this list.
 
-- `buyback_self_dealing.sql`
-- `index_basket_register.sql` (changes data — read its header first)
+Nothing right now.
 
 ## Order
 
