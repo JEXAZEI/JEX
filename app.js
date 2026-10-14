@@ -2401,7 +2401,7 @@ document.addEventListener('input',e=>{
 // wants to see live prices. Now the typed state is carried ACROSS the
 // repaint instead, so the repaint can always happen.
 let _bgRender=false;
-let _formSnapshot=null;
+let _formSnapshot=null,_lastFormSnapshot=null;
 function renderBackground(){
   _bgRender=true;
   try{render();}finally{_bgRender=false;}
@@ -4910,8 +4910,8 @@ async function settleLimitOrder(order,cancelIfUnfilled){
 async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
   const co=getCo(ticker);if(!co)return;
   if(co.is_index_fund)return toast('Limit orders aren\'t available for JXI yet — use a market order instead');
-  qty=parseInt(qty);limitPrice=parseFloat(limitPrice);
-  if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  qty=wholeQty(qty);limitPrice=parseFloat(limitPrice);
+  if(!qty)return toast('Enter a whole number of shares');
   if(isNaN(limitPrice)||limitPrice<=0)return toast('Enter a valid limit price');
   // The buy and sell panels are mutually exclusive and render DIFFERENT
   // selects: 'limit-order-type' in the buy panel, 'limit-order-type-sell' in
@@ -5247,7 +5247,7 @@ async function placeBuy(ticker,qty){
   if(!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
   if(u.role==='company'&&co.owner_id===u.id)return toast("You can't buy your own company's stock — use Buyback instead.");
   if(indexHasNoBasket(co))return toast(emptyIndexMsg(co));
-  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  qty=wholeQty(qty);if(!qty)return toast('Enter a whole number of shares');
   // JXI mints on demand -- shares_avail tracks units outstanding for it (see
   // the is_index_fund branch server-side), not a real liquidity cap, so this
   // fast local check doesn't apply. The server enforces the real limits
@@ -5273,7 +5273,7 @@ async function placeBuy(ticker,qty){
 }
 async function placeSell(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
-  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  qty=wholeQty(qty);if(!qty)return toast('Enter a whole number of shares');
   const held=(holdings(u)[ticker])||0;if(held<qty)return toast('You only hold '+held+' shares');
   if(!checkRateLimit(u.id))return;
   let r;
@@ -5289,7 +5289,7 @@ async function placeShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
   if(!canAccessTicker(ticker,u.id))return toast('This share class is restricted — you are not on the whitelist.');
   if(indexHasNoBasket(co))return toast(emptyIndexMsg(co));
-  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  qty=wholeQty(qty);if(!qty)return toast('Enter a whole number of shares');
   const canBorrow=borrowable(co);
   if(canBorrow!=null&&qty>canBorrow)return toast(borrowMsg(co));
   const coll=Math.round(co.price*qty*1.5*100)/100;
@@ -5303,7 +5303,7 @@ async function placeShort(ticker,qty){
 }
 async function coverShort(ticker,qty){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
-  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  qty=wholeQty(qty);if(!qty)return toast('Enter a whole number of shares');
   const short=(shorts(u))[ticker];if(!short||short.qty<qty)return toast('You only have '+(short?.qty||0)+' shorted');
   if(!checkRateLimit(u.id))return;
   let r;
@@ -5489,7 +5489,7 @@ async function fundBuy(fundId,ticker,qty){
   if(co.owner_id===f.manager_id)return toast('A fund cannot trade its own manager\'s company stock — conflict of interest');
   if(!canAccessTicker(ticker,f.manager_id))return toast('This share class is restricted — the fund manager is not on the whitelist.');
   if(indexHasNoBasket(co))return toast(emptyIndexMsg(co));
-  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  qty=wholeQty(qty);if(!qty)return toast('Enter a whole number of shares');
   // JXI/classroom indexes mint units on demand rather than trading against
   // a fixed float, so shares_avail isn't a real liquidity cap for them --
   // same bypass placeBuy() already applies for a direct student purchase
@@ -5508,7 +5508,7 @@ async function fundSell(fundId,ticker,qty){
   // A closed fund may still sell and cover: that is how it winds down
   // (fund_close_trap.sql). Refusing here trapped its investors' money.
   if(f.status!=='active'&&f.status!=='closed')return toast('This fund is closed');
-  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  qty=wholeQty(qty);if(!qty)return toast('Enter a whole number of shares');
   const held=(f.holdings||{})[ticker]||0;if(held<qty)return toast('Fund only holds '+held+' shares');
   let r;
   try{r=await sb.rpc('rpc_fund_sell',{p_fund_id:fundId,p_ticker:ticker,p_qty:qty});}
@@ -5536,7 +5536,7 @@ async function fundShort(fundId,ticker,qty){
   if(co.owner_id===f.manager_id)return toast('A fund cannot trade its own manager\'s company stock — conflict of interest');
   if(!canAccessTicker(ticker,f.manager_id))return toast('This share class is restricted — the fund manager is not on the whitelist.');
   if(indexHasNoBasket(co))return toast(emptyIndexMsg(co));
-  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  qty=wholeQty(qty);if(!qty)return toast('Enter a whole number of shares');
   const canBorrow=borrowable(co);
   if(canBorrow!=null&&qty>canBorrow)return toast(borrowMsg(co));
   const coll=Math.round(co.price*qty*1.5*100)/100;
@@ -5554,7 +5554,7 @@ async function fundCoverShort(fundId,ticker,qty){
   // A closed fund may still sell and cover: that is how it winds down
   // (fund_close_trap.sql). Refusing here trapped its investors' money.
   if(f.status!=='active'&&f.status!=='closed')return toast('This fund is closed');
-  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
+  qty=wholeQty(qty);if(!qty)return toast('Enter a whole number of shares');
   const short=fundShorts(f)[ticker];if(!short||short.qty<qty)return toast('Fund only has '+(short?.qty||0)+' shorted');
   let r;
   try{r=await sb.rpc('rpc_fund_cover_short',{p_fund_id:fundId,p_ticker:ticker,p_qty:qty});}
@@ -5604,7 +5604,7 @@ async function updateFundingGoal(ticker,goal,useOfFunds){
 // to's share count.
 async function doBuyback(ticker,qty,premiumPct){
   if(!requireOpen(ticker))return;const u=cu(),co=getCo(ticker);if(!u||!co)return;
-  qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter valid quantity');
+  qty=wholeQty(qty);if(!qty)return toast('Enter a whole number of shares');
   // Capped at the whole issued count, not at what is in circulation. The
   // cascade starts with the company's own UNSOLD float -- shares it never
   // sold and already owns -- so a company holding most of its float can
@@ -6640,7 +6640,7 @@ function refreshQtyPreview(qtyInputId){
   const reg=_qtyPreviews[qtyInputId];if(!reg)return;
   const input=get(qtyInputId),preview=get(reg.previewId),co=getCo(reg.ticker);
   if(!input||!preview||!co)return;
-  preview.innerHTML=qtyPreviewHTML(co,reg.mode,parseInt(input.value)||0);
+  preview.innerHTML=qtyPreviewHTML(co,reg.mode,wholeQty(input.value));
 }
 function refreshQtyPreviews(){
   for(const id of Object.keys(_qtyPreviews))refreshQtyPreview(id);
@@ -6978,9 +6978,9 @@ async function convertShareClass(ticker,qty){
   if(!meta||meta.ticker===meta.parent_ticker)return toast(ticker+' is not a convertible share class');
   const parent=getCo(meta.parent_ticker);if(!parent)return toast('Company not found');
   if(parent.status!=='listed')return toast(meta.parent_ticker+' is not trading — there is nothing to convert into right now');
-  qty=parseInt(qty);
+  qty=wholeQty(qty);
   const held=(holdings(u)[ticker])||0;
-  if(isNaN(qty)||qty<=0)return toast('Enter how many '+ticker+' shares to convert');
+  if(!qty)return toast('Enter how many '+ticker+' shares to convert, as a whole number');
   if(qty>held)return toast('You only hold '+held+' share'+(held===1?'':'s')+' of '+ticker);
   const r=classRatio(meta);
   // Whole shares only, both here and server-side. With integer ratios this
@@ -7213,7 +7213,9 @@ function renderVoteCard(v,isOwner,isAdminUser){
       +'<span style="font-size:11px;color:var(--text2);line-height:28px">Your voting power: <strong>'+myPower+'</strong></span></div>':'')
     +(myBallot?'<div class="ibox ibox-green" style="padding:6px 10px;margin-bottom:0">You voted: <strong>'+esc(myBallot.choice==='A'?v.option_a:v.option_b)+'</strong> ('+myBallot.voting_power+' votes)</div>':'')
     // Admin/owner controls
-    +((isOwner||isAdminUser)?'<div style="display:flex;gap:6px;margin-top:8px">'
+    // Only for someone rpc_close_vote/rpc_delete_vote will accept -- the
+    // company's owner or a founder. Officers were shown both and always refused.
+    +((isOwner||isAdminUser)&&(c=>c&&canManageCompany(c))(getCo(v.parent_ticker))?'<div style="display:flex;gap:6px;margin-top:8px">'
       +(v.status==='open'?'<button class="btn btn-sm btn-warning" onclick="closeVote(&quot;'+v.id+'&quot;)">Close vote</button>':'')
       +'<button class="btn btn-sm btn-danger" onclick="deleteVote(&quot;'+v.id+'&quot;)">Delete</button></div>':'')
     +'</div>';
@@ -7674,9 +7676,13 @@ function doRegister(){
 // it from the browser. A row whose name is null should cost them an empty
 // avatar, not the whole exchange.
 function userInitials(name){
-  return String(name==null?'':name).trim().split(/\s+/)
-    .map(x=>x[0]||'').join('').slice(0,2).toUpperCase();
+  // By character, not UTF-16 unit: x[0] of "🚀" is half an emoji and drew �.
+  return Array.from(String(name==null?'':name).trim().split(/\s+/)
+    .map(x=>Array.from(x)[0]||'').join('')).slice(0,2).join('').toUpperCase();
 }
+// A positive whole number of shares, or 0. parseInt read "1.5" as 1 and
+// "1e3" as 1 and traded that, with nothing on screen to say so.
+function wholeQty(v){const n=typeof v==='number'?v:Number(String(v??'').trim());return Number.isInteger(n)&&n>0?n:0;}
 function renderTopbar(){
   const u=cu();
   const unread=myUnreadCount();
@@ -7710,8 +7716,8 @@ function renderBanner(){
   let annHtml='';
   if(ann){
     const annColor=ann.level==='urgent'?'background:rgba(255,77,106,0.12);border-bottom:1px solid rgba(255,77,106,0.25);color:#ff4d6a':ann.level==='warning'?'background:rgba(240,165,0,0.1);border-bottom:1px solid rgba(240,165,0,0.2);color:var(--amber)':'background:rgba(55,138,221,0.08);border-bottom:1px solid rgba(55,138,221,0.2);color:#85B7EB';
-    const delBtn=canControl?('<button class="btn btn-sm btn-danger" style="font-size:11px;padding:2px 8px" onclick="deleteAnnouncement(&#39;'+ann.id+'&#39;)">&#x2715;</button>'):'';
-    annHtml='<div style="'+annColor+';padding:8px 20px;font-size:13px;display:flex;align-items:center;justify-content:space-between"><span>📢 <strong>'+esc(ann.title)+'</strong>'+(ann.body?' — '+esc(ann.body):'')+' <span style="font-size:11px;opacity:0.7;margin-left:8px">'+esc(ann.author_name||'')+' · '+(ann.ts||'')+'</span></span>'+delBtn+'</div>';
+    const delBtn=canControl?('<button class="btn btn-sm btn-danger" style="font-size:11px;padding:2px 8px;flex-shrink:0" onclick="deleteAnnouncement(&#39;'+ann.id+'&#39;)">&#x2715;</button>'):'';
+    annHtml='<div style="'+annColor+';padding:8px 20px;font-size:13px;display:flex;align-items:center;justify-content:space-between;gap:8px"><span style="min-width:0;overflow-wrap:anywhere">📢 <strong>'+esc(ann.title)+'</strong>'+(ann.body?' — '+esc(ann.body):'')+' <span style="font-size:11px;opacity:0.7;margin-left:8px">'+esc(ann.author_name||'')+' · '+(ann.ts||'')+'</span></span>'+delBtn+'</div>';
   }
   let sessionBtns='';
   if(canControlSession){
@@ -7740,7 +7746,9 @@ function renderNav(){
 function renderNewsFeed(){
   const u=cu();
   const items=DB.news.filter(n=>!isHiddenTestEntity(getCo(n.ticker)?.owner_id));
-  const canDelete=isAdmin(u);
+  // rpc_delete_news allows the company's owner and founders only, officers
+  // included in neither: a Delete shown to an officer always failed.
+  const canDelete=n=>{const co=getCo(n.ticker);return !!co&&canManageCompany(co);};
   if(!items.length)return`<div class="card"><div class="empty">No company news yet. Companies can post updates from their News tab.</div></div>`;
   return items.map(n=>`<div class="news-item">
     <div class="news-headline">${esc(n.headline)}</div>
@@ -7751,7 +7759,7 @@ function renderNewsFeed(){
         <span>${esc(n.company_name)}</span>
         <span>${n.ts||''}</span>
       </div>
-      ${canDelete?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}
+      ${canDelete(n)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}
     </div>
   </div>`).join('');
 }
@@ -8413,6 +8421,17 @@ function openCompanyPage(ticker){
   if(typeof history!=='undefined')history.pushState({ticker},'','?ticker='+encodeURIComponent(ticker));
   loadCompanyTeamContacts(ticker);
 }
+// Back and Forward. openCompanyPage pushes ?ticker=X and nothing listened for
+// the browser walking that history, so Back changed the address bar and left
+// the company page on screen -- on Android, the back gesture did nothing.
+if(typeof window!=='undefined')window.addEventListener('popstate',()=>{
+  let t=null;try{t=new URLSearchParams(location.search).get('ticker');}catch(e){}
+  const next=t&&getCo(t)?t:null;
+  if(next===UI.companyPage)return;
+  UI.companyPage=next;UI.companyPageTab='overview';UI.tradePage=0;
+  destroyCharts();render();
+  if(next){setTimeout(setupCompanyPageSwipe,100);loadCompanyTeamContacts(next);}
+});
 // Backs the public "Contact the people behind this company" Team tab and
 // the owner's own Founders list -- both need owner+accepted-founder emails,
 // which bulk DB.users no longer carries (see the email-pii-exposure-fix
@@ -9522,8 +9541,13 @@ function renderDivTab(co,myDivs){
     const el=document.getElementById('div-sh-count');if(el)el.textContent=Object.keys(freshMap).length;
     const form=document.getElementById('div-form');
     if(form){
+      // What was being typed, from the live fields or from the repaint that
+      // just replaced them -- a realtime trade arriving mid-entry wiped both.
+      const typed=['div-ps','div-note'].map(id=>get(id)?.value||(_lastFormSnapshot&&_lastFormSnapshot[id]?.v)||'');
       if(totalCirc>0){
         form.innerHTML=`<div class="frow"><label class="flabel">Dividend per share ($)</label><input type="number" id="div-ps" placeholder="e.g. 0.50" min="0.01" step="0.01" oninput="updateDivPrev('${co.ticker}')"></div><div id="div-prev"></div><div class="frow" style="margin-top:10px"><label class="flabel">Note to investors</label><input type="text" id="div-note" placeholder="e.g. Q1 earnings dividend"></div><button class="btn btn-success" onclick="busy(this,&quot;Paying…&quot;,()=>issueDividend('${co.ticker}',get('div-ps')?.value,get('div-note')?.value))">Pay dividend now</button>`;
+        ['div-ps','div-note'].forEach((id,n)=>{const el=get(id);if(el&&typed[n]&&!el.value)el.value=typed[n];});
+        if(typed[0])updateDivPrev(co.ticker);
       } else {
         form.innerHTML='<div class="empty">No shareholders yet.</div>';
       }
@@ -9552,6 +9576,9 @@ function renderFinancialsHistory(financials){
   return financials.map(f=>`<div class="card" style="margin-bottom:10px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div class="section-title" style="margin-bottom:0">${esc(f.period)}</div><span style="font-size:11px;color:var(--text2)">${f.ts}</span></div><div class="grid3" style="margin-bottom:8px"><div class="mcard"><div class="mlabel">Revenue</div><div class="mval" style="font-family:var(--mono)">${fmt(f.revenue)}</div></div><div class="mcard"><div class="mlabel">Profit</div><div class="mval" style="font-family:var(--mono);color:${f.profit>=0?'var(--green)':'var(--red)'}">${fmt(f.profit)}</div></div><div class="mcard"><div class="mlabel">Margin</div><div class="mval" style="font-family:var(--mono)">${f.revenue>0?Math.round(f.profit/f.revenue*100)+'%':'—'}</div></div></div><div style="font-size:13px;color:var(--text2)">${esc(f.summary)}</div></div>`).join('');
 }
 function renderFinancialsMgmtTab(co,myFinancials){
+  // postFinancials takes the owner account only; a co-founder was shown the
+  // whole form and refused at "Post report".
+  if(cu()?.id!==co.owner_id)return`<div class="card"><div class="section-title">Post financial results</div><div class="ibox ibox-blue">Financial results are posted from the company account.</div></div>`+renderFinancialsHistory(myFinancials);
   return`<div class="card"><div class="section-title">Post financial results</div><div class="ibox ibox-blue" style="margin-bottom:12px">Give investors something to evaluate before an IPO, dilution round, or just to build confidence in the stock. Posted reports notify all current shareholders.</div><div class="frow"><label class="flabel">Period</label><input type="text" id="fin-period" placeholder="e.g. Q1 2026"></div><div class="row"><div class="frow" style="flex:1"><label class="flabel">Revenue ($)</label><input type="number" id="fin-revenue" placeholder="10000" min="0" step="0.01"></div><div class="frow" style="flex:1"><label class="flabel">Profit ($, negative for a loss)</label><input type="number" id="fin-profit" placeholder="2500" step="0.01"></div></div><div class="frow"><label class="flabel">Summary for investors</label><textarea id="fin-summary" rows="3" placeholder="e.g. Revenue grew 20% quarter over quarter driven by..."></textarea></div><button class="btn btn-primary" onclick="postFinancials('${co.ticker}',get('fin-period')?.value,get('fin-revenue')?.value,get('fin-profit')?.value,get('fin-summary')?.value)">Post report</button></div><div class="section-title" style="margin:16px 0 8px">History</div>${renderFinancialsHistory(myFinancials)}`;
 }
 function renderBBTab(co,myBBs){
@@ -10706,7 +10733,7 @@ function renderAdminNews(){
           <span>${esc(n.company_name)}</span>
           <span>${n.ts||''}</span>
         </div>
-        <button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>
+        ${(c=>c&&canManageCompany(c))(getCo(n.ticker))?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}
       </div>
     </div>`).join('')}
   </div>`;
@@ -11545,6 +11572,9 @@ function render(){
   },60);
   // Order matters: put the user's in-flight typing back first, then let
   // restoreDrafts() fill only whatever is still genuinely empty.
+  // Kept a moment longer for forms that are drawn after this, by a fetch
+  // (the dividend form): their fields did not exist yet to be restored.
+  _lastFormSnapshot=_formSnapshot;
   if(_formSnapshot){restoreFormState(_formSnapshot);_formSnapshot=null;}
   restoreDrafts();
   // The previews were just drawn for each box's DEFAULT quantity. Re-price

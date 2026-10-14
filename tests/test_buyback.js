@@ -7,6 +7,7 @@ function extractFn(name){
 }
 // State the extracted functions now share (see _stateEpoch / upsertById in app.js).
 var _stateEpoch=0;eval(src.slice(src.indexOf('function upsertById('),src.indexOf('function handleRealtimeUpdate(')).replace('function upsertById','upsertById=function'));
+eval((m=>m[0].replace('function wholeQty','wholeQty=function'))(/^function wholeQty\(.*$/m.exec(src)));
 eval(extractFn('doBuyback').replace('async function doBuyback','doBuyback=async function'));
 
 let fails=0;

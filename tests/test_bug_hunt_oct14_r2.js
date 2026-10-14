@@ -92,5 +92,22 @@ check('a closed fund holding positions gets a wind-down panel',/isManager&&f\.st
 check('the buyback preview skips insiders and out-of-band asks, and caps by cash',
   /const insider=id=>/.test(src)&&/o\.limit_price>band\.upper/.test(src)&&/Math\.floor\(\(cashFor-spend\)\/a\.limit_price\+1e-9\)/.test(src));
 
+// ── UI flows with awkward data ──
+{
+  const userInitials=load('userInitials');
+  const i=userInitials('🚀🚀 Rocket Co');
+  check('initials never split an emoji in half',!/[\ud800-\udbff](?![\udc00-\udfff])/.test(i)&&i==='🚀R',JSON.stringify(i));
+  const wholeQty=load('wholeQty');
+  check('whole shares only: 1.5, 2.9, -5, 0 and blank are refused',[ '1.5','2.9','-5','0','',null,'abc'].every(v=>wholeQty(v)===0));
+  check('...and 1e3 is the thousand it says, 12 is 12',wholeQty('1e3')===1000&&wholeQty(' 12 ')===12&&wholeQty(7)===7);
+}
+check('no trade handler parses its quantity with parseInt',!/qty=parseInt\(qty\)/.test(src));
+check('officers are not shown news Delete the server refuses',!/const canDelete=isAdmin\(u\);/.test(src));
+check('vote Close/Delete only for the company\'s owner or founders',/\(isOwner\|\|isAdminUser\)&&\(c=>c&&canManageCompany\(c\)\)\(getCo\(v\.parent_ticker\)\)/.test(src));
+check('co-founders are not shown a financials form the server refuses',/function renderFinancialsMgmtTab\(co,myFinancials\)\{[\s\S]{0,200}cu\(\)\?\.id!==co\.owner_id/.test(src));
+check('Back and Forward follow the company page',/addEventListener\('popstate'/.test(src));
+check('a typed dividend survives the shareholder fetch',/const typed=\['div-ps','div-note'\]/.test(src));
+check('a long announcement wraps instead of widening the page',/<span style="min-width:0;overflow-wrap:anywhere">📢/.test(src));
+
 console.log(fails?fails+' FAILED':'all passed');
 process.exit(fails?1:0);
