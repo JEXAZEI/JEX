@@ -401,8 +401,11 @@ function subscribeRealtime(){
           return;
         }
         if(msg.event==='postgres_changes'||msg.event==='INSERT'||msg.event==='UPDATE'||msg.event==='DELETE'){
-          const {table,new:newRow,old:oldRow,eventType}=msg.payload?.data||msg.payload||{};
-          handleRealtimeUpdate(table,eventType||msg.event,newRow,oldRow);
+          // The raw socket gets Realtime's wire shape -- {table, type, record,
+          // old_record}. new/old/eventType are what supabase-js renames them to,
+          // and reading only those left every event applying nothing.
+          const d=msg.payload?.data||msg.payload||{};
+          handleRealtimeUpdate(d.table,d.type||d.eventType||msg.event,d.record||d.new,d.old_record||d.old);
         }
       }catch(err){console.warn('JEX Realtime: failed to parse message:',err.message,e.data);}
     };
@@ -797,7 +800,7 @@ function exportCSV(filename,rows,headers){
     const s=neutralizeFormula(String(v).replace(/[\r\n]+/g,' '));
     return s.includes(',')||s.includes('"')?'"'+s.replace(/"/g,'""')+'"':s;
   };
-  const lines=[headers.map(escape).join(','),...rows.map(r=>headers.map(h=>escape(r[h]||r[headers.indexOf(h)])).join(','))];
+  const lines=[headers.map(escape).join(','),...rows.map(r=>headers.map(h=>escape(r[h]!==undefined?r[h]:r[headers.indexOf(h)])).join(','))];
   const blob=new Blob([lines.join('\n')],{type:'text/csv'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;a.click();
 }
@@ -821,7 +824,7 @@ function exportTableCSV(table){
       exportCSV('jex-balances-'+now+'.csv',rows,['name','email','cash','portfolio','net_worth','dividends']);
       break;}
     case 'votes':
-      exportCSV('jex-votes-'+now+'.csv',DB.votes.map(v=>({ts:v.ts,ticker:v.parent_ticker,question:v.question,option1:v.option1,option2:v.option2,status:v.status,ballots:DB.ballots.filter(b=>b.vote_id===v.id).length})),['ts','ticker','question','option1','option2','status','ballots']);
+      exportCSV('jex-votes-'+now+'.csv',DB.votes.map(v=>({ts:v.ts,ticker:v.parent_ticker,question:v.question,option_a:v.option_a,option_b:v.option_b,status:v.status,ballots:DB.ballots.filter(b=>b.vote_id===v.id).length})),['ts','ticker','question','option_a','option_b','status','ballots']);
       break;
     case 'orders':
       exportCSV('jex-orders-'+now+'.csv',DB.limitOrders,['ts','ticker','side','qty','limit_price','status','order_type','filled_price','filled_at']);
@@ -1412,7 +1415,11 @@ function buildShareholderMap(tickers,userSource){
   });
   tickers.forEach(ticker=>{
     const co2=getCo(ticker);if(!co2)return;
-    const knownHeld=Object.values(map).reduce((s,sh)=>s+(sh.shares[ticker]||0),0);
+    // Hidden test accounts and their funds hold shares too; leaving them out
+    // here labelled their shares "Index funds".
+    const hiddenHeld=users.filter(u2=>['student','company'].includes(u2.role)&&isHiddenTestEntity(u2.id)).reduce((s,u2)=>s+(holdings(u2)[ticker]||0),0)
+      +(DB.funds||[]).filter(f=>isHiddenTestEntity(f.manager_id)).reduce((s,f)=>s+((f.holdings||{})[ticker]||0),0);
+    const knownHeld=Object.values(map).reduce((s,sh)=>s+(sh.shares[ticker]||0),0)+hiddenHeld;
     const circulating=co2.shares-co2.shares_avail;
     const indexHeld=circulating-knownHeld;
     if(indexHeld>0){
@@ -1457,7 +1464,9 @@ function bandClamp(ticker,price,current){
 // Buys are REJECTED, so their preview keeps showing the raw impact price --
 // that really is what the order would attempt; impactPreview says separately
 // that it would be refused.
-const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);const raw=Math.max(0.01,Math.round((dir==='buy'?co.price*(1+impact):co.price*(1-impact))*100)/100);return dir==='buy'?raw:bandClamp(co.ticker,raw,co.price);};
+// 'cover' moves the price up like a buy but is clamped like a sell
+// (rpc_trade_cover_short runs jex_band_clamp on it).
+const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);const up=dir==='buy'||dir==='cover';const raw=Math.max(0.01,Math.round((up?co.price*(1+impact):co.price*(1-impact))*100)/100);return dir==='buy'?raw:bandClamp(co.ticker,raw,co.price);};
 // Largest quantity actually affordable at the IMPACTED fill price, not at
 // the quoted price. A market buy never fills at co.price -- impactPrice()
 // pushes it up by (qty/liq)*0.015 -- so floor(cash/co.price) always
@@ -2451,6 +2460,10 @@ async function autoRefresh(){
   const minGap=realtimeHealthy()?60000:18000;
   if(now-_lastRefresh<minGap)return;
   _lastRefresh=now;
+  // The signed-in user's balance as it stood when these reads went out. If it
+  // is unchanged when they come back, nothing was applied locally in between,
+  // so the server's row is at least as new and replaces ours.
+  const ownBefore=(u=>u?JSON.stringify([u.cash,u.holdings,u.shorts,u.fund_units]):null)(cu());
   try{
     // Only reload lightweight tables that change frequently
     const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports,newFunds,newUsers]=await Promise.all([
@@ -2509,14 +2522,20 @@ async function autoRefresh(){
     }
     // Merge new trades (avoid duplicates)
     const existingIds=new Set(DB.trades.map(t=>t.id));
-    newTrades.forEach(t=>{if(!existingIds.has(t.id))DB.trades.unshift(t);});
+    // newTrades is newest-first; unshifting one at a time reversed each batch.
+    DB.trades.unshift(...newTrades.filter(t=>!existingIds.has(t.id)));
     DB.limitOrders=newLimitOrders;
     // Merge rather than replace: the signed-in user's own row carries local
-    // state applied optimistically by applyTradeResult, and a wholesale swap
-    // could briefly rewind their balance to a pre-trade read.
+    // state applied optimistically by applyTradeResult, and a read that went
+    // out before that trade would rewind it. So their own row is taken only
+    // when nothing changed it locally while the read was in flight. Skipping
+    // it always meant a dividend, a fill or a margin call made from another
+    // browser never reached their balance until a reload.
     if(Array.isArray(newUsers)&&newUsers.length){
       const byId=new Map(DB.users.map(u=>[u.id,u]));
-      newUsers.forEach(nu=>{const cur=byId.get(nu.id);if(cur){if(nu.id!==UI.userId)Object.assign(cur,nu);}else DB.users.push(nu);});
+      const me=cu();
+      const ownQuiet=!!me&&ownBefore===JSON.stringify([me.cash,me.holdings,me.shorts,me.fund_units]);
+      newUsers.forEach(nu=>{const cur=byId.get(nu.id);if(cur){if(nu.id!==UI.userId||ownQuiet)Object.assign(cur,nu);}else DB.users.push(nu);});
       DB.users=DB.users.filter(u=>newUsers.some(nu=>nu.id===u.id)||u.id===UI.userId);
     }
     // Update session timer if needed
@@ -3048,7 +3067,8 @@ async function registerCompany(name,username,email,pw,desc,secQ,secA,emailVerifi
 async function approveReg(id,startCash){
   const r=DB.pending.find(x=>x.id===id);if(!r)return;
   const classroomId=document.getElementById('classroom-'+id)?.value||null;
-  startCash=parseFloat(startCash)||DB.session.starting_cash||10000;
+  // A typed 0 is a real amount; only a blank or unreadable box falls back.
+  startCash=(v=>Number.isFinite(v)&&v>=0?v:(DB.session.starting_cash??10000))(parseFloat(startCash));
   // The copy from jex_pending into jex_users (including the legacy password
   // hash, for accounts that still have one) happens entirely inside this
   // function now, since the client itself can no longer read that value.
@@ -3773,7 +3793,9 @@ async function sendFounderInvite(ownerId,studentId){
   if(!co)return toast('Company not found');
   if(!canManageCompany(co))return toast('Only this company\'s owner or founders can invite a founder');
   const student=getUser(studentId);if(!student)return toast('Student not found');
-  const existing=DB.companyMembers.filter(m=>m.company_user_id===ownerId&&m.status!=='declined');
+  // Pending and accepted only: a removed founder no longer holds a seat, and
+  // the Founders tab already shows that seat as free.
+  const existing=DB.companyMembers.filter(m=>m.company_user_id===ownerId&&(m.status==='pending'||m.status==='accepted'));
   if(existing.length>=3)return toast('Maximum 3 founders reached');
   if(existing.find(m=>m.student_id===studentId))return toast(student.name+' is already invited or a member');
   // Runs server-side (rpc_send_founder_invite), re-checking the same
@@ -4126,7 +4148,7 @@ async function placeStopLoss(ticker,triggerPrice){
   if(isNaN(triggerPrice)||triggerPrice<=0)return toast('Enter a valid trigger price');
   if(triggerPrice>=co.price)return toast('Stop-loss must be below current price ('+fmt(co.price)+')');
   const held=(holdings(u)[ticker])||0;
-  if(held<=0)return toast('You don&#39;t hold any '+ticker+' shares');
+  if(held<=0)return toast('You don\'t hold any '+ticker+' shares');
   // Runs server-side (rpc_place_stop_loss), which derives the caller and
   // their real held shares itself instead of trusting this client-built
   // { user_id, shares } -- a raw POST here used to let anyone create a
@@ -4455,8 +4477,9 @@ async function checkCircuitBreakers(){
       const freshHalts=await sb.get('jex_halts','ticker=eq.'+co.ticker);
       if(freshHalts.length){DB.halts.push(...freshHalts.filter(h=>!DB.halts.some(x=>x.ticker===h.ticker)));continue;}
       const reason='Circuit breaker: '+co.ticker+' moved '+Math.round(pctMove)+'% from session open (threshold: '+threshold+'%)';
-      await haltStock(co.ticker,reason,true);
-      toast('⚡ Circuit breaker triggered on '+co.ticker+' — trading halted');
+      // Only when the halt went through: a refused halt (cooldown, another
+      // client first) has already said why, and "halted" would cover that up.
+      if(await haltStock(co.ticker,reason,true))toast('⚡ Circuit breaker triggered on '+co.ticker+' — trading halted');
     }
   }
 }
@@ -4522,7 +4545,7 @@ function showBrowserPush(title,body){
   if(Notification.permission!=='granted'){_pushEnabled=false;return;}
   // Chrome works best with minimal options
   try{
-    const opts={body:body.replace(/[^-]/g,'').trim()||body,tag:'jex-notif',renotify:true};
+    const opts={body:body.replace(/\p{Extended_Pictographic}\uFE0F?/gu,'').trim()||body,tag:'jex-notif',renotify:true};
     const n=new Notification('JEX — '+title,opts);
     n.onclick=()=>{window.focus();n.close();};
     setTimeout(()=>{try{n.close();}catch(e){}},7000);
@@ -4650,6 +4673,7 @@ async function haltStock(ticker,reason,systemTriggered=false){
   DB.halts.push(rec);
   afterServerEvent();
   toast(ticker+' halted');render();
+  return true;
 }
 async function resumeStock(ticker,systemTriggered=false){
   const u=cu();
@@ -4781,6 +4805,7 @@ async function settleLimitOrder(order,cancelIfUnfilled){
       // but silence is not: a limit set AT the market price never fills, for a
       // reason that is invisible unless it is said out loud.
       else if(pr&&pr.reason==='limit_would_be_breached'){
+        order._explained=true;
         toast('Order resting — filling all '+order.qty+' × '+order.ticker+' at once would push the price past your limit of '+fmt(order.limit_price)
           +'. It fills if the market comes to you, or try a smaller quantity.');
       }
@@ -4792,6 +4817,7 @@ async function settleLimitOrder(order,cancelIfUnfilled){
       // it. Only said here, on the order they just placed: checkLimitOrders()
       // retries this every tick and would otherwise repeat itself forever.
       else if(pr&&pr.reason==='company_cannot_pay'){
+        order._explained=true;
         toast('Order resting — '+order.ticker+' does not have the cash to buy back '+order.qty+' shares right now'
           +(pr.needed!=null?' (that costs '+fmt(pr.needed)+', the company holds '+fmt(pr.company_has)+')':'')
           +'. It fills when the company can pay, or when another investor buys them from you.');
@@ -4878,8 +4904,13 @@ async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
   const filledQty=await settleLimitOrder(r.order,orderType==='fok');
   // Fills here were never logged by the page; the server logs them now.
   if(filledQty>0)afterServerEvent();
+  // settleLimitOrder may already have said why the order is resting or was
+  // cancelled; a generic "waiting for match" toast here replaced that at once.
+  const placed=DB.limitOrders.find(x=>x.id===r.order?.id);
+  const stillOpen=!!placed&&placed.status==='open';
   if(filledQty>=qty)toast('Limit order fully filled!');
-  else if(filledQty>0)toast('Partial fill: '+filledQty+' matched, '+(qty-filledQty)+' queued @ '+fmt(limitPrice));
+  else if(filledQty>0)toast('Partial fill: '+filledQty+' matched, '+(qty-filledQty)
+    +(stillOpen?' queued @ '+fmt(limitPrice):' cancelled'+(orderType==='fok'?' (fill-or-kill)':'')));
   // A fill-or-kill that did not fill used to say nothing whatsoever, so the
   // student could not tell whether it had worked, failed, or was still
   // pending. Reads the real local status rather than assuming the cancel
@@ -4891,7 +4922,7 @@ async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
     if(!o||o.status==='cancelled')
       toast('Fill-or-kill: all '+qty+'×'+ticker+' could not be filled at '+fmt(limitPrice)+' right now, so nothing was traded and the order was cancelled.');
   }
-  else toast('Limit '+side+': '+qty+'×'+ticker+' @ '+fmt(limitPrice)+' — waiting for match');
+  else if(stillOpen&&!r.order._explained)toast('Limit '+side+': '+qty+'×'+ticker+' @ '+fmt(limitPrice)+' — waiting for match');
   render();
 }
 
@@ -5616,7 +5647,9 @@ function dividendPassThrough(ticker,perShare){
   return{total:Math.round(total*100)/100,cuts};
 }
 async function issueDividend(ticker,perShare,note){
-  const co=getCo(ticker),owner=cu();if(!co||!owner)return;
+  // The company account pays, not whoever clicked: a co-founder's own cash
+  // is not the company's.
+  const co=getCo(ticker),owner=co&&(getUser(co.owner_id)||cu());if(!co||!owner)return;
   perShare=Math.round(parseFloat(perShare)*100)/100;
   if(isNaN(perShare)||perShare<=0)return toast('Enter a valid per-share amount');
   if(!note||note.trim().length<5)return toast('Please add a note');
@@ -6322,7 +6355,7 @@ function impactPreview(co,qty,dir){
     const total=Math.round(co.price*qty*100)/100;
     return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:var(--bg3);border-radius:var(--radius)">Fill: <strong>${fmt(co.price)}</strong> <span style="color:var(--text2)">live index price, no price impact</span> &nbsp;|&nbsp; Total: <strong>${fmt(total)}</strong></div>`;
   }
-  const np=impactPrice(co,qty,dir),delta=np-co.price,pct=((delta/co.price)*100).toFixed(2),cls=dir==='buy'?'price-up':'price-down';
+  const np=impactPrice(co,qty,dir),delta=np-co.price,pct=((delta/co.price)*100).toFixed(2),cls=dir==='buy'||dir==='cover'?'price-up':'price-down';
   // The band note. Two different situations, because the server treats the two
   // sides differently on purpose:
   //
@@ -6346,6 +6379,10 @@ function impactPreview(co,qty,dir){
         note=`<div style="margin-top:4px;color:var(--warn,#E0A800)">⚠ Above the price band ceiling of ${fmt(b.upper)} — this order will be refused. Try a smaller quantity.</div>`;
       else if(co.price<b.lower)
         note=`<div style="margin-top:4px;color:var(--text2)">${co.ticker} is below the ${fmt(b.lower)} band floor. Buying is allowed — it moves the price back toward the band.</div>`;
+    } else if(dir==='cover'){
+      // A cover is clamped, not refused: it closes at the ceiling.
+      if(np>=b.upper&&co.price<b.upper)
+        note=`<div style="margin-top:4px;color:var(--text2)">Limit up — held at the ${fmt(b.upper)} ceiling (±${b.pct}% from the ${fmt(b.open)} open). The cover still goes through.</div>`;
     } else if(np<=b.lower&&co.price>b.lower){
       note=`<div style="margin-top:4px;color:var(--text2)">Limit down — held at the ${fmt(b.lower)} floor (±${b.pct}% from the ${fmt(b.open)} open). The sale still goes through.</div>`;
     }
@@ -6471,9 +6508,9 @@ function shortPrev(co,qty){
 // the box -- at the price on screen now, not the one when the panel opened.
 const _qtyPreviews={};
 function qtyPreviewHTML(co,mode,qty){
-  // Covering is buying back borrowed shares, same direction as a plain
-  // buy -- only an actual sell should get the 'sell' impact direction.
-  const base=mode==='short'?shortPrev(co,qty):impactPreview(co,qty,mode==='sell'?'sell':'buy');
+  // Covering is buying back borrowed shares: the price moves up like a buy,
+  // but the server clamps it to the band instead of refusing it.
+  const base=mode==='short'?shortPrev(co,qty):impactPreview(co,qty,mode==='sell'?'sell':mode==='cover'?'cover':'buy');
   const warn=qtyWarning(co,mode,qty);
   return base+(warn?`<div class="qty-warn" style="font-size:12px;margin-top:4px;padding:5px 10px;border-radius:var(--radius);color:var(--red);background:rgba(255,77,106,0.08)">${warn}</div>`:'');
 }
@@ -7494,7 +7531,7 @@ function renderLogin(){
   const admins=DB.users.filter(u=>isAdmin(u)).sort((a,b)=>(roleOrder[a.role]??9)-(roleOrder[b.role]??9));
   const pending=DB.pending.length;
   if(UI.loginView==='forgot-email'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 1 of 3</div><div class="frow"><label class="flabel">Your email address</label><input type="email" id="forgot-email" placeholder="you@school.edu" onkeydown="if(event.key==='Enter')forgotStep1(get('forgot-email')?.value)"></div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep1(get('forgot-email')?.value)">Continue</button><button class="btn" onclick="UI.loginView='select';render()">Back</button></div></div></div>`;}
-  if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${esc(u?.name)}</strong></div><div class="frow"><label class="flabel">${u?.sec_q||'Security question'}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
+  if(UI.loginView==='forgot-secq'){const u=getUser(UI.forgotUserId);return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 2 of 3</div><div class="ibox ibox-blue" style="margin-bottom:12px">Account: <strong>${esc(u?.name)}</strong></div><div class="frow"><label class="flabel">${esc(u?.sec_q||'Security question')}</label><input type="text" id="forgot-ans" placeholder="Your answer" autocomplete="off" onkeydown="if(event.key==='Enter')forgotStep2(get('forgot-ans')?.value)"></div><div style="font-size:12px;color:var(--text2);margin-bottom:12px">Answers are not case-sensitive.</div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep2(get('forgot-ans')?.value)">Continue</button><button class="btn" onclick="UI.loginView='forgot-email';render()">Back</button></div></div></div>`;}
   if(UI.loginView==='forgot-newpw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Forgot password — Step 3 of 3</div><div class="success-box">Security question answered correctly.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="forgot-pw1" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="forgot-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('forgot-pw2')" tabindex="-1">👁</button></div></div><div class="login-actions"><button class="btn btn-primary" onclick="forgotStep3(get('forgot-pw1')?.value,get('forgot-pw2')?.value)">Reset password</button><button class="btn" onclick="UI.loginView='select';render()">Cancel</button></div></div></div>`;}
   if(UI.loginView==='recover-pw'){return `<div class="login-page"><div class="login-card"><div class="login-logo"><span class="jex">JEX</span></div><div class="login-sub">Set a new password</div><div class="ibox ibox-blue" style="margin-bottom:12px">You followed a password reset link. Choose a new password below.</div><div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="recover-pw1" placeholder="New password (min 6 characters)"><button type="button" class="pw-eye" onclick="togglePw('recover-pw1')" tabindex="-1">👁</button></div></div><div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="recover-pw2" placeholder="Repeat new password"><button type="button" class="pw-eye" onclick="togglePw('recover-pw2')" tabindex="-1">👁</button></div></div><div class="login-actions"><button class="btn btn-primary" onclick="finishPasswordRecovery(get('recover-pw1')?.value,get('recover-pw2')?.value)">Set password</button></div></div></div>`;}
   if(UI.loginView==='register'){
@@ -7676,7 +7713,7 @@ function renderCompanyPage(parentTicker){
   let html=`<div id="company-page-content">
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap">
     <button class="btn btn-sm" onclick="closeCompanyPage()">← Market</button>
-    ${co.logo?`<img src="${co.logo}" style="width:40px;height:40px;object-fit:cover;border-radius:8px;border:1px solid var(--border)">`:''}
+    ${co.logo?`<img src="${esc(co.logo)}" style="width:40px;height:40px;object-fit:cover;border-radius:8px;border:1px solid var(--border)">`:''}
     <div style="flex:1;min-width:0">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-size:18px;font-weight:500">${esc(co.name)}</span>
@@ -7864,7 +7901,7 @@ function renderCompanyPage(parentTicker){
             html+='<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;margin-bottom:3px;border-radius:4px;position:relative;overflow:hidden">'
               +'<div style="position:absolute;left:0;top:0;bottom:0;background:rgba(0,200,150,0.08);width:'+pct+'%"></div>'
               +'<span style="font-family:var(--mono);font-size:13px;font-weight:500;color:var(--green);position:relative">'+fmt(o.limit_price)+'</span>'
-              +'<span style="font-size:12px;color:var(--text2);position:relative">'+o.qty+' shares</span>'
+              +'<span style="font-size:12px;color:var(--text2);position:relative">'+bidDisplayQty+(isBidIceberg?'<span title="Iceberg order"> 🧊</span>':'')+' shares</span>'
               +'</div>';
           });
           if(book.bids.length>5)html+='<div style="font-size:11px;color:var(--text3);padding:2px 8px">+' +(book.bids.length-5)+' more</div>';
@@ -7952,7 +7989,7 @@ function renderCompanyPage(parentTicker){
           +'<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="cp-qty" value="'+short.qty+'" min="1" max="'+short.qty+'"></div>'
           +'<div style="padding-bottom:12px"><button class="btn btn-warning" onclick="busy(this,&quot;Covering…&quot;,()=>cpTrade(&quot;cover&quot;))">Cover short</button></div></div>'
           +quickQtyButtonsHTML(parentTicker,'cover','cp-qty','cp-preview')
-          +'<div id="cp-preview">'+impactPreview(co,short.qty,'buy')+'</div>';
+          +'<div id="cp-preview">'+impactPreview(co,short.qty,'cover')+'</div>';
       }
       // Stop-loss section -- not offered for JXI, same reasoning as limit/short above.
       if(!idxFund){
@@ -8061,7 +8098,7 @@ function renderCompanyPage(parentTicker){
 function renderTickerBar(){const u=cu();return `<div class="ticker-bar">${groupByCompany(DB.companies.filter(c=>c.status==='listed'&&canAccessTicker(c.ticker,u?.id)&&!isHiddenTestEntity(c.owner_id))).map(c=>{const chg=priceChg(c),w=isWatched(c.ticker),halted=isHalted(c.ticker);
   const preMarket=!isOpen()?getPreMarketPrice(c.ticker):null;
   return `<div class="ticker-item ${UI.panelTicker===c.ticker?'active-t':''} ${w?'watched':''} ${halted?'halted-ticker':''}" onclick="openCompanyPage('${c.ticker}')" style="${c.brand_color?'border-color:'+c.brand_color+'30':''}">
-  ${c.logo?`<img src="${c.logo}" style="width:24px;height:24px;object-fit:cover;border-radius:4px;margin-bottom:3px">`:``}
+  ${c.logo?`<img src="${esc(c.logo)}" style="width:24px;height:24px;object-fit:cover;border-radius:4px;margin-bottom:3px">`:``}
   <div class="tsym">${c.ticker}${w?' ★':''}${halted?' ⚠️':''}</div>
   <div class="tprice" style="${halted?'color:var(--red)':''}">${fmt(c.price)}</div>
   ${preMarket?`<div style="font-size:10px;color:var(--amber)">pre: ${fmt(preMarket)}</div>`:`<div class="tchg ${chg>=0?'price-up':'price-down'}">${fmtChg(chg)}</div>`}
@@ -8319,7 +8356,11 @@ function setupCompanyPageSwipe(){
     const dx=e.changedTouches[0].clientX-startX;
     const dy=e.changedTouches[0].clientY-startY;
     if(Math.abs(dx)<Math.abs(dy)||Math.abs(dx)<50)return; // not a horizontal swipe
-    const tabs=['overview','trade','shareholders','news','votes','dividends','buyback','dilution'];
+    // The tabs this page actually rendered, in order. A fixed list named
+    // 'buyback' and 'dilution', which the company page has no tab for, so a
+    // swipe landed on an empty body; and it skipped team, financials, alerts.
+    const tabs=[...document.querySelectorAll('button.tab[onclick^="UI.companyPageTab=\'"]')]
+      .map(b=>(b.getAttribute('onclick').match(/companyPageTab='(\w+)'/)||[])[1]).filter(Boolean);
     const cur=tabs.indexOf(UI.companyPageTab);
     if(dx<0&&cur<tabs.length-1){UI.companyPageTab=tabs[cur+1];render();setTimeout(setupCompanyPageSwipe,100);}
     else if(dx>0&&cur>0){UI.companyPageTab=tabs[cur-1];render();setTimeout(setupCompanyPageSwipe,100);}
@@ -8420,7 +8461,7 @@ function openPanel(ticker){
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Placing…&quot;,()=>placeLimitOrder('${ticker}','buy',get('t-lmt-qty')?.value,get('t-lmt-price')?.value))">Place limit</button></div>
     </div>${limitPreviewSlot(ticker,'buy','t-lmt-qty','t-lmt-price','t-lmt-preview')}`}`
-    :effMode==='sell'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?'Sells redeem your units at the live index price.':'Sell pushes price down.'} You hold: <strong>${held}</strong>.</p>${held>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${held}"></div><div style="padding-bottom:12px"><button class="btn btn-danger" onclick="placeSell('${ticker}',get('t-qty')?.value)">Sell now</button></div></div>
+    :effMode==='sell'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?'Sells redeem your units at the live index price.':'Sell pushes price down.'} You hold: <strong>${held}</strong>.</p>${held>0?`<div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity</label><input type="number" id="t-qty" value="1" min="1" max="${held}"></div><div style="padding-bottom:12px"><button class="btn btn-danger" onclick="busy(this,&quot;Selling…&quot;,()=>placeSell('${ticker}',get('t-qty')?.value))">Sell now</button></div></div>
     ${quickQtyButtonsHTML(ticker,'sell','t-qty','t-preview')}
     <div id="t-preview">${impactPreview(c,1,'sell')}</div>
     ${idxFund?'':`<hr class="divider" style="margin:10px 0">
@@ -8430,8 +8471,8 @@ function openPanel(ticker){
       <div class="frow" style="flex:1"><label class="flabel">Limit price ($)</label><input type="number" id="t-lmt-price" placeholder="${fmt(c.price)}" step="0.01" min="0.01"></div>
       <div style="padding-bottom:12px"><button class="btn btn-primary" onclick="busy(this,&quot;Placing…&quot;,()=>placeLimitOrder('${ticker}','sell',get('t-lmt-qty')?.value,get('t-lmt-price')?.value))">Place limit</button></div>
     </div>${limitPreviewSlot(ticker,'sell','t-lmt-qty','t-lmt-price','t-lmt-preview')}`}`:`<div class="empty" style="padding:16px">You don't hold any ${ticker}.</div>`}`
-    :effMode==='short'?`<div class="ibox ibox-purple">Short selling${infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. You borrow shares and sell them now; later you buy them back to cover, hopefully at a lower price. The difference is your profit or loss, but losses are uncapped since a price can rise indefinitely.')} — borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="placeShort('${ticker}',get('t-qty')?.value)">Short sell</button></div></div>${quickQtyButtonsHTML(ticker,'short','t-qty','t-preview')}<div id="t-preview">${shortPrev(c,1)}</div>`
-    :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="coverShort('${ticker}',get('t-qty')?.value)">Cover short</button></div></div>${quickQtyButtonsHTML(ticker,'cover','t-qty','t-preview')}<div id="t-preview">${impactPreview(c,short.qty,'buy')}</div>`:''}
+    :effMode==='short'?`<div class="ibox ibox-purple">Short selling${infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. You borrow shares and sell them now; later you buy them back to cover, hopefully at a lower price. The difference is your profit or loss, but losses are uncapped since a price can rise indefinitely.')} — borrow and sell shares expecting price to fall. Requires 1.5× collateral.</div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to short</label><input type="number" id="t-qty" value="1" min="1"></div><div style="padding-bottom:12px"><button class="btn btn-purple" onclick="busy(this,&quot;Shorting…&quot;,()=>placeShort('${ticker}',get('t-qty')?.value))">Short sell</button></div></div>${quickQtyButtonsHTML(ticker,'short','t-qty','t-preview')}<div id="t-preview">${shortPrev(c,1)}</div>`
+    :short?`<div class="ibox ibox-purple">Buy back borrowed shares to close your position.</div><div style="font-size:13px;margin-bottom:10px">Open: <strong>${short.qty} shares</strong> @ avg ${fmt(short.avgPrice)} | P&L: <span class="${(short.avgPrice-c.price)*short.qty>=0?'price-up':'price-down'}">${fmt((short.avgPrice-c.price)*short.qty)}</span></div><div class="row" style="align-items:flex-end"><div class="frow" style="flex:1"><label class="flabel">Quantity to cover</label><input type="number" id="t-qty" value="${short.qty}" min="1" max="${short.qty}"></div><div style="padding-bottom:12px"><button class="btn btn-warning" onclick="busy(this,&quot;Covering…&quot;,()=>coverShort('${ticker}',get('t-qty')?.value))">Cover short</button></div></div>${quickQtyButtonsHTML(ticker,'cover','t-qty','t-preview')}<div id="t-preview">${impactPreview(c,short.qty,'cover')}</div>`:''}
   </div>`;
   // Typing into t-qty refreshes t-preview through the delegated listener
   // beside quickQtyButtonsHTML, which every quantity box here registers with.
@@ -8471,7 +8512,7 @@ function renderLeaderboard(){
       <option value="">All classrooms</option>
       ${DB.classrooms.map(c=>`<option value="${c.id}" ${UI.lbClassroom===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
     </select>`:'';
-  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard<span class="info-bubble" tabindex="0">?<span class="info-tip">Each holding is valued at that stock&#39;s volume-weighted average price for the session, not its last trade. The last trade is one order and easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Your Portfolio page shows the live value at the current price, so the two can differ during a session — that difference is the same one between a fund&#39;s live marks and its official NAV.</span></span></span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${esc(u.name)}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${getClassroomName(u.classroom_id)}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=startingCash()?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
+  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard<span class="info-bubble" tabindex="0">?<span class="info-tip">Each holding is valued at that stock&#39;s volume-weighted average price for the session, not its last trade. The last trade is one order and easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Your Portfolio page shows the live value at the current price, so the two can differ during a session — that difference is the same one between a fund&#39;s live marks and its official NAV.</span></span></span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${esc(u.name)}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${esc(getClassroomName(u.classroom_id))}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=startingCash()?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
 }
 function renderFundLeaderboard(){
   const ranked=(DB.funds||[]).filter(f=>!isHiddenTestEntity(f.manager_id)).map(f=>{
@@ -8662,7 +8703,7 @@ function renderFundDetail(fundId){
       <div class="ibox ibox-amber" style="margin-bottom:12px">Fund cash available: <strong>${fmt(f.cash)}</strong>. You cannot trade your own company's stock through this fund.</div>
       <div class="frow"><label class="flabel">Ticker</label><select id="fund-trade-ticker">${tradable.map(c=>`<option value="${c.ticker}">${c.ticker} — ${esc(c.name)} (${fmt(c.price)})</option>`).join('')}</select></div>
       <div class="frow"><label class="flabel">Quantity</label><input type="number" id="fund-trade-qty" min="1" step="1" placeholder="e.g. 10"></div>
-      <div class="btn-row"><button class="btn btn-success btn-sm" onclick="fundBuy('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Buy</button><button class="btn btn-danger btn-sm" onclick="fundSell('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Sell</button><button class="btn btn-warning btn-sm" onclick="fundShort('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Short</button><button class="btn btn-sm" onclick="fundCoverShort('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value)">Cover</button></div>
+      <div class="btn-row"><button class="btn btn-success btn-sm" onclick="busy(this,&quot;Buying…&quot;,()=>fundBuy('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value))">Buy</button><button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Selling…&quot;,()=>fundSell('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value))">Sell</button><button class="btn btn-warning btn-sm" onclick="busy(this,&quot;Shorting…&quot;,()=>fundShort('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value))">Short</button><button class="btn btn-sm" onclick="busy(this,&quot;Covering…&quot;,()=>fundCoverShort('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value))">Cover</button></div>
       <div style="font-size:11px;color:var(--text2);margin-top:4px">Short${infoBubble('Short selling profits when a price FALLS, the opposite of a normal buy. The fund borrows shares and sells them now; Cover buys them back later to close the position. 1.5x the position value gets locked from the fund cash as collateral until covered.')} sells borrowed shares betting the price falls; Cover closes the position.</div>
       <hr class="divider" style="margin:10px 0">
       <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2)">Or place a limit order${infoBubble('A limit order only fills at your chosen price or better, instead of the current market price right now. It may sit unfilled until the price crosses your limit, or fill instantly if it already has.')}</div>
@@ -8836,7 +8877,7 @@ function renderSettings(){
   return sheetsSection+emailjsSection+accountCard+passwordCard+
   `${u.role==='company'?`<div class="card"><div class="section-title">Company branding</div>
     <div class="ibox ibox-blue" style="margin-bottom:10px">Upload a logo image for your company. Shown on your ticker chip and company page. Max 200KB recommended.</div>
-    ${(()=>{const co=DB.companies.find(c=>c.owner_id===u.id);return co&&co.logo?`<div style="margin-bottom:10px"><img src="${co.logo}" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:1px solid var(--border)"></div>`:'';})()}
+    ${(()=>{const co=DB.companies.find(c=>c.owner_id===u.id);return co&&co.logo?`<div style="margin-bottom:10px"><img src="${esc(co.logo)}" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:1px solid var(--border)"></div>`:'';})()}
     <div class="frow"><label class="flabel">Logo image</label><input type="file" id="logo-upload" accept="image/*" onchange="previewLogo(this)"></div>
     <div id="logo-preview" style="margin-bottom:10px"></div>
     <button class="btn btn-primary" onclick="saveLogo()">Save logo</button>
@@ -8865,7 +8906,7 @@ function renderSettings(){
       return pushRow+(emailNotifRestricted?'':emailRow);
     })()}
   </div>
-  ${isGoogleAccount?'':`<div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${u.sec_q||'Not set'}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><div class="pw-wrap"><input type="password" id="settings-secq-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('settings-secq-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`}`;
+  ${isGoogleAccount?'':`<div class="card"><div class="section-title">Security question</div><div class="ibox ibox-blue" style="margin-bottom:10px">Current question: <strong>${esc(u.sec_q||'Not set')}</strong></div><div class="frow"><label class="flabel">New security question</label>${secQSelect('settings')}</div><div class="frow"><label class="flabel">New security answer</label><input type="text" id="settings-secq-answer" placeholder="Your answer" autocomplete="off"></div><div class="frow"><label class="flabel">Confirm with current password</label><div class="pw-wrap"><input type="password" id="settings-secq-pw" placeholder="Current password"><button type="button" class="pw-eye" onclick="togglePw('settings-secq-pw')" tabindex="-1">👁</button></div></div><button class="btn btn-primary" onclick="updateSecQ('${u.id}',get('settings-secq-pw')?.value,get('settings-secq')?.value,get('settings-secq-answer')?.value)">Update security question</button></div>`}`;
 }
 
 // ═══════════════════════════════════════════════
@@ -8993,7 +9034,7 @@ function renderStockOverview(co,u){
     <div class="mcard"><div class="mlabel">Base price</div><div class="mval" style="font-family:var(--mono)">${fmt(co.price)}</div></div>
     <div class="mcard"><div class="mlabel">Total market cap</div><div class="mval" style="font-family:var(--mono)">${fmt(totalMarketCap)}</div></div>
     <div class="mcard"><div class="mlabel">Total shares issued</div><div class="mval">${totalShares.toLocaleString()}</div></div>
-    <div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div>
+    <div class="mcard"><div class="mlabel">Company cash</div><div class="mval" style="font-family:var(--mono)">${fmt((getUser(co.owner_id)||u).cash)}</div></div>
   </div>`;
 
   // Funding goal & use of funds
@@ -9329,13 +9370,12 @@ function renderCompanyVotesTab(co){
   // Show closed vote results
   (()=>{const closed=myVotes.filter(v=>v.status==='closed');if(!closed.length)return'';
     return'<div class="card"><div class="section-title">📊 Vote results</div>'+closed.map(v=>{
-      const ballots=DB.ballots.filter(b=>b.vote_id===v.id);
-      const opts={};[v.option1,v.option2].filter(Boolean).forEach(o=>{opts[o]=0;});
-      ballots.forEach(b=>{if(opts[b.choice]!==undefined)opts[b.choice]+=(b.weight||1);});
-      const total=Object.values(opts).reduce((s,n)=>s+n,0);
-      const winner=Object.entries(opts).sort((a,b)=>b[1]-a[1])[0];
+      // Same tally as the vote card: ballots say 'A'/'B' and carry voting_power.
+      const r=getVoteResults(v.id);
+      const opts=[[v.option_a,r.powerA,'A'],[v.option_b,r.powerB,'B']];
+      const winKey=r.powerA>r.powerB?'A':r.powerB>r.powerA?'B':null;
       return'<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div style="font-weight:500;margin-bottom:8px">'+esc(v.question)+'</div>'
-        +Object.entries(opts).map(([opt,votes])=>{const pct=total>0?Math.round(votes/total*100):0;const win=opt===winner?.[0];
+        +opts.map(([opt,votes,key])=>{const pct=r.total>0?Math.round(votes/r.total*100):0;const win=key===winKey;
           return'<div style="margin-bottom:6px"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px"><span '+(win?'style="font-weight:600;color:var(--green)"':'')+'>'+esc(opt)+(win?' ✓':'')+'</span><span style="color:var(--text2)">'+votes+' ('+pct+'%)</span></div>'
           +'<div style="background:var(--bg3);border-radius:3px;height:8px"><div style="background:'+(win?'var(--green)':'var(--blue)')+';width:'+pct+'%;height:100%;border-radius:3px"></div></div></div>';}).join('')+'</div>';
     }).join('')+'</div>';})();
@@ -9370,7 +9410,7 @@ function renderNewsPage(){
 
 
 function renderDivTab(co,myDivs){
-  const owner=cu();
+  const owner=getUser(co.owner_id)||cu();   // company cash, also for a co-founder
   const allT=getCompanyTickers(co.ticker);
   const totalCirc=allT.reduce((s,t)=>{const c=getCo(t);return s+(c?c.shares-c.shares_avail:0);},0);
   // Fetch fresh holders async and populate. role=in.(student,company) --
@@ -9409,7 +9449,7 @@ function updateDivPrev(ticker){const co=getCo(ticker);if(!co)return;const ps=par
   const allT=getCompanyTickers(ticker);
   const holderCount=Object.keys(buildShareholderMap(allT)).length;
   const total=allT.reduce((s,t)=>s+divTotal(t,ps),0);
-  const owner=cu(),ok=owner.cash>=total;p.innerHTML=`<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px"><div><div style="color:var(--text2);margin-bottom:2px">Shareholders</div><div style="font-weight:500">${holderCount}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Total</div><div style="color:var(--green);font-family:var(--mono)">${fmt(total)}</div></div><div><div style="color:var(--text2);margin-bottom:2px">After</div><div style="font-family:var(--mono);color:${ok?'var(--text)':'var(--red)'}">${fmt(owner.cash-total)}</div></div></div>${!ok?`<div style="color:var(--red);font-weight:500">Insufficient funds</div>`:''}</div>`;}
+  const owner=getUser(co.owner_id)||cu(),ok=owner.cash>=total;p.innerHTML=`<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px"><div><div style="color:var(--text2);margin-bottom:2px">Shareholders</div><div style="font-weight:500">${holderCount}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Total</div><div style="color:var(--green);font-family:var(--mono)">${fmt(total)}</div></div><div><div style="color:var(--text2);margin-bottom:2px">After</div><div style="font-family:var(--mono);color:${ok?'var(--text)':'var(--red)'}">${fmt(owner.cash-total)}</div></div></div>${!ok?`<div style="color:var(--red);font-weight:500">Insufficient funds</div>`:''}</div>`;}
 function renderFinancialsHistory(financials){
   if(!financials||!financials.length)return'<div class="card"><div class="empty">No financial reports posted yet.</div></div>';
   return financials.map(f=>`<div class="card" style="margin-bottom:10px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div class="section-title" style="margin-bottom:0">${esc(f.period)}</div><span style="font-size:11px;color:var(--text2)">${f.ts}</span></div><div class="grid3" style="margin-bottom:8px"><div class="mcard"><div class="mlabel">Revenue</div><div class="mval" style="font-family:var(--mono)">${fmt(f.revenue)}</div></div><div class="mcard"><div class="mlabel">Profit</div><div class="mval" style="font-family:var(--mono);color:${f.profit>=0?'var(--green)':'var(--red)'}">${fmt(f.profit)}</div></div><div class="mcard"><div class="mlabel">Margin</div><div class="mval" style="font-family:var(--mono)">${f.revenue>0?Math.round(f.profit/f.revenue*100)+'%':'—'}</div></div></div><div style="font-size:13px;color:var(--text2)">${esc(f.summary)}</div></div>`).join('');
@@ -9418,7 +9458,7 @@ function renderFinancialsMgmtTab(co,myFinancials){
   return`<div class="card"><div class="section-title">Post financial results</div><div class="ibox ibox-blue" style="margin-bottom:12px">Give investors something to evaluate before an IPO, dilution round, or just to build confidence in the stock. Posted reports notify all current shareholders.</div><div class="frow"><label class="flabel">Period</label><input type="text" id="fin-period" placeholder="e.g. Q1 2026"></div><div class="row"><div class="frow" style="flex:1"><label class="flabel">Revenue ($)</label><input type="number" id="fin-revenue" placeholder="10000" min="0" step="0.01"></div><div class="frow" style="flex:1"><label class="flabel">Profit ($, negative for a loss)</label><input type="number" id="fin-profit" placeholder="2500" step="0.01"></div></div><div class="frow"><label class="flabel">Summary for investors</label><textarea id="fin-summary" rows="3" placeholder="e.g. Revenue grew 20% quarter over quarter driven by..."></textarea></div><button class="btn btn-primary" onclick="postFinancials('${co.ticker}',get('fin-period')?.value,get('fin-revenue')?.value,get('fin-profit')?.value,get('fin-summary')?.value)">Post report</button></div><div class="section-title" style="margin:16px 0 8px">History</div>${renderFinancialsHistory(myFinancials)}`;
 }
 function renderBBTab(co,myBBs){
-  const sold=co.shares-co.shares_avail,owner=cu();
+  const sold=co.shares-co.shares_avail,owner=getUser(co.owner_id)||cu();
   const asks=(DB.limitOrders||[]).filter(o=>o.ticker===co.ticker&&o.side==='sell'&&o.status==='open'&&o.user_id!==co.owner_id);
   const askQty=asks.reduce((n,o)=>n+(Number(o.qty)||0),0);
   const tender=(DB.limitOrders||[]).find(o=>o.ticker===co.ticker&&o.order_type==='buyback'&&o.status==='open');
@@ -9738,7 +9778,7 @@ function renderAdminSession(students){
       <div class="frow" style="flex:2;min-width:180px"><label class="flabel">User or company</label>
         <select id="reassign-uid">
           <option value="">— Select —</option>
-          ${DB.users.filter(u=>!isAdmin(u)).map(u=>`<option value="${u.id}">${esc(u.name)} [${u.role}] — ${getClassroomName(u.classroom_id)||'unassigned'}</option>`).join('')}
+          ${DB.users.filter(u=>!isAdmin(u)).map(u=>`<option value="${u.id}">${esc(u.name)} [${u.role}] — ${esc(getClassroomName(u.classroom_id)||'unassigned')}</option>`).join('')}
         </select>
       </div>
       <div class="frow" style="flex:2;min-width:150px"><label class="flabel">Assign to classroom</label>
@@ -10074,7 +10114,7 @@ function renderAdminBalances(students){
   <div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th style="padding-left:14px">Rank</th><th>Student</th><th class="r">Cash</th><th class="r">Portfolio</th><th class="r">Dividends</th><th class="r">Net worth <span class="info-bubble" tabindex="0">?<span class="info-tip">Marked at each stock&#39;s volume-weighted average price for the session, not its last trade. A single trade sets the last price and is easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Real funds strike their official NAV the same way, and for the same reason.</span></span></th><th class="r">vs Start</th></tr></thead>
   <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-startingCash(),vc=vs>=0?'price-up':'price-down';return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${i===0?'var(--amber)':i===1?'var(--text2)':i===2?'#993C1D':'var(--text3)'}">#${i+1}</td><td style="font-weight:500">${esc(r.name)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="7"><div class="empty">No approved students yet</div></td></tr>`}
   </tbody></table></div>
-  <div id="csv-panel" style="display:none;margin-top:12px"><div class="ibox ibox-teal">Click inside the box, press <strong>Ctrl+A</strong> (Cmd+A) to select all, then <strong>Ctrl+C</strong> to copy.</div><textarea readonly onclick="this.select()" style="width:100%;font-family:var(--mono);font-size:12px;padding:10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);resize:vertical;min-height:160px;line-height:1.5">${csv}</textarea></div>`;
+  <div id="csv-panel" style="display:none;margin-top:12px"><div class="ibox ibox-teal">Click inside the box, press <strong>Ctrl+A</strong> (Cmd+A) to select all, then <strong>Ctrl+C</strong> to copy.</div><textarea readonly onclick="this.select()" style="width:100%;font-family:var(--mono);font-size:12px;padding:10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);resize:vertical;min-height:160px;line-height:1.5">${esc(csv)}</textarea></div>`;
 }
 function downloadCSV(){const csv=window._jexCSV;if(!csv)return;const blob=new Blob([csv],{type:'text/csv'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='jex_balances.csv';a.click();URL.revokeObjectURL(url);}
 async function adjustCompanyCash(uid2){
@@ -10615,11 +10655,14 @@ function renderNotifications(){
   ${notifs.length?notifs.map(n=>{
     // Find pending invite that matches this notification
     // Only show buttons for actual pending invites (not accepted/declined/company confirmations)
-    const pendingInvite=n.type==='invite'&&n.message.includes('invited you')?
-      DB.companyMembers.find(m=>
-        m.student_id===u.id&&
-        m.status==='pending'
-      ):null;
+    // The invite from THIS notification's company. Taking the first pending
+    // one put Alpha's invite behind Beta's Accept button. With no ticker to
+    // go on, only an unambiguous single pending invite gets buttons.
+    const pendingInvite=n.type==='invite'&&n.message.includes('invited you')?(()=>{
+      const mine=DB.companyMembers.filter(m=>m.student_id===u.id&&m.status==='pending');
+      const owner=n.ticker?DB.companies.find(c=>c.ticker===n.ticker)?.owner_id:null;
+      return owner?mine.find(m=>m.company_user_id===owner):(!n.ticker&&mine.length===1?mine[0]:null);
+    })():null;
     return `<div style="display:flex;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid var(--border);opacity:${n.read?'0.55':'1'}">
       <div style="font-size:18px;min-width:28px">${typeIcon[n.type]||'•'}</div>
       <div style="flex:1">
@@ -10772,7 +10815,8 @@ function renderExchangeStats(){
 }
 function exportStudentPDF(){
   const u=cu();if(!u)return;
-  const myTrades=DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id).reverse();
+  // DB.trades is newest-first already; reversing it made "last 50" the first 50.
+  const myTrades=DB.trades.filter(t=>t.buyer_id===u.id||t.seller_id===u.id);
   const myHoldings=Object.entries(holdings(u)).map(([ticker,qty])=>{const co=getCo(ticker);return{ticker,qty,price:co?co.price:0,value:co?qty*co.price:0};}).filter(h=>h.qty>0);
   const myDivs=DB.dividends.filter(d=>(d.payouts||[]).some(p=>p.userId===u.id));
   const _nw=nw(u),_pv=pv(u),_spnl=sPnl(u),_divs=divRec(u);
@@ -11018,19 +11062,18 @@ function renderAdminVoteOversight(){
   const closed=DB.votes.filter(v=>!isVoteOpen(v));
   function voteCard(v){
     const co=getCo(v.parent_ticker)||DB.companies.find(c=>c.ticker===v.parent_ticker);
-    const ballots=DB.ballots.filter(b=>b.vote_id===v.id);
-    const opt1=ballots.filter(b=>b.choice===v.option1).reduce((s,b)=>s+b.weight,0);
-    const opt2=ballots.filter(b=>b.choice===v.option2).reduce((s,b)=>s+b.weight,0);
-    const total=opt1+opt2||1;
+    // Ballots carry choice 'A'/'B' and voting_power (see castVote); reading
+    // option1/option2 and weight here showed every vote as 0 to 0.
+    const r=getVoteResults(v.id);
     return`<div style="padding:12px;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div><strong>${esc(v.question)}</strong> <span class="badge b-gray" style="font-family:var(--mono)">${v.parent_ticker}</span></div>
         <span class="badge ${isVoteOpen(v)?'b-green':'b-gray'}">${isVoteOpen(v)?'open':'closed'}</span>
       </div>
-      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">${esc(co?.name||v.parent_ticker)} · ${ballots.length} voters · ${v.ts}</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">${esc(co?.name||v.parent_ticker)} · ${r.count} voters · ${v.ts}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
-        <div style="background:var(--bg3);border-radius:4px;padding:6px 8px">${esc(v.option1)}: <strong>${opt1}</strong> votes (${Math.round(opt1/total*100)}%)</div>
-        <div style="background:var(--bg3);border-radius:4px;padding:6px 8px">${esc(v.option2)}: <strong>${opt2}</strong> votes (${Math.round(opt2/total*100)}%)</div>
+        <div style="background:var(--bg3);border-radius:4px;padding:6px 8px">${esc(v.option_a)}: <strong>${r.powerA}</strong> votes (${r.pctA}%)</div>
+        <div style="background:var(--bg3);border-radius:4px;padding:6px 8px">${esc(v.option_b)}: <strong>${r.powerB}</strong> votes (${r.pctB}%)</div>
       </div>
     </div>`;
   }
@@ -11071,12 +11114,13 @@ function renderTreasurerCashFlow(){
   </div>
   <div class="card"><div class="section-title">Exchange cash flows over time</div>
     <table><thead><tr><th>Time</th><th>Type</th><th>Company</th><th>Amount</th><th>Detail</th></tr></thead><tbody>
-    ${[...DB.dividends.map(d=>({ts:d.ts,type:'Dividend',company:d.company_name,amount:-d.total,detail:fmt(d.per_share)+'/share to '+d.payouts.length+' holders'})),
-       ...DB.buybacks.map(b=>({ts:b.ts,type:'Buyback',company:DB.companies.find(c=>c.ticker===b.ticker)?.name||b.ticker,amount:-b.total,detail:b.qty+' shares @ '+fmt(b.price)})),
-    ].sort((a,b)=>b.ts>a.ts?1:-1).slice(0,50).map(r=>`<tr>
+    ${[...DB.dividends.map(d=>({ts:d.ts,at:d.created_at||'',type:'Dividend',company:d.company_name,amount:-d.total,detail:fmt(d.per_share)+'/share to '+(d.payouts||[]).length+' holders'})),
+       ...DB.buybacks.map(b=>({ts:b.ts,at:b.created_at||'',type:'Buyback',company:DB.companies.find(c=>c.ticker===b.ticker)?.name||b.ticker,amount:-b.total,detail:b.qty+' shares @ '+fmt(b.price)})),
+    // Newest first by created_at: ts is a display string, and "Oct 9" sorted above "Oct 14".
+    ].sort((a,b)=>a.at<b.at?1:a.at>b.at?-1:0).slice(0,50).map(r=>`<tr>
       <td style="color:var(--text2)">${r.ts}</td>
       <td><span class="badge b-gray">${r.type}</span></td>
-      <td>${r.company}</td>
+      <td>${esc(r.company)}</td>
       <td class="r" style="font-family:var(--mono);color:var(--red)">${fmt(r.amount)}</td>
       <td style="font-size:12px;color:var(--text2)">${r.detail}</td>
     </tr>`).join('')}
@@ -11120,7 +11164,7 @@ function renderTreasurerBudgetWarnings(){
   const threshold=DB.session.budget_warning_threshold||500;
   const divThreshold=DB.session.dividend_approval_threshold||1000;
   const seenOwners=new Set();
-  const listed=DB.companies.filter(c=>c.status==='listed'&&!seenOwners.has(c.owner_id)&&seenOwners.add(c.owner_id));
+  const listed=DB.companies.filter(c=>c.status==='listed'&&!c.is_index_fund&&c.owner_id&&!seenOwners.has(c.owner_id)&&seenOwners.add(c.owner_id));
   const warnings=listed.map(co=>{const owner=getUser(co.owner_id);return{co,owner,cash:owner?owner.cash:0};}).filter(w=>w.cash<threshold).sort((a,b)=>a.cash-b.cash);
   const u=cu();
     const canEditThresholds=isChairman(u);
