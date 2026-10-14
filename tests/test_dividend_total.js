@@ -140,7 +140,13 @@ check('...and refuses on the combined total, like the server',
 check('...and no longer refuses just because nobody holds it directly',
       !/if\(!sh\.length\)return toast\('No shareholders yet'\)/.test(src));
 check('the direct half rounds once per holder, not once per ticker',
-      /const equiv=baseEquivalent\(u,allT\);[\s\S]{0,120}?Math\.round\(equiv\*perShare\*100\)\/100/.test(src));
+      /return s\+Math\.round\(baseEquivalent\(u,allT\)\*perShare\*100\)\/100;/.test(src)
+      &&/const directTotal=dividendDirectTotal\(sh,allT,perShare\);/.test(src));
+// The live preview on the Dividends tab charges what issueDividend charges.
+// It used divTotal(), which paid company accounts, ignored the conversion
+// ratio and missed funds: $120 previewed, $160 charged.
+check('the dividend preview uses the same total as issueDividend',
+      /const total=dividendCost\(ticker,/.test(src)&&!/divTotal\(t,ps\)/.test(src));
 
 // ── the index fund holds the CLASSES too ──
 //

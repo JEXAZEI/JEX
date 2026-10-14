@@ -36,7 +36,8 @@ Send only these when asked for "the SQL". Remove a file from this list once
 its result has come back green. `preflight.sql` is read-only and is run before
 each class, so it is never on this list.
 
-Nothing — every file here has been run and verified.
+- `buyback_self_dealing.sql`
+- `index_basket_register.sql` (changes data — read its header first)
 
 ## Order
 
@@ -76,6 +77,7 @@ They are listed in the order they were applied. Two of them care:
 | `password_recovery_broken.sql` | **Forgot Password did not work, for anybody.** Step 2 verified the security answer as a hash and step 3 re-verified it as plaintext, so every correct answer was rejected at the last screen with no way out of the loop. |
 | `contact_details_auth.sql` | `rpc_get_company_team_contacts` and `rpc_get_leadership_contacts` returned students' names and email addresses to unauthenticated callers. |
 | `activity_hash_coverage.sql` | The audit trail's hash chain covered what happened but not who it happened to — rewriting `user_name` on every row left every hash still verifying. |
+| `buyback_self_dealing.sql` | A founder could post one share at $4,999 and buy it back on the company's behalf — $4,999 out of the company and into the founder, the owner never involved. And a buyback filled asks above the price band and set the price to them: one share at $1,000 made a $30 stock $1,000. Buybacks now buy only from outsiders, inside the band. |
 
 ### Not a migration
 
@@ -90,6 +92,7 @@ They are listed in the order they were applied. Two of them care:
 | `email_verification_guard.sql` | Email verification proved nothing. The code was **returned to whoever asked for it**, so anyone could verify an address they did not own; registration stored whatever the browser claimed about verification; and guesses were unlimited. The server now emails the code itself and never returns it, five wrong guesses kill a code, requests are rate limited, and registration decides "verified" from a confirmed code or a Google token. |
 | `client_error_limits.sql` | Anyone, signed in or not, could add error reports as fast as they could send them — 5,000 in one go became 5,000 rows, and one crash firing 300 times became 300. Repeats within 10 minutes are now counted on one report; new reports are limited (30 per user, 50 signed-out, 200 overall per 10 minutes); only the newest 2,000 are kept. |
 | `activity_log_guard.sql` | Any signed-in account could write anything into the activity log about anyone — a script tag as the type, a forged Chairman session entry, a $5,000 withdrawal blamed on another student — and nothing recorded who wrote it. Every entry now records its writer from the login, hashed into the chain; seven officer-only types; types must be plain words; lengths and a rate limit. Concurrent writers forked the chain (15 forks in 160 entries) — now serialized. Leftover TRUNCATE/TRIGGER/REFERENCES grants revoked. |
+| `index_basket_register.sql` | **Changes data.** `repair_share_register.sql` did not count shares held in index baskets (`fund_holdings`), took them for missing, and put them back on sale — so they existed twice. Removes only the duplicate unsold copies, never below 0. `preflight.sql` now counts baskets too. |
 | `revoke_truncate.sql` | Signed-out visitors and every signed-in user held TRUNCATE (empty a table in one statement, past row-level security), TRIGGER and REFERENCES on 38 tables, `jex_users` and `jex_trades` among them — leftovers from the project's default setup. Unreachable through the web API today and unused by the app. Revoked everywhere, and from the defaults for new tables; SELECT/INSERT/UPDATE/DELETE are counted before and after and must not move. |
 | `revoke_maintain.sql` | Postgres 17's MAINTAIN privilege — part of "grant all" — was still held by anon and authenticated, and in the defaults for new tables. With production's SELECT-only grants it was the one thing letting a signed-out caller LOCK a table in ACCESS EXCLUSIVE mode, stopping every read and write, or REINDEX it. Revoked everywhere and from the defaults; reads counted before and after. A no-op on Postgres 16. |
 | `server_events_batch1.sql` | Batch 1 of the server-events rebuild (`SERVER_EVENTS_PLAN.md`). The activity entry and notifications for eleven money-and-positions actions — balance adjustments, fund deposits and withdrawals, dividends, limit fills, stop-losses, margin calls, class conversions, price adjustments — were written by whichever browser did or noticed the thing, describing a result it was handed, so a page could describe a fill or a dividend that never happened. Each function now writes its own, in the same transaction, as writer `server`. Moves no money: balances, holdings, shorts, prices, orders and trades verified identical on a copy of production's code. The page skips its own copy for whatever `rpc_server_events()` lists, so nothing is recorded twice. |

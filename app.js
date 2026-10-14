@@ -331,6 +331,11 @@ let _rtBackoff=0;
 // "an event arrived recently", because a quiet market produces no events
 // and that would look identical to a dead connection.
 let _rtJoined=false;
+// Bumped whenever newer state lands here between polls: a realtime event, a
+// row an RPC just returned, a trade's result. A poll whose reads went out
+// before a bump would put older data back over newer, so it leaves those
+// tables alone this time and the next sweep reconciles.
+let _stateEpoch=0;
 function realtimeHealthy(){return _rtJoined&&_realtimeChannels.length>0;}
 function subscribeRealtime(){
   if(!SUPABASE_URL||SUPABASE_URL==='YOUR_SUPABASE_URL')return;
@@ -362,8 +367,11 @@ function subscribeRealtime(){
   
   try{
     const ws=new WebSocket(eventsUrl);
-    _realtimeChannels.push({unsubscribe:()=>ws.close()});
     let heartbeatInterval;
+    // Detach before closing. A socket closed here by a newer subscribe still
+    // ran its own onclose, which scheduled another subscribe, which closed the
+    // newer socket -- a reconnect loop about once a second after any re-login.
+    _realtimeChannels.push({unsubscribe:()=>{ws.onclose=ws.onerror=ws.onmessage=ws.onopen=null;clearInterval(heartbeatInterval);ws.close();}});
     
     ws.onopen=()=>{
       // Join channel -- topic must be this client's own unique channel name
@@ -434,6 +442,19 @@ function subscribeRealtime(){
   }
 }
 
+// Add a row the server just returned, or merge it into the copy already here.
+// Realtime now delivers the same INSERT, often while the caller is still
+// awaiting something after its RPC, and a plain push then stored it twice --
+// a dividend counted double on the leaderboard, a limit order whose second
+// copy stayed "open" after the first was cancelled.
+function upsertById(list,row,atFront,key){
+  key=key||'id';
+  _stateEpoch++;
+  const cur=list.find(x=>x[key]===row[key]);
+  if(cur)return Object.assign(cur,row);
+  if(atFront)list.unshift(row);else list.push(row);
+  return row;
+}
 function handleRealtimeUpdate(table,event,newRow,oldRow){
   // The one remaining gap in realtime's visibility: everything up through
   // the channel join being confirmed was already logged, but a
@@ -442,10 +463,13 @@ function handleRealtimeUpdate(table,event,newRow,oldRow){
   // from "they arrive but something after this point doesn't apply them."
   console.log('JEX Realtime: received',event,'on',table,UI.userId?'':'(ignored -- not logged in)');
   if(!UI.userId)return;
+  _stateEpoch++;
   const wasRendering=false;
   switch(table){
     case 'jex_companies':
-      if(newRow){const idx=DB.companies.findIndex(c=>c.id===newRow.id);if(idx>=0)Object.assign(DB.companies[idx],newRow);else if(event==='INSERT')DB.companies.push(newRow);}
+      // By ticker too: createClassroomIndex stores a local row before the
+      // server's id is known, and the two never merged.
+      if(newRow){const idx=DB.companies.findIndex(c=>c.id===newRow.id||(newRow.ticker&&c.ticker===newRow.ticker));if(idx>=0)Object.assign(DB.companies[idx],newRow);else if(event==='INSERT')DB.companies.push(newRow);}
       break;
     case 'jex_trades':
       if(newRow&&!DB.trades.find(t=>t.id===newRow.id))DB.trades.unshift(newRow);
@@ -820,7 +844,7 @@ function exportTableCSV(table){
         ['ts','type','description','amount','about','written_by']);
       break;
     case 'balances':{
-      const rows=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({name:u.name,email:u.email,cash:u.cash,portfolio:pv(u),net_worth:nw(u),dividends:divRec(u)}));
+      const rows=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({name:u.name,email:u.email,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pvMark(u)*100)/100,net_worth:nwMark(u),dividends:Math.round(divRec(u)*100)/100}));
       exportCSV('jex-balances-'+now+'.csv',rows,['name','email','cash','portfolio','net_worth','dividends']);
       break;}
     case 'votes':
@@ -833,7 +857,7 @@ function exportTableCSV(table){
       const rows2=[];
       DB.users.filter(u=>u.role==='student'&&u.status==='approved').forEach(u=>{
         Object.entries(u.holdings||{}).forEach(([ticker,qty])=>{
-          const co=getCo(ticker);rows2.push({student:u.name,ticker,qty,price:co?co.price:0,value:co?qty*co.price:0});
+          const co=getCo(ticker);rows2.push({student:u.name,ticker,qty,price:co?co.price:0,value:co?Math.round(qty*co.price*100)/100:0});
         });
       });
       exportCSV('jex-holdings-'+now+'.csv',rows2,['student','ticker','qty','price','value']);
@@ -1430,12 +1454,6 @@ function buildShareholderMap(tickers,userSource){
   });
   return map;
 }
-const divTotal=(ticker,ps)=>{
-  const direct=shareholders(ticker).reduce((s,u)=>s+Math.round(((holdings(u)[ticker])||0)*ps*100)/100,0);
-  const map=buildShareholderMap([ticker]);
-  const indirect=Object.entries(map).filter(([k])=>k.startsWith('fund_')||k.startsWith('index_')).reduce((s,[,sh])=>s+Math.round(((sh.shares[ticker])||0)*ps*100)/100,0);
-  return Math.round((direct+indirect)*100)/100;
-};
 // ── the price band, client side ─────────────────────────────
 // Mirrors jex_band_clamp() (price_band_migration.sql). This is preview only --
 // the server applies the real rule and is the only thing that decides a fill.
@@ -1466,7 +1484,10 @@ function bandClamp(ticker,price,current){
 // that it would be refused.
 // 'cover' moves the price up like a buy but is clamped like a sell
 // (rpc_trade_cover_short runs jex_band_clamp on it).
-const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);const up=dir==='buy'||dir==='cover';const raw=Math.max(0.01,Math.round((up?co.price*(1+impact):co.price*(1-impact))*100)/100);return dir==='buy'?raw:bandClamp(co.ticker,raw,co.price);};
+// Rounded like Postgres numeric (exact decimal, half away from zero). In floats
+// 10*1.0165 is 10.164999..., so the preview said $10.16 where the server
+// charges $10.17 -- and Max then offered a quantity the server refused.
+const impactPrice=(co,qty,dir)=>{const liq=co.shares*0.05,impact=Math.min((qty/liq)*0.015,0.12);const up=dir==='buy'||dir==='cover';const raw=Math.max(0.01,Math.round(Number(((up?co.price*(1+impact):co.price*(1-impact))*100).toPrecision(12)))/100);return dir==='buy'?raw:bandClamp(co.ticker,raw,co.price);};
 // Largest quantity actually affordable at the IMPACTED fill price, not at
 // the quoted price. A market buy never fills at co.price -- impactPrice()
 // pushes it up by (qty/liq)*0.015 -- so floor(cash/co.price) always
@@ -1677,7 +1698,7 @@ async function reviewDivApproval(id,approve){
   // are the BIG dividends -- crossing the approval threshold is what sends them
   // through here -- so it was the largest drops that went unshown.
   const dropsA=applyExDividend(r)?r.new_prices:null;
-  if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker:da.ticker,company_name:da.company_name,per_share:da.per_share,total:r.total,note:da.note||'Treasurer-approved dividend',payouts:r.payouts,jxi_pass_through:r.jxi_pass_through||[],ts:ts()});
+  if(r.dividend_id)upsertById(DB.dividends,{id:r.dividend_id,ticker:da.ticker,company_name:da.company_name,per_share:da.per_share,total:r.total,note:da.note||'Treasurer-approved dividend',payouts:r.payouts,jxi_pass_through:r.jxi_pass_through||[],ts:ts()});
   afterServerEvent();
   pushBalances();
   toast(da.company_name+' paid '+fmt(da.per_share)+'/share (Treasurer-approved)'
@@ -1939,7 +1960,7 @@ async function generateSessionRecap(u){
   const totalVol=todayTrades.reduce((s,t)=>s+t.price*t.qty,0);
   const bigTrade=todayTrades.length?todayTrades.reduce((a,b)=>b.price*b.qty>a.price*a.qty?b:a):null;
   // Leaderboard snapshot
-  const ranked=students.map(s=>({name:s.name,nw:nw(s)})).sort((a,b)=>b.nw-a.nw);
+  const ranked=students.map(s=>({name:s.name,nw:nwMark(s)})).sort((a,b)=>b.nw-a.nw);
   // Build recap announcement
   const recapBody=[
     '📊 Session recap — '+azDateLabel(),
@@ -1991,7 +2012,7 @@ async function createClassroomIndex(){
   let rec;
   try{rec=await sb.rpc('rpc_admin_create_classroom_index',{p_classroom_id:classroomId,p_ticker:ticker,p_name:name});}
   catch(e){return toast(rpcErrorMessage(e));}
-  DB.companies.push({id:uid(),name,ticker:rec.ticker,price:rec.price,shares:0,shares_avail:0,status:'listed',owner_id:null,
+  if(!getCo(rec.ticker))DB.companies.push({id:uid(),name,ticker:rec.ticker,price:rec.price,shares:0,shares_avail:0,status:'listed',owner_id:null,
     description:'Tracks the equal-weighted average of every listed company in '+(rec.classroom_name||'this classroom')+'. Price updates automatically to match the live index value and can\'t be manually adjusted. Buying mints new units at the live price; selling redeems them, so there\'s no fixed share supply.',
     // 't' must be a real timestamp, not a label. The chart code parses it
     // as a date, and new Date('Listing') is Invalid Date -- both
@@ -2084,9 +2105,9 @@ async function pushBalances(){
   const rows=students.map((u,i)=>({
     rank:i+1,name:u.name,
     cash:Math.round(u.cash*100)/100,
-    portfolio:Math.round(pv(u)*100)/100,
+    portfolio:Math.round(pvMark(u)*100)/100,
     divs:Math.round(divRec(u)*100)/100,
-    nw:nw(u),vsStart:Math.round((nw(u)-startingCash())*100)/100
+    nw:nwMark(u),vsStart:Math.round((nwMark(u)-startingCash())*100)/100
   })).sort((a,b)=>b.nw-a.nw).map((r,i)=>({...r,rank:i+1}));
   await pushToSheets('balances',{rows});
   // Listed companies -- was never actually pushed, so a "Companies" tab a
@@ -2128,7 +2149,9 @@ async function setSession(status){
     if(expired.length)toast(expired.length+' day order'+(expired.length!==1?'s':'')+' expired at session close');
     // Freeze leaderboard (it was saved twice, identically)
     const lbStudents=DB.users.filter(s=>s.role==='student'&&s.status==='approved');
-    const lbSnap2=lbStudents.map(s=>({name:s.name,nw:nw(s),id:s.id,classroom_id:s.classroom_id,sharpe:calcSharpe(s.id)})).sort((a,b)=>b.nw-a.nw);
+    // The graded mark, same as the live leaderboard: this is the table students
+    // see after the close, and nw() marks at the last print.
+    const lbSnap2=lbStudents.map(s=>({name:s.name,nw:nwMark(s),id:s.id,classroom_id:s.classroom_id,sharpe:calcSharpe(s.id)})).sort((a,b)=>b.nw-a.nw);
     await saveSession({leaderboard_snapshot:lbSnap2});
     // Auto session recap
     await generateSessionRecap(u);
@@ -2206,7 +2229,6 @@ function checkDevModeLockout(){
 }
 async function sessionAutoTick(){
   if(!UI.userId)return;
-  const wasOpen=DB.session.status==='open';
   let r;
   try{r=await sb.rpc('rpc_session_tick',{});}catch(e){r=null;}
   // The catch used to cover only the CALL, so a null result threw on the
@@ -2218,12 +2240,16 @@ async function sessionAutoTick(){
   // was expected, so the shape is not hypothetical. A missing result just means
   // "the scheduler changed nothing", which is the ordinary case anyway.
   if(r&&r.changed){
+    // Read at apply time, not before the await: realtime may already have
+    // applied this same open, and announcing it again also recorded the open
+    // prices twice.
+    const wasOpen=DB.session.status==='open';
     Object.assign(DB.session,r.session);
     if(checkDevModeLockout())return;
     const nowOpen=DB.session.status==='open';
     if(nowOpen&&!wasOpen){
       startSessionTimer();
-      toast(DB.session.label.includes('weekly')?'🟢 Trading session opened (weekly schedule)':'Trading session is now open!');
+      toast(DB.session.label&&DB.session.label.includes('weekly')?'🟢 Trading session opened (weekly schedule)':'Trading session is now open!');
       // The scheduler opening the market is just as much "today's open" as a
       // manual Chairman/President click -- without this, a classroom that
       // only ever uses the weekly auto-schedule (never a manual open/close)
@@ -2249,6 +2275,7 @@ async function sessionAutoTick(){
   // other connected client's screen "automatically" refreshed within 15s
   // regardless of whether Realtime's WebSocket push is also working.
   try{
+    const epochBefore=_stateEpoch;
     const [freshSession,freshCompanies,freshHalts]=await Promise.all([
       sb.get('jex_session','id=eq.1'),
       sb.get('jex_companies','order=created_at.asc'),
@@ -2259,6 +2286,11 @@ async function sessionAutoTick(){
     // "Trading session has closed" to every student and kill the countdown,
     // for a session that was still open -- a false close is far more
     // disruptive mid-class than a tick that quietly does nothing.
+    // Newer state arrived while these reads were out (a realtime open, a
+    // trade's prices): putting this older read back over it closed a session
+    // that had just opened, until the next tick.
+    if(_stateEpoch!==epochBefore)return;
+    const wasOpen=DB.session.status==='open';
     const gotSession=!!freshSession[0];
     const nowOpen=gotSession&&freshSession[0].status==='open';
     if(gotSession)Object.assign(DB.session,freshSession[0]);
@@ -2280,7 +2312,7 @@ async function sessionAutoTick(){
 setInterval(()=>{sessionAutoTick();if(DB.session.ends_at&&DB.session.status==='open'&&!sessionTimer)sessionTimer=setInterval(tickTimer,500);},15000);
 
 // ── Auto-refresh: pull latest data every 20 seconds ──────
-let _lastRefresh=0;
+let _lastRefresh=0,_refreshInFlight=false;
 // Set while a manually-requested refresh (the M key) is in flight. autoRefresh
 // rate-limits itself with _lastRefresh, but a manual refresh deliberately
 // bypasses that -- and key repeat means a held-down M fires continuously, which
@@ -2459,7 +2491,12 @@ async function autoRefresh(){
   // thing keeping the page current.
   const minGap=realtimeHealthy()?60000:18000;
   if(now-_lastRefresh<minGap)return;
+  // One sweep at a time: a tab regaining focus forced a second sweep while
+  // the first was still out, and whichever landed last won, older or not.
+  if(_refreshInFlight)return;
+  _refreshInFlight=true;
   _lastRefresh=now;
+  const epochBefore=_stateEpoch;
   // The signed-in user's balance as it stood when these reads went out. If it
   // is unchanged when they come back, nothing was applied locally in between,
   // so the server's row is at least as new and replaces ours.
@@ -2499,10 +2536,15 @@ async function autoRefresh(){
     ]);
     const prevUnread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read).length;
     DB.notifications=newNotifs;
-    DB.session=newSession[0]||DB.session;
-    DB.companies=newCompanies;
+    // Tables realtime also keeps current: only replaced when nothing newer
+    // arrived while these reads were out (see _stateEpoch).
+    const quiet=_stateEpoch===epochBefore;
+    if(quiet){
+      DB.session=newSession[0]||DB.session;
+      DB.companies=newCompanies;
+      DB.founderAllocations=newAllocs;
+    }
     DB.companyMembers=newMembers;
-    DB.founderAllocations=newAllocs;
     DB.flags=newFlags;
     DB.classrooms=newClassrooms;
     DB.stopLossOrders=newStopLoss;
@@ -2524,7 +2566,7 @@ async function autoRefresh(){
     const existingIds=new Set(DB.trades.map(t=>t.id));
     // newTrades is newest-first; unshifting one at a time reversed each batch.
     DB.trades.unshift(...newTrades.filter(t=>!existingIds.has(t.id)));
-    DB.limitOrders=newLimitOrders;
+    if(quiet)DB.limitOrders=newLimitOrders;
     // Merge rather than replace: the signed-in user's own row carries local
     // state applied optimistically by applyTradeResult, and a read that went
     // out before that trade would rewind it. So their own row is taken only
@@ -2550,6 +2592,7 @@ async function autoRefresh(){
       const tb=document.querySelector('.user-pill');if(tb)tb.outerHTML=renderTopbar();
     }
   }catch(e){/* silent fail */}
+  finally{_refreshInFlight=false;}
 }
 setInterval(autoRefresh,20000);
 // Browsers throttle setInterval in background tabs (often down to once a
@@ -3229,7 +3272,14 @@ async function loginByForm(){
   }
   return finishLogin(u);
 }
-function logout(){UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.fundPage=null;UI.tradePage=0;UI.googleAuth=null;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}if(supaAuth)supaAuth.auth.signOut().catch(()=>{});render();}
+function logout(){
+  // Close the live feed, and drop what only this account was allowed to see
+  // (other people's emails, pending registrations): the next sign-in on this
+  // tab may be a student, and DB is readable from the console.
+  _realtimeChannels.forEach(ch=>{try{ch.unsubscribe();}catch(e){}});_realtimeChannels=[];_rtJoined=false;
+  (DB.users||[]).forEach(u=>{delete u.email;delete u.notification_email;});(DB.pending||[]).forEach(p=>{delete p.email;});
+  Object.assign(DB,{activity:[],notifications:[],flags:[],bugReports:[],clientErrors:[],retentionCandidates:[]});
+  UI.userId=null;UI.navTab='market';UI.loginView='select';UI.panelTicker=null;UI.companyPage=null;UI.fundPage=null;UI.tradePage=0;UI.googleAuth=null;destroyCharts();try{localStorage.removeItem(SESSION_KEY);}catch(e){}if(supaAuth)supaAuth.auth.signOut().catch(()=>{});render();}
 async function changeEmail(uid2,newEmail,pw){
   const u=getUser(uid2);if(!u)return;
   if(!newEmail||!newEmail.includes('@'))return toast('Enter a valid email address');
@@ -3320,7 +3370,7 @@ async function toggleEmailNotifications(enabled){
   const u=cu();if(!u)return;
   if(['secretary','treasurer','compliance_officer'].includes(u.role))return toast('Email notifications are not available for this account');
   try{await sb.rpc('rpc_toggle_email_notifications',{p_enabled:!!enabled});}
-  catch(e){return toast(rpcErrorMessage(e));}
+  catch(e){render();return toast(rpcErrorMessage(e));}   // render: put the checkbox back
   u.email_notifications=!!enabled;
   toast(enabled?'Email notifications enabled':'Email notifications disabled');
   render();
@@ -3483,7 +3533,7 @@ async function postNews(ticker,headline,body){
   let rec;
   try{rec=await sb.rpc('rpc_post_news',{p_ticker:ticker,p_headline:headline.trim(),p_body:(body||'').trim()});}
   catch(e){return toast(rpcErrorMessage(e));}
-  DB.news.unshift(rec);
+  upsertById(DB.news,rec,true);
   if(document.getElementById('news-notify')?.checked){
     // The server tells holders, from the stored article: the author only,
     // within 10 minutes of posting, once (rpc_notify_news_holders).
@@ -3552,7 +3602,7 @@ async function postAnnouncement(title,body,level){
   let rec;
   try{rec=await sb.rpc('rpc_post_announcement',{p_title:title.trim(),p_body:(body||'').trim(),p_level:level||'info'});}
   catch(e){return toast(rpcErrorMessage(e));}
-  if(rec)DB.announcements.unshift(rec);   // see postSessionRecap: never store a null
+  if(rec)upsertById(DB.announcements,rec,true);   // see postSessionRecap: never store a null
   afterServerEvent();
   clearDraft('ann-body');toast('Announcement posted');render();
 }
@@ -3655,7 +3705,7 @@ async function requestFounderAllocation(ticker,studentId,shares,reason){
   let rec;
   try{
     rec=await sb.rpc('rpc_request_founder_allocation',{p_ticker:ticker,p_student_id:studentId,p_shares:shares,p_reason:reason||''});
-    DB.founderAllocations.unshift(rec);   // newest first, as loaded
+    upsertById(DB.founderAllocations,rec,true);   // newest first, as loaded
     afterServerEvent();
     toast('✓ Allocation request submitted: '+shares+'×'+ticker+' for '+student.name);
     render();
@@ -4298,10 +4348,24 @@ async function deletePriceAlert(id){
 const MARGIN_CALL_AT=0.8;
 // True when a short has lost at least MARGIN_CALL_AT of what was posted
 // against it. Shared with the trade panel, which warns before it happens.
+// The most shares cash can collateralise, by the same cents the trade charges
+// (round(price*qty*1.5, 2)). floor(cash/(price*1.5)) undershot by one when the
+// cash was exactly enough: $3.03 at $1.01 is two shares, and it said one.
+function maxShortQty(price,cash){
+  const per=Number(price)*1.5;if(!(per>0)||!(cash>0))return 0;
+  const cost=q=>Math.round(Number((price*q*1.5*100).toPrecision(12)))/100;
+  let q=Math.floor(cash/per);
+  while(cost(q+1)<=cash)q++;
+  while(q>0&&cost(q)>cash)q--;
+  return q;
+}
 function shortMarginLine(pos){
   const qty=Number(pos&&pos.qty)||0, coll=Number(pos&&pos.collateral)||0;
   if(qty<=0||coll<=0)return null;
-  return Math.round((Number(pos.avgPrice)+MARGIN_CALL_AT*coll/qty)*100)/100;
+  // Up to the cent, not to the nearest: the server calls it when the loss
+  // reaches the trigger, so a line rounded down showed a price that does not
+  // cross, and every browser re-sent the margin call on every poll.
+  return Math.ceil(Number(((Number(pos.avgPrice)+MARGIN_CALL_AT*coll/qty)*100).toPrecision(12)))/100;
 }
 async function checkMarginCalls(){
   if(!isOpen())return;
@@ -4895,7 +4959,7 @@ async function placeLimitOrder(ticker,side,qty,limitPrice,fundId){
   let r;
   try{r=await sb.rpc('rpc_place_limit_order',{p_ticker:ticker,p_side:side,p_qty:qty,p_limit_price:limitPrice,p_order_type:orderType,p_iceberg_visible:icebergQty,p_fund_id:fundId||null});}
   catch(e){return toast(rpcErrorMessage(e));}
-  DB.limitOrders.push(r.order);
+  r.order=upsertById(DB.limitOrders,r.order);
   if(r.status==='after_hours'){
     toast('After-hours order queued: '+qty+'×'+ticker+' @ '+fmt(limitPrice)+' — activates when session opens');
     render();return;
@@ -5140,6 +5204,7 @@ function recordLocalTrade(trade){
   DB.trades.unshift(trade);
 }
 function applyTradeResult(ticker,r){
+  _stateEpoch++;
   const u=cu(),co=getCo(ticker);
   if(u){u.cash=r.cash;if('holdings'in r)u.holdings=r.holdings;if('shorts'in r)u.shorts=r.shorts;}
   if(co){
@@ -5440,7 +5505,9 @@ async function fundSell(fundId,ticker,qty){
   const f=getFund(fundId);const co=getCo(ticker);if(!f||!co)return;
   if(!requireOpen(ticker))return;
   const u=cu();if(!u||u.id!==f.manager_id)return toast('Only this fund\'s manager can trade on its behalf');
-  if(f.status!=='active')return toast('This fund is closed');
+  // A closed fund may still sell and cover: that is how it winds down
+  // (fund_close_trap.sql). Refusing here trapped its investors' money.
+  if(f.status!=='active'&&f.status!=='closed')return toast('This fund is closed');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const held=(f.holdings||{})[ticker]||0;if(held<qty)return toast('Fund only holds '+held+' shares');
   let r;
@@ -5484,7 +5551,9 @@ async function fundCoverShort(fundId,ticker,qty){
   const f=getFund(fundId);const co=getCo(ticker);if(!f||!co)return;
   if(!requireOpen(ticker))return;
   const u=cu();if(!u||u.id!==f.manager_id)return toast('Only this fund\'s manager can trade on its behalf');
-  if(f.status!=='active')return toast('This fund is closed');
+  // A closed fund may still sell and cover: that is how it winds down
+  // (fund_close_trap.sql). Refusing here trapped its investors' money.
+  if(f.status!=='active'&&f.status!=='closed')return toast('This fund is closed');
   qty=parseInt(qty);if(isNaN(qty)||qty<=0)return toast('Enter a valid quantity');
   const short=fundShorts(f)[ticker];if(!short||short.qty<qty)return toast('Fund only has '+(short?.qty||0)+' shorted');
   let r;
@@ -5558,13 +5627,13 @@ async function doBuyback(ticker,qty,premiumPct){
   if(payer)payer.cash=r.owner_cash!=null?r.owner_cash:r.cash;
   co.price=r.price;co.shares=r.shares;co.price_history=r.price_history;
   if(r.shares_avail!=null)co.shares_avail=r.shares_avail;
-  if(r.buyback)DB.buybacks.push(r.buyback);
+  if(r.buyback)upsertById(DB.buybacks,r.buyback);
   // Sellers were paid out of the company's cash and lost the shares, so their
   // rows are stale in this session until the next poll. Refreshed the same way
   // a dividend refreshes the people it paid.
   if(r.fills&&r.fills.length)
     await refreshDividendPayoutBalances(r.fills.filter(f=>f.user_id).map(f=>({userId:f.user_id})));
-  if(r.tender)DB.limitOrders.push(r.tender);
+  if(r.tender)upsertById(DB.limitOrders,r.tender);
   // Three rungs, so the message has to say which one actually happened --
   // "bought back 100 shares" would be a lie when 100 of the company's own
   // unsold shares were simply cancelled and nobody was paid a cent.
@@ -5646,6 +5715,24 @@ function dividendPassThrough(ticker,perShare){
   }
   return{total:Math.round(total*100)/100,cuts};
 }
+// What the dividend costs the company, the way rpc_pay_dividend charges it:
+// approved students by base-equivalent shares (conversion ratio applied),
+// rounded once per holder, plus the index pass-through and the student-run
+// funds' cut. The live preview used divTotal(), which counted company accounts
+// (never paid), ignored the ratio and missed funds -- $120 shown, $160 charged.
+function dividendDirectTotal(students,allT,perShare){
+  return students.reduce((s,u)=>{
+    if(!allT.some(t=>(u.holdings&&u.holdings[t]||0)>0))return s;
+    return s+Math.round(baseEquivalent(u,allT)*perShare*100)/100;
+  },0);
+}
+function dividendCost(ticker,perShare,students){
+  const allT=getCompanyTickers(ticker);
+  const direct=dividendDirectTotal(students,allT,perShare);
+  const pass=dividendPassThrough(ticker,perShare);
+  const fundCut=fundDividendCut(allT,perShare);
+  return Math.round((direct+pass.total+fundCut)*100)/100;
+}
 async function issueDividend(ticker,perShare,note){
   // The company account pays, not whoever clicked: a co-founder's own cash
   // is not the company's.
@@ -5675,10 +5762,7 @@ async function issueDividend(ticker,perShare,note){
   // share is the exploit: list a class at a fifth of the parent and collect five
   // times the yield for the same claim. classRatio() answers 1 for the base
   // class and for every class without a ratio.
-  const directTotal=sh.reduce((s,u)=>{
-    const equiv=baseEquivalent(u,allT);
-    return s+Math.round(equiv*perShare*100)/100;
-  },0);
+  const directTotal=dividendDirectTotal(sh,allT,perShare);
   // Shares the company's own stock held INSIDE an index fund pay out too --
   // rpc_pay_dividend passes them through to the fund's unit-holders. Leaving
   // them out of this preview understated the cost of every dividend paid by a
@@ -5759,7 +5843,7 @@ async function issueDividend(ticker,perShare,note){
   // way as the direct shareholders' so this session sees it immediately.
   const jxiPayouts=(r.jxi_pass_through||[]).flatMap(f=>f.payouts);
   await refreshDividendPayoutBalances([...(r.payouts||[]),...jxiPayouts]);
-  if(r.dividend_id)DB.dividends.push({id:r.dividend_id,ticker,company_name:co.name,per_share:perShare,total:r.total,note:note.trim(),payouts:r.payouts,jxi_pass_through:r.jxi_pass_through||[],ts:ts()});
+  if(r.dividend_id)upsertById(DB.dividends,{id:r.dividend_id,ticker,company_name:co.name,per_share:perShare,total:r.total,note:note.trim(),payouts:r.payouts,jxi_pass_through:r.jxi_pass_through||[],ts:ts()});
   // The ex-dividend drop. rpc_pay_dividend lowers each price by the dividend,
   // because that is what happens on the ex-date in a real market and it is the
   // reason a dividend is not free money -- you trade a dollar of share price
@@ -5865,7 +5949,7 @@ async function reviewIPO(id,approve){
   catch(e){return toast(rpcErrorMessage(e));}
   app.status=approve?'approved':'rejected';
   if(r.approved){
-    DB.companies.push(r.company);
+    upsertById(DB.companies,r.company);
     const owner=getUser(r.user_id);if(owner)owner.app_status='approved';
     afterServerEvent();
     toast('✓ '+r.name+' ('+r.ticker+') is now listed on JEX!');
@@ -6370,7 +6454,7 @@ function impactPreview(co,qty,dir){
   let note='';
   if(b){
     if(dir==='buy'){
-      const raw=Math.max(0.01,Math.round(co.price*(1+Math.min((qty/(co.shares*0.05))*0.015,0.12))*100)/100);
+      const raw=Math.max(0.01,Math.round(Number((co.price*(1+Math.min((qty/(co.shares*0.05))*0.015,0.12))*100).toPrecision(12)))/100);
       // Mirrors the server's reject test: refused only if the order moves the
       // price FURTHER outside the band. A buy on a stock sitting below the
       // floor lifts it back toward the band and is allowed -- warning about
@@ -6543,7 +6627,7 @@ function qtyWarning(co,mode,qty){
   } else if(mode==='short'){
     const need=Math.round(co.price*qty*1.5*100)/100;
     if(need>u.cash){
-      const per=co.price*1.5,n=per>0?Math.floor(u.cash/per):0;
+      const n=maxShortQty(co.price,u.cash);
       return 'You have '+fmt(u.cash)+' — enough collateral to short '+(n>0?n.toLocaleString():'none')+'.';
     }
   } else if(mode==='cover'){
@@ -6650,8 +6734,7 @@ function quickSetQty(ticker,mode,qtyInputId,previewId,value){
       if(headroom!=null)qty=Math.min(qty,headroom);
     } else if(mode==='short'){
       // 1.5x collateral requirement, same math as shortPrev()
-      const collateralPerShare=co.price*1.5;
-      qty=collateralPerShare>0?Math.floor(u.cash/collateralPerShare):0;
+      qty=maxShortQty(co.price,u.cash);
       // ...but never more than there is to borrow. Max offering a number the
       // trade would be refused for is the same defect as a dropdown listing a
       // ticker whose buttons cannot work.
@@ -6958,12 +7041,12 @@ async function reviewClassApp(id,approve){
   catch(e){return toast(rpcErrorMessage(e));}
   app.status=approve?'approved':'rejected';
   if(r.approved){
-    DB.shareClasses.push(r.share_class);
+    upsertById(DB.shareClasses,r.share_class,false,'ticker');
     if(r.is_conversion){
       afterServerEvent();
       toast(app.company_name+' ('+app.proposed_ticker+') converted to Class '+app.class+'!');
     } else {
-      DB.companies.push(r.company);
+      upsertById(DB.companies,r.company);
       afterServerEvent();
       toast(app.company_name+' Class '+app.class+' listed as '+app.proposed_ticker+'!');
     }
@@ -7031,7 +7114,7 @@ async function postVote(parentTicker,question,optA,optB){
   // the company's vote list -- for the person who just posted it, and for
   // nobody else. DB.votes is not in the 20-second poll either, so it stayed
   // there until a full reload.
-  DB.votes.unshift(v);
+  upsertById(DB.votes,v,true);
   afterServerEvent();
   toast('Vote posted');UI.companyTab='votes';render();
 }
@@ -8512,7 +8595,7 @@ function renderLeaderboard(){
       <option value="">All classrooms</option>
       ${DB.classrooms.map(c=>`<option value="${c.id}" ${UI.lbClassroom===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
     </select>`:'';
-  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard<span class="info-bubble" tabindex="0">?<span class="info-tip">Each holding is valued at that stock&#39;s volume-weighted average price for the session, not its last trade. The last trade is one order and easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Your Portfolio page shows the live value at the current price, so the two can differ during a session — that difference is the same one between a fund&#39;s live marks and its official NAV.</span></span></span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${esc(u.name)}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${esc(getClassroomName(u.classroom_id))}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pv(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=startingCash()?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
+  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard<span class="info-bubble" tabindex="0">?<span class="info-tip">Each holding is valued at that stock&#39;s volume-weighted average price for the session, not its last trade. The last trade is one order and easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Your Portfolio page shows the live value at the current price, so the two can differ during a session — that difference is the same one between a fund&#39;s live marks and its official NAV.</span></span></span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${esc(u.name)}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${esc(getClassroomName(u.classroom_id))}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pvMark(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=startingCash()?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
 }
 function renderFundLeaderboard(){
   const ranked=(DB.funds||[]).filter(f=>!isHiddenTestEntity(f.manager_id)).map(f=>{
@@ -8716,6 +8799,20 @@ function renderFundDetail(fundId){
         <table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th class="r">Limit price</th><th></th></tr></thead><tbody>`
         +fundOpenOrders.map(o=>`<tr><td style="font-family:var(--mono)">${esc(o.ticker)}</td><td><span class="badge ${o.side==='buy'?'b-teal':'b-red'}">${o.side}</span></td><td>${o.qty}</td><td class="r" style="font-family:var(--mono)">${fmt(o.limit_price)}</td><td><button class="btn btn-sm btn-danger" onclick="cancelLimitOrder('${o.id}')">Cancel</button></td></tr>`).join('')
         +'</tbody></table></div>';
+    }
+  }
+  // A closed fund still holding stock or shorts can only shrink: the server
+  // lets it sell and cover, and this is the only place the manager can.
+  if(isManager&&f.status==='closed'){
+    const pos=[...new Set([...Object.keys(f.holdings||{}).filter(t=>(f.holdings[t]||0)>0),
+      ...Object.keys(fundShorts(f)).filter(t=>((fundShorts(f)[t]||{}).qty||0)>0)])];
+    if(pos.length){
+      html+=`<div class="card"><div class="section-title">Wind down the fund</div>
+        <div class="ibox ibox-amber" style="margin-bottom:12px">This fund is closed but still holds positions. Sell and cover them so investors can withdraw.</div>
+        <div class="frow"><label class="flabel">Ticker</label><select id="fund-trade-ticker">${pos.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('')}</select></div>
+        <div class="frow"><label class="flabel">Quantity</label><input type="number" id="fund-trade-qty" min="1" step="1" placeholder="e.g. 10"></div>
+        <div class="btn-row"><button class="btn btn-danger btn-sm" onclick="busy(this,&quot;Selling…&quot;,()=>fundSell('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value))">Sell</button><button class="btn btn-sm" onclick="busy(this,&quot;Covering…&quot;,()=>fundCoverShort('${f.id}',get('fund-trade-ticker')?.value,get('fund-trade-qty')?.value))">Cover</button></div>
+      </div>`;
     }
   }
 
@@ -9448,7 +9545,7 @@ function updateDivPrev(ticker){const co=getCo(ticker);if(!co)return;const ps=par
   // preview even though a real payment was about to go out.
   const allT=getCompanyTickers(ticker);
   const holderCount=Object.keys(buildShareholderMap(allT)).length;
-  const total=allT.reduce((s,t)=>s+divTotal(t,ps),0);
+  const total=dividendCost(ticker,Math.round(ps*100)/100,DB.users.filter(u=>u.role==='student'&&u.status==='approved'));
   const owner=getUser(co.owner_id)||cu(),ok=owner.cash>=total;p.innerHTML=`<div style="font-size:12px;padding:10px;background:var(--bg3);border-radius:var(--radius);margin-top:6px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:6px"><div><div style="color:var(--text2);margin-bottom:2px">Shareholders</div><div style="font-weight:500">${holderCount}</div></div><div><div style="color:var(--text2);margin-bottom:2px">Total</div><div style="color:var(--green);font-family:var(--mono)">${fmt(total)}</div></div><div><div style="color:var(--text2);margin-bottom:2px">After</div><div style="font-family:var(--mono);color:${ok?'var(--text)':'var(--red)'}">${fmt(owner.cash-total)}</div></div></div>${!ok?`<div style="color:var(--red);font-weight:500">Insufficient funds</div>`:''}</div>`;}
 function renderFinancialsHistory(financials){
   if(!financials||!financials.length)return'<div class="card"><div class="empty">No financial reports posted yet.</div></div>';
@@ -9489,12 +9586,20 @@ function updateBBPrev(ticker){
   const fromFloat=Math.min(left,Math.max(0,Number(co.shares_avail)||0));
   if(fromFloat>0){rows.push(fromFloat.toLocaleString()+' cancelled from unsold stock — <b>no cost</b>');left-=fromFloat;}
   if(left>0){
-    const asks=(DB.limitOrders||[]).filter(o=>o.ticker===ticker&&o.side==='sell'&&o.status==='open'&&o.user_id!==co.owner_id)
+    // The asks rpc_buyback will actually lift (buyback_self_dealing.sql): not
+    // the caller's, the owner's or a founder's, and none above today's band.
+    const me=cu()?.id,band=bandLimits(ticker);
+    const insider=id=>id===co.owner_id||id===me||DB.companyMembers.some(m=>m.company_user_id===co.owner_id&&m.student_id===id&&m.status==='accepted');
+    const asks=(DB.limitOrders||[]).filter(o=>o.ticker===ticker&&o.side==='sell'&&o.status==='open'
+        &&!(o.user_id&&insider(o.user_id))&&!(band&&o.limit_price>band.upper))
       .sort((a,b)=>(a.limit_price-b.limit_price)||String(a.created_at||'').localeCompare(String(b.created_at||'')));
+    const cashFor=Number(getUser(co.owner_id)?.cash)||0;
     for(const a of asks){
       if(left<=0)break;
-      const take=Math.min(Number(a.qty)||0,left);
-      if(take<=0)continue;
+      // Only what the company can still afford, as the server does; cheapest
+      // first, so once one is out of reach nothing further is.
+      const take=Math.min(Number(a.qty)||0,left,Math.floor((cashFor-spend)/a.limit_price+1e-9));
+      if(take<=0)break;
       spend=Math.round((spend+take*a.limit_price)*100)/100;bought+=take;left-=take;
       lastPrice=Number(a.limit_price)||lastPrice;
     }
@@ -10511,7 +10616,7 @@ function renderAdminDashboard(){
   const tradeCounts={};DB.trades.forEach(t=>{tradeCounts[t.ticker]=(tradeCounts[t.ticker]||0)+1;});
   const mostActive=Object.entries(tradeCounts).sort((a,b)=>b[1]-a[1])[0];
   // Top student
-  const ranked=students.map(u=>({...u,_nw:nw(u)})).sort((a,b)=>b._nw-a._nw);
+  const ranked=students.map(u=>({...u,_nw:nwMark(u)})).sort((a,b)=>b._nw-a._nw);
   return`<div class="grid4" style="margin-bottom:14px">
     <div class="mcard"><div class="mlabel">Students</div><div class="mval">${students.length}</div></div>
     <div class="mcard"><div class="mlabel">Listed stocks</div><div class="mval">${companies.length}</div></div>
@@ -10758,7 +10863,7 @@ function renderExchangeStats(){
   const losers=[...movers].sort((a,b)=>a.chg-b.chg).filter(m=>m.chg<0);
   const mostActive=[...listed].map(c=>({ticker:c.ticker,name:c.name,trades:todayTrades.filter(t=>t.ticker===c.ticker).length})).sort((a,b)=>b.trades-a.trades);
   const bigTrade=todayTrades.length?todayTrades.reduce((a,b)=>b.price*b.qty>a.price*a.qty?b:a):null;
-  const ranked=students.map(u=>({name:u.name,nw:nw(u)})).sort((a,b)=>b.nw-a.nw);
+  const ranked=students.map(u=>({name:u.name,nw:nwMark(u)})).sort((a,b)=>b.nw-a.nw);
   // Session recaps from minutes
   const recaps=(DB.minutes||[]).filter(m=>m.type==='official_notice'&&m.title.startsWith('Session recap'));
   return`<div class="grid4" style="margin-bottom:14px">
@@ -10999,7 +11104,7 @@ async function postOfficialNotice(title,body){
   let rec;
   try{rec=await sb.rpc('rpc_post_official_notice',{p_title:title,p_body:body});}
   catch(e){return toast(rpcErrorMessage(e));}
-  if(rec)DB.announcements.unshift(rec);   // see postSessionRecap: never store a null
+  if(rec)upsertById(DB.announcements,rec,true);   // see postSessionRecap: never store a null
   clearDraft('notice-body');clearDraft('min-body');toast('Official notice posted');render();
 }
 function renderAdminMinutes(){
@@ -11287,7 +11392,7 @@ function renderAdminAnnouncements(){
 // RENDER: PDF REPORT
 // ═══════════════════════════════════════════════
 function generatePDFReport(){
-  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nw(u),_divs:divRec(u)})).sort((a,b)=>b._nw-a._nw);
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nwMark(u),_divs:divRec(u)})).sort((a,b)=>b._nw-a._nw);
   const totalTrades=DB.trades.length;
   // The newest 200 FIRST, then put in time order for the page. Reversing
   // before slicing took the OLDEST 200 -- an instructor exporting this
@@ -11326,7 +11431,7 @@ function generatePDFReport(){
   </div>
   <h2>Leaderboard</h2>
   <table><thead><tr><th>Rank</th><th>Student</th><th>Cash</th><th>Portfolio</th><th>Dividends</th><th>Net worth</th><th>vs Start</th></tr></thead><tbody>
-  ${students.map((u,i)=>{const vs=u._nw-startingCash();return`<tr><td>${i===0?'<span class="badge badge-gold">🥇 #1</span>':'#'+(i+1)}</td><td><strong>${esc(u.name)}</strong></td><td>$${u.cash.toFixed(2)}</td><td>$${pv(u).toFixed(2)}</td><td>$${u._divs.toFixed(2)}</td><td><strong class="${vs>=0?'up':'dn'}">$${u._nw.toFixed(2)}</strong></td><td class="${vs>=0?'up':'dn'}">${vs>=0?'+':''}$${vs.toFixed(2)}</td></tr>`;}).join('')}
+  ${students.map((u,i)=>{const vs=u._nw-startingCash();return`<tr><td>${i===0?'<span class="badge badge-gold">🥇 #1</span>':'#'+(i+1)}</td><td><strong>${esc(u.name)}</strong></td><td>$${u.cash.toFixed(2)}</td><td>$${pvMark(u).toFixed(2)}</td><td>$${u._divs.toFixed(2)}</td><td><strong class="${vs>=0?'up':'dn'}">$${u._nw.toFixed(2)}</strong></td><td class="${vs>=0?'up':'dn'}">${vs>=0?'+':''}$${vs.toFixed(2)}</td></tr>`;}).join('')}
   </tbody></table>
   <h2>Listed Companies</h2>
   <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Shares</th><th>Avail.</th><th>Market cap</th></tr></thead><tbody>

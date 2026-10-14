@@ -55,7 +55,7 @@ for(const [what,re] of [
   ['the average-net-worth colour', /rows\.length>=startingCash\(\)/],
   ['the Portfolio card', /_nw-startingCash\(\)>=0/],
   ['the PDF report', /u\._nw-startingCash\(\)/],
-  ['the leaderboard row builder', /nw\(u\)-startingCash\(\)/],
+  ['the leaderboard row builder', /nw(?:Mark)?\(u\)-startingCash\(\)/],
 ]){
   check(what+' uses the helper', re.test(src), 'still hardcoded');
 }

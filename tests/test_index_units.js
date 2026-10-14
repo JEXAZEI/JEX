@@ -45,6 +45,8 @@ global.snapshotJXI=()=>{};
 global.pushTradeToSheets=()=>{};
 global.toast=()=>{};
 global.render=()=>{};
+// State the extracted functions now share (see _stateEpoch / upsertById in app.js).
+var _stateEpoch=0;
 eval(grabFn('applyTradeResult'));
 eval(grabFn('applyFundTradeResult'));
 
