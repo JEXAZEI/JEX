@@ -54,6 +54,7 @@ that would otherwise be re-broken silently by a future edit.
 | `test_deadlock_retry` | sb.rpc retries a Postgres deadlock (guaranteed rolled back) and NOTHING else — a lost response is never repeated |
 | `test_networth` | net worth is flat when a student moves their own money (buy, short, fund deposit) and moves only when the market does |
 | `test_time` | Arizona time: wall-clock vs instant, the server's `ts` display format, day rollover, no DST — every case run in four timezones |
+| `test_bug_hunt_oct14` | vote tallies read 'A'/'B' and voting_power; the Treasurer cash flow is newest-first and escaped; CSV keeps zeros; push text survives; a cover previews at the band ceiling; hidden test accounts are not "index funds"; realtime reads the raw wire shape; trade buttons hold while in flight |
 
 ## The browser harness (`tests/browser/`)
 

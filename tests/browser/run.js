@@ -1318,7 +1318,7 @@ ${PRELUDE}
   await step('a vote is cast with the right voting power', async ()=>{
     UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='votes'; render();
     const shares=(ME().holdings||{}).ACME||0;
-    await castVote('v-1','option1');
+    await castVote('v-1','A');
     const b=DB.ballots.find(x=>x.vote_id==='v-1'&&x.voter_id==='u-stu');
     if(!b) throw new Error('no ballot recorded');
     if(b.voting_power !== shares) throw new Error('power '+b.voting_power+' but holds '+shares);
@@ -1327,7 +1327,7 @@ ${PRELUDE}
 
   await step('voting twice is refused', async ()=>{
     const before = DB.ballots.length;
-    await castVote('v-1','option2');
+    await castVote('v-1','B');
     if(DB.ballots.length !== before) throw new Error('a second ballot was accepted');
     return 'refused';
   });

@@ -133,7 +133,9 @@ check('the client only ever registers students and companies',
 check('approveReg sends a starting balance the server will check',
       /sb\.rpc\('approve_registration',\{p_pending_id:id,p_starting_cash:startCash/.test(src));
 check('...defaulted from the session, never hardcoded',
-      /startCash=parseFloat\(startCash\)\|\|DB\.session\.starting_cash\|\|10000;/.test(src));
+      /startCash=\(v=>Number\.isFinite\(v\)&&v>=0\?v:\(DB\.session\.starting_cash\?\?10000\)\)\(parseFloat\(startCash\)\);/.test(src));
+// A typed 0 is a real amount. "0||default" turned it into $10,000.
+check('...and a typed 0 stays 0',(()=>{const f=v=>Number.isFinite(v)&&v>=0?v:10000;return f(parseFloat('0'))===0&&f(parseFloat(''))===10000;})());
 check('the admin form cannot type a negative starting balance',
       /id="cash-\$\{r\.id\}"[^>]*min="0"/.test(src));
 
