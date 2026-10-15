@@ -66,13 +66,18 @@ select jsonb_pretty(jsonb_build_object(
   -- an account used to delete the shares it held. Both numbers should be 0.
   'books', jsonb_build_object(
     'shares_unaccounted_for', (
-      select coalesce(sum(c.shares - c.shares_avail - h.u - h.f), 0)
+      -- Index baskets hold real shares too (index_basket_register.sql);
+      -- leaving them out reported a "leak" after every index purchase.
+      select coalesce(sum(c.shares - c.shares_avail - h.u - h.f - h.idx), 0)
         from jex_companies c
         cross join lateral (
           select coalesce((select sum((u.holdings->>c.ticker)::numeric) from jex_users u
                             where coalesce(u.holdings,'{}'::jsonb) ? c.ticker), 0) as u,
                  coalesce((select sum((f.holdings->>c.ticker)::numeric) from jex_funds f
-                            where coalesce(f.holdings,'{}'::jsonb) ? c.ticker), 0) as f) h
+                            where coalesce(f.holdings,'{}'::jsonb) ? c.ticker), 0) as f,
+                 coalesce((select sum((x.fund_holdings->>c.ticker)::numeric) from jex_companies x
+                            where coalesce(x.is_index_fund, false)
+                              and coalesce(x.fund_holdings,'{}'::jsonb) ? c.ticker), 0) as idx) h
        where c.status = 'listed' and not coalesce(c.is_index_fund, false)),
     'users_with_negative_cash', (select count(*) from jex_users where cash < 0),
     'funds_with_negative_cash', (select count(*) from jex_funds where cash < 0),

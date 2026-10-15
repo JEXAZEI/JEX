@@ -63,6 +63,8 @@ global.sb={
 
 eval(grabFn('startSessionTimer'));
 eval(grabFn('tickTimer'));
+// State the extracted functions now share (see _stateEpoch / upsertById in app.js).
+var _stateEpoch=0;
 eval(grabFn('sessionAutoTick'));
 
 function reset(status){

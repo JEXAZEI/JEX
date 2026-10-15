@@ -1173,7 +1173,7 @@ window.WebSocket = function(){
       // Realtime's wire shape on a raw socket: type/record/old_record. The
       // new/old/eventType names exist only after supabase-js renames them.
       schema:'public', table:'jex_companies', type:'UPDATE',
-      record:Object.assign({}, DATA.jex_companies[0], {price:13.25}), old_record:{id:DATA.jex_companies[0].id}}}})});
+      record:Object.assign({}, DATA.jex_companies[0], {price:13.25}), old_record:{id:(DATA.jex_companies[0]||{}).id}}}})});
     self.onmessage({data:JSON.stringify({event:'postgres_changes', payload:{data:{
       schema:'public', table:'jex_trades', type:'INSERT', old_record:{},
       record:{id:100, ticker:'ACME', qty:2, price:13.25, buyer_id:'u-stu2', seller_id:'exchange', type:'market', ts:TS}}}})});
