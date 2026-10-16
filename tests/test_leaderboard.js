@@ -67,7 +67,7 @@ check('no snapshot at all falls back to live', rank(null,live,'closed').length==
 // leaderboard blank -- a pre-existing bug, found while testing this fix.
 check('an empty snapshot falls back to live rather than blanking',
   rank([],live,'closed').length===2, 'empty snapshot blanked the board');
-check('app.js guards the empty-snapshot case', /lbSnap&&lbSnap\.length>0&&/.test(src));
+check('app.js guards the empty-snapshot case', /if\(!Array\.isArray\(snap\)\|\|!snap\.length\)return false;/.test(src));
 
 console.log('\n=== classroom filter still applies ===');
 check('classroom filter works on frozen rows', JSON.stringify(rank(snapshot,live,'closed','B'))===JSON.stringify(['Bea']));
