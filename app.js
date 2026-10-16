@@ -1580,7 +1580,11 @@ const sharesBar=co=>{
 const roleBadge=role=>role==='chairman'?'<span class="badge b-chair">Chairman</span>':role==='president'?'<span class="badge b-pres">President</span>':role==='secretary'?'<span class="badge b-sec">Secretary</span>':role==='treasurer'?'<span class="badge b-tre">Treasurer</span>':role==='compliance_officer'?'<span class="badge b-co">Compliance</span>':role==='student'?'<span class="badge b-blue">Student</span>':role==='company'?'<span class="badge b-amber">Company</span>':'';
 const avatarClass=role=>role==='chairman'?'av-ch':role==='president'?'av-pr':role==='secretary'?'av-sec':role==='treasurer'?'av-tre':role==='compliance_officer'?'av-co':role==='company'?'av-c':'av-s';
 
-function toast(msg){const t=get('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3200);}
+// Each message gets its full 3.2 seconds. The previous one's timer used to
+// keep running, so a toast that replaced another a moment before it expired
+// vanished almost as soon as it appeared -- often the one saying why.
+let _toastTimer=null;
+function toast(msg){const t=get('toast');t.textContent=msg;t.classList.add('show');clearTimeout(_toastTimer);_toastTimer=setTimeout(()=>t.classList.remove('show'),3200);}
 function destroyCharts(){Object.keys(charts).forEach(k=>destroyChart(k));charts={};}
 
 // ═══════════════════════════════════════════════
@@ -1878,7 +1882,10 @@ async function saveCBPct(){
 async function saveSnapshot(label){
   if(!isAdmin(cu()))return toast('Admin access required');
   if(!label||label.trim().length<2)return toast('Enter a snapshot name');
-  await doSaveSnapshot(label.trim());
+  // doSaveSnapshot has already said why when it returns null; the success
+  // toast used to follow regardless and cover that up, so a failed save read
+  // as a saved one -- the one thing a snapshot exists to be sure of.
+  if(!(await doSaveSnapshot(label.trim())))return;
   toast('✓ Snapshot saved: '+label.trim());render();
 }
 async function doSaveSnapshot(label){
@@ -2007,17 +2014,22 @@ function renderSnapshotTab(){
   </div>`:''}`;
 }
 async function generateSessionRecap(u){
-  const students=DB.users.filter(s=>s.role==='student'&&s.status==='approved');
-  const listed=DB.companies.filter(c=>c.status==='listed');
+  // Hidden test accounts and their companies out, as on the leaderboard and
+  // Exchange stats: the recap is posted to the whole class, and it could name
+  // a test account as the leader, or a test company as the biggest mover, that
+  // nobody in the room can see anywhere else.
+  const students=DB.users.filter(s=>s.role==='student'&&s.status==='approved'&&!isHiddenTestEntity(s.id));
+  const listed=DB.companies.filter(c=>c.status==='listed'&&!isHiddenTestEntity(c.owner_id));
+  const shown=new Set(listed.map(c=>c.ticker));
   // Find biggest mover
   const movers=listed.map(c=>({ticker:c.ticker,name:c.name,chg:priceChg(c)})).sort((a,b)=>Math.abs(b.chg)-Math.abs(a.chg));
   const bigMover=movers[0];
   // Today's trades
-  const todayTrades=DB.trades.filter(t=>isTodayTs(t.ts));
+  const todayTrades=DB.trades.filter(t=>isTodayTs(t.ts)&&shown.has(t.ticker));
   const totalVol=todayTrades.reduce((s,t)=>s+t.price*t.qty,0);
   const bigTrade=todayTrades.length?todayTrades.reduce((a,b)=>b.price*b.qty>a.price*a.qty?b:a):null;
   // Leaderboard snapshot
-  const ranked=students.map(s=>({name:s.name,nw:nwMark(s)})).sort((a,b)=>b.nw-a.nw);
+  const ranked=students.map(s=>({name:s.name,nw:nwMark(s)})).sort(byNwThenName('nw'));
   // Build recap announcement
   const recapBody=[
     '📊 Session recap — '+azDateLabel(),
@@ -2151,7 +2163,7 @@ async function pushToSheets(type,payload){
 }
 async function pushBalances(){
   if(!SHEETS_URL)return;
-  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved');
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved'&&!isHiddenTestEntity(u.id));
   // email dropped from this payload -- it's pushed to an unauthenticated
   // third-party Google Apps Script webhook (SHEETS_URL) from whichever
   // student's browser happens to trigger a sync, and bulk DB.users no
@@ -2172,7 +2184,7 @@ async function pushBalances(){
   // Listed companies -- was never actually pushed, so a "Companies" tab a
   // classroom set up in their own Apps Script only ever showed whatever
   // was there from before, never JEX's current listings.
-  const companyRows=DB.companies.filter(c=>c.status==='listed').map(c=>({
+  const companyRows=DB.companies.filter(c=>c.status==='listed'&&!isHiddenTestEntity(c.owner_id)).map(c=>({
     name:c.name,ticker:c.ticker,price:c.price,changePct:priceChg(c),
     shares:c.shares,available:c.shares_avail,marketCap:Math.round(c.price*c.shares*100)/100
   }));
@@ -2210,7 +2222,12 @@ async function setSession(status){
     const lbStudents=DB.users.filter(s=>s.role==='student'&&s.status==='approved');
     // The graded mark, same as the live leaderboard: this is the table students
     // see after the close, and nw() marks at the last print.
-    const lbSnap2=lbStudents.map(s=>({name:s.name,nw:nwMark(s),id:s.id,classroom_id:s.classroom_id,sharpe:calcSharpe(s.id)})).sort((a,b)=>b.nw-a.nw);
+    // taken_at says which close this is. Only this click takes the snapshot --
+    // a timed or weekly close (rpc_session_tick, pg_cron) does not -- so the
+    // leaderboard has to be able to tell a snapshot of THIS close from one left
+    // over from an earlier one (see lbSnapshotIsCurrent).
+    const takenAt=Date.now();
+    const lbSnap2=lbStudents.map(s=>({name:s.name,nw:nwMark(s),id:s.id,classroom_id:s.classroom_id,sharpe:calcSharpe(s.id),taken_at:takenAt})).sort(byNwThenName('nw'));
     await saveSession({leaderboard_snapshot:lbSnap2});
     // Auto session recap
     await generateSessionRecap(u);
@@ -2244,8 +2261,32 @@ function tickTimer(){if(!DB.session.ends_at)return;const rem=DB.session.ends_at-
 // outside the weekly hours inherited a stale flag and the next 15s tick shut
 // it down. Both branches clear it now, including the "opens later today" one:
 // the tick that eventually opens that window does not touch the flag either.
-async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em},weekly_active:false});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em},weekly_active:false});startSessionTimer();toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
-async function clearSchedule(){await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();}
+async function scheduleSession(){const sh=parseInt(get('sched-start-h')?.value||'8'),sm2=parseInt(get('sched-start-m')?.value||'0'),eh=parseInt(get('sched-end-h')?.value||'15'),em=parseInt(get('sched-end-m')?.value||'0');if([sh,sm2,eh,em].some(isNaN))return toast('Enter valid times');const startMin=sh*60+sm2,endMin=eh*60+em;if(endMin<=startMin)return toast('End time must be after start time');const az=getAZTime(),nowMin=az.getHours()*60+az.getMinutes();if(nowMin>=endMin)return toast('End time has already passed in Arizona time');if(nowMin<startMin){if(!(await closeOpenSessionFirst('This schedule opens at '+pad(sh)+':'+pad(sm2)+', so trading has to close until then.')))return;await saveSession({status:'closed',label:'Scheduled: opens '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' MST',ends_at:null,scheduled_open:{h:sh,m:sm2},scheduled_close:{h:eh,m:em},weekly_active:false});toast('Session scheduled for '+pad(sh)+':'+pad(sm2)+' – '+pad(eh)+':'+pad(em)+' AZ time');}else{const msUntilEnd=(endMin-nowMin)*60*1000-az.getSeconds()*1000;await saveSession({status:'open',label:'Open until '+pad(eh)+':'+pad(em)+' MST',ends_at:Date.now()+msUntilEnd,scheduled_open:null,scheduled_close:{h:eh,m:em},weekly_active:false});startSessionTimer();toast('Session open until '+pad(eh)+':'+pad(em)+' AZ time');}render();}
+// Clearing a schedule, or setting one that opens later today, used to write
+// status 'closed' straight over a session that was open -- including one the
+// Chairman had opened by hand, for someone who only meant to cancel
+// tomorrow's times. It closed the class's market with the toast "Schedule
+// cleared", and skipped everything a close does: day orders stayed live into
+// the next session and the leaderboard was not frozen. An open session now
+// goes through setSession('closed'), after asking.
+async function closeOpenSessionFirst(why){
+  if(DB.session.status!=='open')return true;
+  if(!confirm('Trading is open right now. '+why+'\n\nClose trading now?'))return false;
+  await setSession('closed');
+  return DB.session.status==='closed';
+}
+async function clearSchedule(){
+  if(DB.session.status==='open'){
+    // Open: clear the times and leave it open, or close it properly.
+    if(confirm('Trading is open right now.\n\nOK: close trading now and clear the schedule.\nCancel: clear the schedule and leave trading open.')){
+      await setSession('closed');toast('Schedule cleared');return;
+    }
+    await saveSession({scheduled_open:null,scheduled_close:null,ends_at:null,label:'Session open'});
+    clearInterval(sessionTimer);sessionTimer=null;
+    toast('Schedule cleared — trading stays open until you close it');render();return;
+  }
+  await saveSession({scheduled_open:null,scheduled_close:null,status:'closed',label:'Session closed',ends_at:null});toast('Schedule cleared');render();
+}
 // ── Weekly recurring schedule (different hours per day of week, repeats every week) ──
 const WEEKDAY_KEYS=['sun','mon','tue','wed','thu','fri','sat'];
 const WEEKDAY_LABELS={sun:'Sunday',mon:'Monday',tue:'Tuesday',wed:'Wednesday',thu:'Thursday',fri:'Friday',sat:'Saturday'};
@@ -2560,6 +2601,9 @@ async function autoRefresh(){
   // is unchanged when they come back, nothing was applied locally in between,
   // so the server's row is at least as new and replaces ours.
   const ownBefore=(u=>u?JSON.stringify([u.cash,u.holdings,u.shorts,u.fund_units]):null)(cu());
+  // Lists that were read once at page load and never again (see queueReads).
+  const queuesBefore=queueSignature();
+  const queuesP=queueReads(cu());
   try{
     // Only reload lightweight tables that change frequently
     const [newNotifs,newSession,newCompanies,newTrades,newLimitOrders,newMembers,newAllocs,newFlags,newClassrooms,newStopLoss,newMinutes,newDivApprovals,newBugReports,newFunds,newUsers]=await Promise.all([
@@ -2611,6 +2655,8 @@ async function autoRefresh(){
     DB.divApprovals=newDivApprovals;
     DB.bugReports=newBugReports;
     DB.funds=newFunds;
+    // Before the email merge just below, which fills in DB.pending's emails.
+    applyQueueReads(await queuesP,queuesBefore);
     // Chairman/President only (see loadAll) -- keeps newly-arrived pending
     // registrations' emails visible without a full reload; a no-op safeRpc
     // resolves to null for everyone else.
@@ -2654,6 +2700,44 @@ async function autoRefresh(){
   finally{_refreshInFlight=false;}
 }
 setInterval(autoRefresh,20000);
+// The officer queues and the vote ballots were loaded once, at page load, and
+// nothing ever read them again: none of these tables is in the realtime
+// subscription, and the sweep above did not ask for them. An officer who kept
+// Admin open while the class registered saw no new registrations, IPO,
+// dilution, delisting or share-class applications until they reloaded -- even
+// as the bell told them one had arrived. A company owner watching their vote
+// saw the tally frozen at whatever it was when they opened the page.
+//
+// The queues are asked for only by someone who can act on or follow them: an
+// officer, or someone with a company. Ballots are for everyone.
+function queueReads(me){
+  const none=Promise.resolve(null);
+  const officer=isAdmin(me);
+  const hasCompany=officer||me?.role==='company'||!!(me&&getMyCompany(me.id));
+  const read=(table,q)=>sb.get(table,q).catch(()=>null);
+  return Promise.all([
+    officer?read('jex_pending','order=created_at.asc&select='+JEX_PENDING_SAFE_SELECT):none,
+    hasCompany?read('jex_ipo_applications','order=created_at.asc'):none,
+    hasCompany?read('jex_dilution_applications','order=created_at.asc'):none,
+    hasCompany?read('jex_delist_applications','order=created_at.asc'):none,
+    hasCompany?read('jex_class_applications','order=created_at.asc'):none,
+    read('jex_vote_ballots','order=created_at.asc'),
+  ]);
+}
+const QUEUE_KEYS=['pending','ipoApps','dilApps','delistApps','classApps','ballots'];
+// What each list looked like when the reads went out. A list this page changed
+// while they were in flight (an approval, a ballot just cast) keeps the local
+// copy this time -- the read predates the change and would put it back.
+function queueSignature(){
+  return QUEUE_KEYS.map(k=>JSON.stringify((DB[k]||[]).map(x=>[x.id,x.status])));
+}
+function applyQueueReads(results,before){
+  if(!Array.isArray(results))return;
+  const now=queueSignature();
+  QUEUE_KEYS.forEach((k,i)=>{
+    if(Array.isArray(results[i])&&now[i]===before[i])DB[k]=results[i];
+  });
+}
 // Browsers throttle setInterval in background tabs (often down to once a
 // minute or less) -- if a trade happened while this tab was in the
 // background, its next scheduled autoRefresh() could be a long way off by
@@ -3594,13 +3678,16 @@ async function postNews(ticker,headline,body){
   try{rec=await sb.rpc('rpc_post_news',{p_ticker:ticker,p_headline:headline.trim(),p_body:(body||'').trim()});}
   catch(e){return toast(rpcErrorMessage(e));}
   upsertById(DB.news,rec,true);
+  // The final toast replaces any earlier one, so a failed notification has to
+  // BE the final message -- "News posted" used to overwrite it at once.
+  let msg='News posted';
   if(document.getElementById('news-notify')?.checked){
     // The server tells holders, from the stored article: the author only,
     // within 10 minutes of posting, once (rpc_notify_news_holders).
     try{const n=await sb.rpc('rpc_notify_news_holders',{p_news_id:rec.id});if(n&&n.sent)afterServerEvent();}
-    catch(e){toast('News posted, but shareholders could not be notified — '+rpcErrorMessage(e));}
+    catch(e){msg='News posted, but shareholders could not be notified — '+rpcErrorMessage(e);}
   }
-  clearDraft('news-body');toast('News posted');UI.companyTab='news';render();
+  clearDraft('news-body');toast(msg);UI.companyTab='news';render();
 }
 async function deleteNews(id){
   const n0=DB.news.find(x=>x.id===id);if(!n0)return;
@@ -3725,13 +3812,11 @@ async function respondToInvite(memberId,accept){
   if(accept&&co)_teamContactsLoaded.delete(co.ticker);
 
   afterServerEvent();
-  if(accept&&co){
-    // jex_company_members is already patched above — that's the source of truth
-    // No need to also patch co.founders
-    toast('You joined '+co.name+' as a founder!');
-  } else if(!accept&&co){
-    toast('Invitation declined');
-  }
+  // Said whether or not the company is listed yet. An invite can come from a
+  // company that has not had its IPO, which has no jex_companies row, and both
+  // answers used to be silent for it -- the buttons just vanished.
+  const coName=co?co.name:(getUser(m.company_user_id)?.name||'the company');
+  toast(accept?'You joined '+coName+' as a founder!':'Invitation declined');
   render();
 }
 
@@ -4594,6 +4679,14 @@ async function checkCircuitBreakers(){
   const cooldowns=DB.session.circuit_cooldowns||{};
   const now=Date.now();
   for(const co of DB.companies){
+    // Not an index. Its price here is derived from its constituents
+    // (syncIndexRows), while session_open_prices holds the cached column the
+    // server recorded at the open -- two different series, which is why
+    // priceChg() stopped comparing them. Measured against each other they show
+    // a move that never happened, and every browser in the room asked the
+    // server to halt the index on it every three seconds. The constituents
+    // have breakers of their own, and an index moves only when they do.
+    if(co.is_index_fund)continue;
     if(isHalted(co.ticker))continue;
     if(cooldowns[co.ticker]&&now<cooldowns[co.ticker])continue;
     const openPrice=openPrices[co.ticker];
@@ -5382,10 +5475,16 @@ async function coverShort(ticker,qty){
 async function toggleWatch(ticker){
   const u=cu();if(!u)return;
   const wasWatched=watchlist(u).includes(ticker);
-  toast(wasWatched?ticker+' removed from watchlist':ticker+' added to watchlist');
+  // Said after the server answers, from what it answered. It used to announce
+  // "added" before the call and return silently if the call failed, so the
+  // star stayed empty under a toast saying it had worked.
   let r;
-  try{r=await sb.rpc('rpc_toggle_watchlist',{p_ticker:ticker});}catch(e){return;}
-  u.watchlist=r.watchlist;
+  try{r=await sb.rpc('rpc_toggle_watchlist',{p_ticker:ticker});}
+  catch(e){return toast('Could not update your watchlist — '+rpcErrorMessage(e));}
+  if(r&&Array.isArray(r.watchlist))u.watchlist=r.watchlist;
+  const nowWatched=watchlist(u).includes(ticker);
+  toast(nowWatched===wasWatched?ticker+(nowWatched?' is on':' is not on')+' your watchlist'
+    :nowWatched?ticker+' added to watchlist':ticker+' removed from watchlist');
   render();
 }
 
@@ -5871,7 +5970,7 @@ async function issueDividend(ticker,perShare,note){
       // and the stored one finally agree.
       let req;
       try{req=await sb.rpc('rpc_request_dividend_approval',{p_ticker:ticker,p_per_share:perShare,
-        p_note:(document.getElementById('div-note')?.value||'').trim()});}
+        p_note:note.trim()});}
       catch(e){return toast(rpcErrorMessage(e));}
       DB.divApprovals.push(req);
       afterServerEvent();
@@ -8110,12 +8209,16 @@ function renderCompanyPage(parentTicker){
       // only toasting on click: the price on the page looks perfectly normal,
       // so a disabled-looking button with no explanation reads as a glitch.
       const noBasket=indexHasNoBasket(co);
-      const effMode=mode;
+      // The mode is remembered across tickers and across a cover that closes
+      // the position. With nothing left to cover, 'cover' drew no tab as
+      // selected and an empty body -- just after a full cover, or on any other
+      // stock opened next. Buy is the panel's own default.
+      const effMode=coverFallback(mode,short);
       html+='<div class="card"><div class="ot-toggle">'
         +'<button class="ot-btn '+(effMode==='buy'?'ot-buy':'')+'" onclick="UI.panelMode=&quot;buy&quot;;render()">Buy</button>'
         +'<button class="ot-btn '+(effMode==='sell'?'ot-sell':'')+'" onclick="UI.panelMode=&quot;sell&quot;;render()">Sell</button>'
         +'<button class="ot-btn '+(effMode==='short'?'ot-short':'')+'" onclick="UI.panelMode=&quot;short&quot;;render()">Short</button>'
-        +(short?'<button class="ot-btn '+(effMode==='cover'?'ot-cover':'')+'" onclick="UI.panelMode=&quot;cover&quot;;render()">Cover</button>':'')
+        +(short&&short.qty>0?'<button class="ot-btn '+(effMode==='cover'?'ot-cover':'')+'" onclick="UI.panelMode=&quot;cover&quot;;render()">Cover</button>':'')
         +'</div>';
       if(noBasket&&(effMode==='buy'||effMode==='short')){
         html+='<div class="ibox ibox-amber" style="font-size:12px">'+esc(emptyIndexMsg(co))
@@ -8591,6 +8694,10 @@ function closeCompanyPage(){
   UI.companyPage=null;destroyCharts();render();
   if(typeof history!=='undefined')history.replaceState({},'',location.pathname);
 }
+// Both trade panels: 'cover' only while there is a short to cover.
+function coverFallback(mode,short){
+  return mode==='cover'&&!(short&&Number(short.qty)>0)?'buy':mode;
+}
 function openPanel(ticker){
   // Trade actions call this after an async round-trip (placeBuy/placeSell/
   // placeShort/coverShort) -- by the time it resolves, the user may have
@@ -8613,7 +8720,7 @@ function openPanel(ticker){
   // Same rule as the company page: an index with no listed constituents is
   // closed for opening trades and open for closing ones.
   const noBasket=indexHasNoBasket(c);
-  const effMode=mode;
+  const effMode=coverFallback(mode,short);
   panel.innerHTML=`<div class="card" style="border-color:var(--blue)">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
       <div><span style="font-weight:500;font-size:15px">${esc(c.name)}</span> <span class="badge b-gray" style="font-family:var(--mono)">${esc(ticker)}</span>
@@ -8630,7 +8737,7 @@ function openPanel(ticker){
       <button class="ot-btn ${effMode==='buy'?'ot-buy':''}" onclick="UI.panelMode='buy';openPanel('${ticker}')">Buy</button>
       <button class="ot-btn ${effMode==='sell'?'ot-sell':''}" onclick="UI.panelMode='sell';openPanel('${ticker}')">Sell</button>
       <button class="ot-btn ${effMode==='short'?'ot-short':''}" onclick="UI.panelMode='short';openPanel('${ticker}')">Short</button>
-      ${short?`<button class="ot-btn ${effMode==='cover'?'ot-cover':''}" onclick="UI.panelMode='cover';openPanel('${ticker}')">Cover</button>`:''}
+      ${short&&short.qty>0?`<button class="ot-btn ${effMode==='cover'?'ot-cover':''}" onclick="UI.panelMode='cover';openPanel('${ticker}')">Cover</button>`:''}
     </div>
     ${noBasket&&(effMode==='buy'||effMode==='short')?`<div class="ibox ibox-amber" style="font-size:12px">${esc(emptyIndexMsg(c))}${held>0?' You can still sell the units you already hold.':''}</div>`
     :effMode==='buy'?`<p style="font-size:12px;color:var(--text2);margin-bottom:8px">${idxFund?`Buys mint new units at the live index price — there's no fixed supply to run out of.`:`Buy pushes price up. Available: <strong>${c.shares_avail}</strong> of ${c.shares.toLocaleString()}.`}</p>
@@ -8669,12 +8776,39 @@ function closePanel(){UI.panelTicker=null;destroyCharts();document.getElementByI
 // ═══════════════════════════════════════════════
 // RENDER: LEADERBOARD
 // ═══════════════════════════════════════════════
+// Whether the stored snapshot is the standings at the close we are in now.
+//
+// Only a Chairman clicking Close takes one (setSession). A timed session
+// running out, a scheduled close and the weekly schedule all close the market
+// server-side and take none, so the snapshot still on jex_session was from the
+// last MANUAL close -- possibly days old -- and the leaderboard showed it,
+// badged "Frozen at close", as tonight's result. Pausing did the same: a pause
+// is not a close, but status!=='open' was all it took, so the room watched
+// last week's standings for as long as the pause lasted.
+//
+// A snapshot counts only while the market is closed, and only if nothing has
+// traded since it was taken -- a trade after it means a later session ran and
+// closed without taking one. Two sessions in one day share a
+// session_started_at, so the trades are the test that holds either way. One
+// with no taken_at (stored before this field existed) cannot be placed, so it
+// is not trusted. Falling back to live standings is safe: with the market
+// closed nothing moves, so they are the closing standings anyway.
+function lbSnapshotIsCurrent(snap){
+  if(!Array.isArray(snap)||!snap.length)return false;
+  if(DB.session.status!=='closed')return false;
+  const taken=Number(snap[0]&&snap[0].taken_at);
+  if(!(taken>0))return false;
+  const raw=DB.session.session_started_at;
+  const started=raw?new Date(raw).getTime():NaN;
+  if(!isNaN(started)&&taken<started)return false;
+  return !(DB.trades||[]).some(t=>new Date(t.created_at||0).getTime()>taken);
+}
 function renderLeaderboard(){
   const lbSnap=DB.session.leaderboard_snapshot;
   // .length matters: [] is truthy, so a session closed with no approved
   // students stored an empty snapshot that froze the leaderboard BLANK until
   // some later close happened to overwrite it. Fall back to live standings.
-  const isFrozen=lbSnap&&lbSnap.length>0&&DB.session.status!=='open';
+  const isFrozen=lbSnapshotIsCurrent(lbSnap);
   let ranked=isFrozen?lbSnap:DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nwMark(u),_divs:divRec(u),name:u.name,id:u.id,classroom_id:u.classroom_id})).sort(byNwThenName('_nw'));
   ranked=ranked.filter(u=>!isHiddenTestEntity(u.id));
   // The frozen snapshot is a copy of the standings taken by setSession() at
@@ -9833,7 +9967,10 @@ function renderAdmin(){
   :UI.adminTab==='ipo'?renderAdminIPO(pIPO,rIPO)
   :UI.adminTab==='dilution'?renderAdminDilution(pDil,rDil)
   :UI.adminTab==='delisting'?renderAdminDelisting()
-  :UI.adminTab==='balances'?renderAdminBalances(students)
+  // Hidden test accounts out, as on the leaderboard: this table is ranked and
+  // exported for grading, and a test account in it pushed real students down
+  // a place here while the leaderboard showed them where they belong.
+  :UI.adminTab==='balances'?renderAdminBalances(students.filter(s=>!isHiddenTestEntity(s.id)))
   :UI.adminTab==='users'?renderAdminUsers(students,companies,DB.users.filter(u2=>['secretary','treasurer','compliance_officer'].includes(u2.role)&&u2.status==='approved'),DB.users.filter(u2=>['chairman','president'].includes(u2.role)&&u2.status==='approved'))
   :UI.adminTab==='dashboard'?renderAdminDashboard()
   :UI.adminTab==='flags'?renderAdminFlags()
