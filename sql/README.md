@@ -36,7 +36,7 @@ Send only these when asked for "the SQL". Remove a file from this list once
 its result has come back green. `preflight.sql` is read-only and is run before
 each class, so it is never on this list.
 
-- `bug_hunt_round_three.sql`
+Nothing right now.
 
 ## Order
 
