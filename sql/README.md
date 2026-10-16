@@ -77,6 +77,7 @@ They are listed in the order they were applied. Two of them care:
 | `contact_details_auth.sql` | `rpc_get_company_team_contacts` and `rpc_get_leadership_contacts` returned students' names and email addresses to unauthenticated callers. |
 | `activity_hash_coverage.sql` | The audit trail's hash chain covered what happened but not who it happened to — rewriting `user_name` on every row left every hash still verifying. |
 | `buyback_self_dealing.sql` | A founder could post one share at $4,999 and buy it back on the company's behalf — $4,999 out of the company and into the founder, the owner never involved. And a buyback filled asks above the price band and set the price to them: one share at $1,000 made a $30 stock $1,000. Buybacks now buy only from outsiders, inside the band. |
+| `bug_hunt_round_three.sql` | Five small ones. "Capital raised" summed only the newest 200 trades exchange-wide (new `rpc_capital_raised`). "vs Start" measured every student against the session setting even when approved with a different amount (new `jex_users.starting_cash`, filled by a trigger and backfilled from the registration log). Officers had no way to remove a company's news or vote (three new officer-only functions). `rpc_get_company_team_contacts`, `rpc_get_leadership_contacts` and `rpc_pay_dividend` get a fixed search_path. `rpc_cast_vote` reads a deadline by the same ISO rule as the sweep. |
 
 ### Not a migration
 

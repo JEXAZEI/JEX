@@ -59,7 +59,7 @@ check('sessionAutoTick decides open/close at apply time',
 check('the frozen leaderboard at the close ranks on nwMark',/const lbSnap2=lbStudents\.map\(s=>\(\{name:s\.name,nw:nwMark\(s\)/.test(src));
 check('the PDF report ranks on nwMark',/map\(u=>\(\{\.\.\.u,_nw:nwMark\(u\),_divs:divRec\(u\)\}\)\)/.test(src));
 check('the balances CSV export is marked',/portfolio:Math\.round\(pvMark\(u\)\*100\)\/100,net_worth:nwMark\(u\)/.test(src));
-check('Sheets gets the marked net worth',/nw:nwMark\(u\),vsStart:Math\.round\(\(nwMark\(u\)-startingCash\(\)\)/.test(src));
+check('Sheets gets the marked net worth',/nw:nwMark\(u\),vsStart:Math\.round\(\(nwMark\(u\)-startFor\(u\)\)/.test(src));
 check('the live leaderboard row shows the marked portfolio',/'Cash '\+fmt\(u\.cash\)\+' \| Portfolio '\+fmt\(pvMark\(u\)\)/.test(src));
 
 // ── the dividend preview charges what the payment charges ──
@@ -103,7 +103,7 @@ check('the buyback preview skips insiders and out-of-band asks, and caps by cash
 }
 check('no trade handler parses its quantity with parseInt',!/qty=parseInt\(qty\)/.test(src));
 check('officers are not shown news Delete the server refuses',!/const canDelete=isAdmin\(u\);/.test(src));
-check('vote Close/Delete only for the company\'s owner or founders',/\(isOwner\|\|isAdminUser\)&&\(c=>c&&canManageCompany\(c\)\)\(getCo\(v\.parent_ticker\)\)/.test(src));
+check('vote Close/Delete only for those the server lets do it',/\(c=>c&&canModerateCompany\(c\)\)\(getCo\(v\.parent_ticker\)\)/.test(src));
 check('co-founders are not shown a financials form the server refuses',/function renderFinancialsMgmtTab\(co,myFinancials\)\{[\s\S]{0,200}cu\(\)\?\.id!==co\.owner_id/.test(src));
 check('Back and Forward follow the company page',/addEventListener\('popstate'/.test(src));
 check('a typed dividend survives the shareholder fetch',/const typed=\['div-ps','div-note'\]/.test(src));
