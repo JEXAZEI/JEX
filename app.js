@@ -1580,7 +1580,11 @@ const sharesBar=co=>{
 const roleBadge=role=>role==='chairman'?'<span class="badge b-chair">Chairman</span>':role==='president'?'<span class="badge b-pres">President</span>':role==='secretary'?'<span class="badge b-sec">Secretary</span>':role==='treasurer'?'<span class="badge b-tre">Treasurer</span>':role==='compliance_officer'?'<span class="badge b-co">Compliance</span>':role==='student'?'<span class="badge b-blue">Student</span>':role==='company'?'<span class="badge b-amber">Company</span>':'';
 const avatarClass=role=>role==='chairman'?'av-ch':role==='president'?'av-pr':role==='secretary'?'av-sec':role==='treasurer'?'av-tre':role==='compliance_officer'?'av-co':role==='company'?'av-c':'av-s';
 
-function toast(msg){const t=get('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3200);}
+// Each message gets its full 3.2 seconds. The previous one's timer used to
+// keep running, so a toast that replaced another a moment before it expired
+// vanished almost as soon as it appeared -- often the one saying why.
+let _toastTimer=null;
+function toast(msg){const t=get('toast');t.textContent=msg;t.classList.add('show');clearTimeout(_toastTimer);_toastTimer=setTimeout(()=>t.classList.remove('show'),3200);}
 function destroyCharts(){Object.keys(charts).forEach(k=>destroyChart(k));charts={};}
 
 // ═══════════════════════════════════════════════
@@ -1878,7 +1882,10 @@ async function saveCBPct(){
 async function saveSnapshot(label){
   if(!isAdmin(cu()))return toast('Admin access required');
   if(!label||label.trim().length<2)return toast('Enter a snapshot name');
-  await doSaveSnapshot(label.trim());
+  // doSaveSnapshot has already said why when it returns null; the success
+  // toast used to follow regardless and cover that up, so a failed save read
+  // as a saved one -- the one thing a snapshot exists to be sure of.
+  if(!(await doSaveSnapshot(label.trim())))return;
   toast('✓ Snapshot saved: '+label.trim());render();
 }
 async function doSaveSnapshot(label){
@@ -3671,13 +3678,16 @@ async function postNews(ticker,headline,body){
   try{rec=await sb.rpc('rpc_post_news',{p_ticker:ticker,p_headline:headline.trim(),p_body:(body||'').trim()});}
   catch(e){return toast(rpcErrorMessage(e));}
   upsertById(DB.news,rec,true);
+  // The final toast replaces any earlier one, so a failed notification has to
+  // BE the final message -- "News posted" used to overwrite it at once.
+  let msg='News posted';
   if(document.getElementById('news-notify')?.checked){
     // The server tells holders, from the stored article: the author only,
     // within 10 minutes of posting, once (rpc_notify_news_holders).
     try{const n=await sb.rpc('rpc_notify_news_holders',{p_news_id:rec.id});if(n&&n.sent)afterServerEvent();}
-    catch(e){toast('News posted, but shareholders could not be notified — '+rpcErrorMessage(e));}
+    catch(e){msg='News posted, but shareholders could not be notified — '+rpcErrorMessage(e);}
   }
-  clearDraft('news-body');toast('News posted');UI.companyTab='news';render();
+  clearDraft('news-body');toast(msg);UI.companyTab='news';render();
 }
 async function deleteNews(id){
   const n0=DB.news.find(x=>x.id===id);if(!n0)return;

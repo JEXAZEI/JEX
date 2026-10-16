@@ -155,6 +155,38 @@ check('the Sheets balances leave hidden test accounts out',
     check('the biggest mover and biggest trade are not a hidden test company',!/TST/.test(body)&&/AZEI/.test(body),body);
   }
 
+  // ── a failed snapshot is not reported as saved ──
+  {
+    const saveSnapshot=load('saveSnapshot');
+    const toasts=[];global.toast=m=>toasts.push(m);global.render=()=>{};
+    global.isAdmin=()=>true;global.cu=()=>({id:'c'});
+    global.doSaveSnapshot=async()=>{toasts.push('permission denied');return null;};
+    await saveSnapshot('Before Friday');
+    check('a failed snapshot leaves its error on screen, not "Snapshot saved"',toasts.join('|')==='permission denied',toasts.join('|'));
+    global.doSaveSnapshot=async()=>'s1';toasts.length=0;
+    await saveSnapshot('Before Friday');
+    check('a saved snapshot still says so',toasts[0]==='✓ Snapshot saved: Before Friday',toasts.join('|'));
+  }
+
+  // ── a news notification failure is the message that stays ──
+  {
+    const postNews=load('postNews');
+    const toasts=[];global.toast=m=>toasts.push(m);global.render=()=>{};global.clearDraft=()=>{};
+    global.UI={};global.DB={news:[]};
+    global.getCo=()=>({ticker:'AZEI'});global.canManageCompany=()=>true;
+    global.upsertById=(l,r)=>l.unshift(r);global.rpcErrorMessage=e=>e.message;
+    global.document={getElementById:id=>id==='news-notify'?{checked:true}:null};
+    global.sb={rpc:async fn=>{if(fn==='rpc_post_news')return {id:'n1'};throw new Error('rate limited');}};
+    await postNews('AZEI','Big headline','body');
+    check('the last word is that holders were not notified',/could not be notified — rate limited/.test(toasts[toasts.length-1]),toasts.join('|'));
+  }
+
+  // ── each toast gets its full time on screen ──
+  {
+    const fnSrc=extractFn('toast');
+    check('a new toast cancels the previous one\'s hide timer',/clearTimeout\(_toastTimer\);_toastTimer=setTimeout/.test(fnSrc));
+  }
+
   console.log(fails?('\n'+fails+' FAILURES'):'\nAll passed');
   process.exit(fails?1:0);
 })();
