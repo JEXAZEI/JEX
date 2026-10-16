@@ -42,6 +42,7 @@ DB.ballots=[{vote_id:'v1',choice:'A',voting_power:60},{vote_id:'v1',choice:'B',v
 // ── Treasurer cash flow: newest first, and the company name escaped ──
 {
   global.cu=()=>({id:'t'});
+  global.capitalRaisedFor=()=>0; // covered in test_bug_hunt_oct16_r3.js
   DB.dividends=[
     {ts:'Oct 9, 2:00:00 PM',created_at:'2026-10-09T21:00:00Z',company_name:'<img src=x onerror=alert(1)>',total:10,per_share:1,payouts:null},
     {ts:'Oct 14, 9:00:00 AM',created_at:'2026-10-14T16:00:00Z',company_name:'Acme',total:20,per_share:2,payouts:[{}]},

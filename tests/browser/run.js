@@ -354,8 +354,18 @@ ${PRELUDE}
   });
   await step('admins see the ordinary pages too', ()=>{
     UI.userId='u-chair';
-    for(const t of ['market','portfolio','trades','exchange','leaderboard','settings','orders','notifications','funds','news']){
+    for(const t of ['market','trades','exchange','leaderboard','settings','notifications','funds','news']){
       UI.navTab=t; render(); if(!appText().trim()) throw new Error('blank '+t+' as chairman');
+    }
+    UI.navTab='market';
+  });
+  // Portfolio, Orders and My stock are built around an account with holdings
+  // or a company; an officer has neither, so reaching one by URL lands on Admin.
+  await step('an officer sent to a student or company page lands on Admin', ()=>{
+    UI.userId='u-chair';
+    for(const t of ['portfolio','orders','mystock']){
+      UI.navTab=t; render();
+      if(UI.navTab!=='admin') throw new Error(t+' rendered for the chairman');
     }
     UI.navTab='market';
   });

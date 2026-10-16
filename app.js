@@ -294,7 +294,7 @@ async function hashPw(pw){
 // ═══════════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════════
-let DB={users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],delistApps:[],trades:[],dividends:[],buybacks:[],
+let DB={startCash:{},capitalRaised:null,users:[],pending:[],companies:[],news:[],ipoApps:[],dilApps:[],delistApps:[],trades:[],dividends:[],buybacks:[],
   announcements:[],limitOrders:[],activity:[],shareClasses:[],classApps:[],votes:[],ballots:[],
   notifications:[],halts:[],priceAlerts:[],stopLossOrders:[],nwHistory:[],
   companyMembers:[],founderAllocations:[],classrooms:[],flags:[],minutes:[],divApprovals:[],bugReports:[],funds:[],indexHistory:[],snapshots:[],clientErrors:[],retentionCandidates:[],
@@ -623,7 +623,7 @@ async function loadAll(){
   const [pending,news,ipoApps,dilApps,delistApps,trades,dividends,buybacks,limitOrders,
     shareClasses,classApps,votes,ballots,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,classrooms,stopLossOrders,minutes,divApprovals,funds,indexHistory,snapshots]=await batchedAll([
+    priceAdjustments,classrooms,stopLossOrders,minutes,divApprovals,funds,indexHistory,snapshots,startCash]=await batchedAll([
     ()=>sb.get('jex_pending','order=created_at.asc&select='+JEX_PENDING_SAFE_SELECT),
     ()=>sb.get('jex_news','order=created_at.desc&limit=50'),
     ()=>sb.get('jex_ipo_applications','order=created_at.asc'),
@@ -684,12 +684,18 @@ async function loadAll(){
     // the state blob itself, server-side. Verified against renderSnapshotTab
     // and doRestoreSnapshot -- those four fields are the only ones used.
     ()=>sb.get('jex_snapshots','order=created_at.desc&limit=50&select=id,label,created_by,ts,created_at'),
+    // Fetched on its own, not added to JEX_USERS_SAFE_SELECT: before
+    // sql/starting_cash_per_account.sql runs the column does not exist, and
+    // asking for it there would fail the user list and the whole page with it.
+    ()=>sb.get('jex_users','select=id,starting_cash').then(
+      r=>Object.fromEntries((r||[]).filter(x=>x.starting_cash!=null).map(x=>[x.id,x.starting_cash])),
+      ()=>({})),
   ],6);
   Object.assign(DB,{pending,news,ipoApps,dilApps,delistApps,
     trades,dividends,buybacks,limitOrders,
     shareClasses,classApps,votes,ballots,
     priceAlerts,nwHistory,companyMembers,founderAllocations,
-    priceAdjustments,minutes,divApprovals,stopLossOrders,classrooms,funds,indexHistory,snapshots});
+    priceAdjustments,minutes,divApprovals,stopLossOrders,classrooms,funds,indexHistory,snapshots,startCash});
   console.log('JEX boot: loadAll phase 2 done, loadPrivateData starting');
   await loadPrivateData();
   console.log('JEX boot: loadPrivateData done');
@@ -1310,6 +1316,57 @@ const startingCash=()=>{
   const v=Number(DB.session&&DB.session.starting_cash);
   return v>0?v:10000;
 };
+// Each account's own baseline: the cash it was approved with. The approval
+// form lets an officer type a different amount per student, and "vs Start"
+// measured all of them against the session setting regardless. Recorded by
+// sql/starting_cash_per_account.sql and read into DB.startCash; an account
+// with nothing recorded (or before that SQL runs) falls back to the setting.
+const startFor=u=>{
+  const raw=u&&DB.startCash?DB.startCash[u.id]:null;
+  const v=raw==null?NaN:Number(raw);
+  return Number.isFinite(v)&&v>=0?v:startingCash();
+};
+// Capital raised: every share the exchange pool has sold, for all time.
+// DB.trades is only the latest 200 prints, so summing it undercounted any
+// company with more history than that, by whatever had scrolled off.
+// rpc_capital_raised (sql/capital_raised.sql) sums the whole table and says
+// which trade id it counted up to; prints that arrived since are added from
+// DB.trades. Without that function it falls back to the visible window.
+// tickers: the ones to count, or null for every non-index company.
+let _capRaisedAt=0;
+function refreshCapitalRaised(){
+  if(Date.now()-_capRaisedAt<60000)return;
+  _capRaisedAt=Date.now();
+  safeRpc('rpc_capital_raised').then(r=>{
+    if(r&&r.by_ticker&&typeof r.by_ticker==='object'){DB.capitalRaised=r;render();}
+  });
+}
+function capitalRaisedFor(tickers){
+  refreshCapitalRaised();
+  const counts=tk=>tickers?tickers.includes(tk):!getCo(tk)?.is_index_fund;
+  const value=t=>Math.round(t.price*t.qty*100)/100;
+  const cr=DB.capitalRaised;
+  const sold=DB.trades.filter(t=>t.seller_id==='exchange'&&counts(t.ticker));
+  if(!cr||!cr.by_ticker)return Math.round(sold.reduce((s,t)=>s+value(t),0)*100)/100;
+  // max_id is null on an empty table (nothing counted yet, so every print
+  // here is new). A non-numeric one cannot be compared, and adding prints
+  // then would count them twice, so it takes the server's figure alone.
+  const upTo=cr.max_id==null?0:Number(cr.max_id);
+  let total=0;
+  for(const [tk,v] of Object.entries(cr.by_ticker))if(counts(tk))total+=Number(v)||0;
+  if(Number.isFinite(upTo))sold.forEach(t=>{if(Number(t.id)>upTo)total+=value(t);});
+  return Math.round(total*100)/100;
+}
+// Competition ranking over a list already sorted best-first: equal values to
+// the cent share a place (1, 2, 2, 4). Ties used to be ranked by array order,
+// so two students level on net worth got different places -- and could swap
+// between page loads.
+function tieRanks(vals){
+  const c=vals.map(v=>Math.round((Number(v)||0)*100));
+  return c.map((v,i)=>{let j=i;while(j>0&&c[j-1]===v)j--;return j+1;});
+}
+// Ties broken by name, so every screen lists level students in one order.
+const byNwThenName=(key)=>(a,b)=>(b[key]-a[key])||String(a.name||'').localeCompare(String(b.name||''));
 const isAdmin=u=>(['chairman','president','secretary','treasurer','compliance_officer'].includes(u?.role));
 const isChairman=u=>u?.role==='chairman'||u?.role==='president';
 const isPresident=u=>u?.role==='president';
@@ -2107,8 +2164,10 @@ async function pushBalances(){
     cash:Math.round(u.cash*100)/100,
     portfolio:Math.round(pvMark(u)*100)/100,
     divs:Math.round(divRec(u)*100)/100,
-    nw:nwMark(u),vsStart:Math.round((nwMark(u)-startingCash())*100)/100
-  })).sort((a,b)=>b.nw-a.nw).map((r,i)=>({...r,rank:i+1}));
+    nw:nwMark(u),vsStart:Math.round((nwMark(u)-startFor(u))*100)/100
+  })).sort(byNwThenName('nw'));
+  const sheetRanks=tieRanks(rows.map(r=>r.nw));
+  rows.forEach((r,i)=>{r.rank=sheetRanks[i];});
   await pushToSheets('balances',{rows});
   // Listed companies -- was never actually pushed, so a "Companies" tab a
   // classroom set up in their own Apps Script only ever showed whatever
@@ -3142,6 +3201,7 @@ async function approveReg(id,startCash){
       +' They are still waiting, so try again.');
   }
   DB.users.push(u);DB.pending=DB.pending.filter(x=>x.id!==id);
+  (DB.startCash||(DB.startCash={}))[u.id]=startCash;
   afterServerEvent();
 
   toast(r.name+' approved with '+fmt(startCash));render();
@@ -3545,12 +3605,12 @@ async function postNews(ticker,headline,body){
 async function deleteNews(id){
   const n0=DB.news.find(x=>x.id===id);if(!n0)return;
   const targetCo=getCo(n0.ticker);
-  if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can delete its news');
+  if(!targetCo||!canModerateCompany(targetCo))return toast('Only this company\'s owner or founders, or an officer, can delete its news');
   if(!confirm('Delete this news post?'))return;
   // Runs server-side (rpc_delete_news), re-checking the same owner-or-
   // founder rule above -- canManageCompany() was client-side only, so a
   // raw DELETE on jex_news could remove any company's news post.
-  try{await sb.rpc('rpc_delete_news',{p_news_id:id});}
+  try{await sb.rpc(moderationRpc(targetCo,'rpc_delete_news','rpc_admin_delete_news'),{p_news_id:id});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.news=DB.news.filter(n=>n.id!==id);
   toast('News deleted');render();
@@ -3800,6 +3860,13 @@ function canManageCompany(co){
   if(co.owner_id===u.id)return true; // original owner (company account)
   return isFounder(co.ticker,u.id);  // or a founder student
 }
+// Removing a company's news post or closing/deleting its vote: the company's
+// own people, or an officer moderating. Officers go through the rpc_admin_*
+// versions (sql/officer_moderation.sql); the company's own calls are unchanged.
+function canModerateCompany(co){
+  return !!co&&(canManageCompany(co)||isAdmin(cu()));
+}
+const moderationRpc=(co,own,admin)=>canManageCompany(co)?own:admin;
 
 // addFounderAtRegistration removed — founders use jex_company_members
 
@@ -6567,7 +6634,11 @@ function shortPrev(co,qty){
   // being told no.
   const canBorrow=borrowable(co);
   const over=canBorrow!=null&&qty>canBorrow;
-  return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:rgba(83,74,183,0.1);border-radius:var(--radius);color:#AFA9EC">Short ${qty} @ ${fmt(co.price)} | Collateral: <strong>${fmt(c)}</strong>`
+  // The sale itself moves the price like any other sell, so the fill is the
+  // impacted one, not the quote; it said "@ quote" and then filled lower.
+  // Collateral stays on the quote, which is what placeShort checks.
+  const fill=co.is_index_fund?co.price:impactPrice(co,qty,'short');
+  return `<div style="font-size:12px;margin-top:6px;padding:6px 10px;background:rgba(83,74,183,0.1);border-radius:var(--radius);color:#AFA9EC">Short ${qty} @ ~${fmt(fill)} | Collateral: <strong>${fmt(c)}</strong>`
     +(canBorrow==null?'':`<div style="margin-top:3px;color:${over?'var(--red)':'#AFA9EC'}">${over?'Only ':''}${canBorrow} available to borrow${over?' — this order would be refused':''}</div>`)
     +'</div>';
 }
@@ -7082,7 +7153,10 @@ const VOTE_WINDOW_MS=24*60*60*1000;
 // Falling back to created_at means every vote has an end without rewriting a
 // single row, and the browser and the database agree on when it is.
 function voteDeadline(v){
-  const t=v.closes_at?new Date(v.closes_at).getTime():NaN;
+  // Only an ISO timestamp counts as a deadline, as on the server. new Date()
+  // also "parses" free text like "October 20" (as the year 2001), so a legacy
+  // row could read as long closed here while the server still took ballots.
+  const t=/^\d{4}-\d{2}-\d{2}T/.test(String(v.closes_at||''))?new Date(v.closes_at).getTime():NaN;
   if(!isNaN(t))return t;
   const c=v.created_at?new Date(v.created_at).getTime():NaN;
   // Nothing usable to date it from at all: treat as open rather than
@@ -7139,11 +7213,11 @@ async function castVote(voteId,choice){
 async function closeVote(voteId){
   const targetV=DB.votes.find(x=>x.id===voteId);if(!targetV)return;
   const targetCo=getCo(targetV.parent_ticker);
-  if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can close its vote');
+  if(!targetCo||!canModerateCompany(targetCo))return toast('Only this company\'s owner or founders, or an officer, can close its vote');
   if(!confirm('Close this vote?'))return;
   // Runs server-side (rpc_close_vote), re-checking the same owner-or-
   // founder rule above -- it was client-side only.
-  try{await sb.rpc('rpc_close_vote',{p_vote_id:voteId});}
+  try{await sb.rpc(moderationRpc(targetCo,'rpc_close_vote','rpc_admin_close_vote'),{p_vote_id:voteId});}
   catch(e){return toast(rpcErrorMessage(e));}
   const v=DB.votes.find(x=>x.id===voteId);if(v){
     v.status='closed';
@@ -7161,12 +7235,12 @@ function postVoteForm(parentTicker){
 async function deleteVote(voteId){
   const targetV=DB.votes.find(x=>x.id===voteId);if(!targetV)return;
   const targetCo=getCo(targetV.parent_ticker);
-  if(!targetCo||!canManageCompany(targetCo))return toast('Only this company\'s owner or founders can delete its vote');
+  if(!targetCo||!canModerateCompany(targetCo))return toast('Only this company\'s owner or founders, or an officer, can delete its vote');
   if(!confirm('Delete this vote and all ballots?'))return;
   // Runs server-side (rpc_delete_vote), re-checking the same owner-or-
   // founder rule above -- canManageCompany() was client-side only, so a
   // raw DELETE on jex_votes could remove any company's vote.
-  try{await sb.rpc('rpc_delete_vote',{p_vote_id:voteId});}
+  try{await sb.rpc(moderationRpc(targetCo,'rpc_delete_vote','rpc_admin_delete_vote'),{p_vote_id:voteId});}
   catch(e){return toast(rpcErrorMessage(e));}
   DB.votes=DB.votes.filter(x=>x.id!==voteId);
   DB.ballots=DB.ballots.filter(b=>b.vote_id!==voteId);
@@ -7215,8 +7289,10 @@ function renderVoteCard(v,isOwner,isAdminUser){
     // Admin/owner controls
     // Only for someone rpc_close_vote/rpc_delete_vote will accept -- the
     // company's owner or a founder. Officers were shown both and always refused.
-    +((isOwner||isAdminUser)&&(c=>c&&canManageCompany(c))(getCo(v.parent_ticker))?'<div style="display:flex;gap:6px;margin-top:8px">'
-      +(v.status==='open'?'<button class="btn btn-sm btn-warning" onclick="closeVote(&quot;'+v.id+'&quot;)">Close vote</button>':'')
+    +((c=>c&&canModerateCompany(c))(getCo(v.parent_ticker))?'<div style="display:flex;gap:6px;margin-top:8px">'
+      // isVoteOpen, not the status column: a vote past its deadline is already
+      // closed to ballots, and offering "Close vote" on it read as if it was not.
+      +(openNow?'<button class="btn btn-sm btn-warning" onclick="closeVote(&quot;'+v.id+'&quot;)">Close vote</button>':'')
       +'<button class="btn btn-sm btn-danger" onclick="deleteVote(&quot;'+v.id+'&quot;)">Delete</button></div>':'')
     +'</div>';
 }
@@ -7728,13 +7804,18 @@ function renderBanner(){
   }
   return _devBanner+_pracBanner+annHtml+'<div class="session-banner '+cls+'"><span>'+s.label+timer+'</span>'+sessionBtns+'</div>';
 }
-function renderNav(){
-  const u=cu();
+// The tabs each role's nav offers.
+function navTabsFor(u){
   let tabs;
   if(isChairman(u))tabs=[['admin','Admin'],['market','Market'],['funds','Funds'],['leaderboard','Leaderboard'],['trades','All trades'],['settings','Settings']];
   else if(isAdmin(u))tabs=[['admin','Admin'],['market','Market'],['funds','Funds'],['settings','Settings']];
   else if(u.role==='company')tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['funds','Funds'],['news','News'],['mystock','My stock'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
   else tabs=[['market','Market'],['exchange','Exchange'],['portfolio','Portfolio'],['funds','Funds'],['leaderboard','Leaderboard'],['orders','Orders'+(()=>{if(!UI.userId)return'';const u=DB.users.find(x=>x.id===UI.userId);if(!u)return'';const open=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='open').length;const ah=(DB.limitOrders||[]).filter(o=>o.user_id===u.id&&o.status==='after_hours').length;const sl=(DB.stopLossOrders||[]).filter(s=>s.user_id===u.id&&s.status==='active').length;const tot=open+ah+sl;return tot?' <span class="badge b-amber" style="font-size:10px">'+tot+'</span>':''})()],['trades','Trades'],['notifications','🔔'+(myUnreadCount()?` <span class="badge b-red" style="font-size:10px">${myUnreadCount()}</span>`:'')],['settings','Settings']];
+  return tabs;
+}
+function renderNav(){
+  const u=cu();
+  const tabs=navTabsFor(u);
   return `<div class="nav">${tabs.map(([k,v])=>PAGE_ROUTES.has(k)
     ?`<a class="nav-btn ${UI.navTab===k?'active':''}" href="${pageHref(k)}">${v}</a>`
     :`<button class="nav-btn ${UI.navTab===k?'active':''}" onclick="setTab('${k}')">${v}</button>`).join('')}</div>`;
@@ -7746,9 +7827,9 @@ function renderNav(){
 function renderNewsFeed(){
   const u=cu();
   const items=DB.news.filter(n=>!isHiddenTestEntity(getCo(n.ticker)?.owner_id));
-  // rpc_delete_news allows the company's owner and founders only, officers
-  // included in neither: a Delete shown to an officer always failed.
-  const canDelete=n=>{const co=getCo(n.ticker);return !!co&&canManageCompany(co);};
+  // The company's owner and founders (rpc_delete_news), or an officer
+  // moderating (rpc_admin_delete_news).
+  const canDelete=n=>{const co=getCo(n.ticker);return !!co&&canModerateCompany(co);};
   if(!items.length)return`<div class="card"><div class="empty">No company news yet. Companies can post updates from their News tab.</div></div>`;
   return items.map(n=>`<div class="news-item">
     <div class="news-headline">${esc(n.headline)}</div>
@@ -7862,7 +7943,7 @@ function renderCompanyPage(parentTicker){
     // Key stats
     const totalMktCap=allTickers.reduce((s,t)=>{const c=getCo(t);return s+(c?c.price*c.shares:0);},0);
     // Capital raised = total value of all shares sold from exchange pool
-    const capitalRaised=DB.trades.filter(t=>allTickers.includes(t.ticker)&&t.seller_id==='exchange').reduce((s,t)=>s+Math.round(t.price*t.qty*100)/100,0);
+    const capitalRaised=capitalRaisedFor(allTickers);
     const owner=getUser(co.owner_id);
     // Short interest
     const totalShorted=DB.users.filter(u2=>u2.role==='student').reduce((s,u2)=>{
@@ -8324,7 +8405,7 @@ function renderMarket(){
     ${visibleVotes.length?`<div class="card"><div class="section-title">Active shareholder votes</div>`
       +visibleVotes.map(v=>renderVoteCard(v,false,isAdmin(u))).join('')
       +'</div>':''}
-    ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${visibleNews.length} post${visibleNews.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${esc(n.headline)}</div>${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${esc(n.company_name)}</span><span>${n.ts||''}</span></div>${isAdmin(u)?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${visibleNews.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${visibleNews.length} posts</div>`:''}</div>`:''}
+    ${recentNews.length?`<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">Company news <span style="font-size:12px;font-weight:400;color:var(--text2)">${visibleNews.length} post${visibleNews.length!==1?'s':''}</span></div>${recentNews.map(n=>`<div class="news-item"><div class="news-headline">${esc(n.headline)}</div>${n.body?`<div class="news-body">${esc(n.body||"")}</div>`:''}<div class="news-meta" style="justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span class="news-ticker">${n.ticker}</span><span>${esc(n.company_name)}</span><span>${n.ts||''}</span></div>${canModerateCompany(getCo(n.ticker)||{})?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}</div></div>`).join('')}${visibleNews.length>5?`<div style="font-size:12px;color:var(--text2);text-align:center;padding:8px">Showing 5 of ${visibleNews.length} posts</div>`:''}</div>`:''}
     <div id="trade-panel"></div>`;
 }
 // A market-row sparkline, as inline SVG.
@@ -8594,7 +8675,7 @@ function renderLeaderboard(){
   // students stored an empty snapshot that froze the leaderboard BLANK until
   // some later close happened to overwrite it. Fall back to live standings.
   const isFrozen=lbSnap&&lbSnap.length>0&&DB.session.status!=='open';
-  let ranked=isFrozen?lbSnap:DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nwMark(u),_divs:divRec(u),name:u.name,id:u.id,classroom_id:u.classroom_id})).sort((a,b)=>b._nw-a._nw);
+  let ranked=isFrozen?lbSnap:DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nwMark(u),_divs:divRec(u),name:u.name,id:u.id,classroom_id:u.classroom_id})).sort(byNwThenName('_nw'));
   ranked=ranked.filter(u=>!isHiddenTestEntity(u.id));
   // The frozen snapshot is a copy of the standings taken by setSession() at
   // session close and stored on jex_session. Removing a student updates
@@ -8608,13 +8689,14 @@ function renderLeaderboard(){
     return live&&live.role==='student'&&live.status==='approved';
   });
   if(UI.lbClassroom)ranked=ranked.filter(u=>u.classroom_id===UI.lbClassroom);
+  const lbRanks=tieRanks(ranked.map(u=>u.nw||u._nw||0));
   const rc=i=>i===0?'r-gold':i===1?'r-silver':i===2?'r-bronze':'';
   const frozenBadge=isFrozen?'<span class="badge b-amber" style="font-size:11px;font-weight:400">📸 Frozen at close</span>':'';
   const classroomPicker=DB.classrooms.length?`<select id="lb-classroom" style="width:auto;font-size:12px;padding:5px 8px" onchange="UI.lbClassroom=this.value||null;render()">
       <option value="">All classrooms</option>
       ${DB.classrooms.map(c=>`<option value="${c.id}" ${UI.lbClassroom===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
     </select>`:'';
-  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard<span class="info-bubble" tabindex="0">?<span class="info-tip">Each holding is valued at that stock&#39;s volume-weighted average price for the session, not its last trade. The last trade is one order and easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Your Portfolio page shows the live value at the current price, so the two can differ during a session — that difference is the same one between a fund&#39;s live marks and its official NAV.</span></span></span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(i)}">#${i+1}</div><div><div class="lb-name">${esc(u.name)}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${esc(getClassroomName(u.classroom_id))}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pvMark(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=startingCash()?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
+  return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Net worth leaderboard<span class="info-bubble" tabindex="0">?<span class="info-tip">Each holding is valued at that stock&#39;s volume-weighted average price for the session, not its last trade. The last trade is one order and easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Your Portfolio page shows the live value at the current price, so the two can differ during a session — that difference is the same one between a fund&#39;s live marks and its official NAV.</span></span></span><div style="display:flex;align-items:center;gap:8px">${frozenBadge}${classroomPicker}</div></div>${ranked.length?ranked.map((u,i)=>`<div class="lb-row"><div class="lb-rank ${rc(lbRanks[i]-1)}">#${lbRanks[i]}</div><div><div class="lb-name">${esc(u.name)}${!UI.lbClassroom&&getClassroomName(u.classroom_id)?` <span class="badge b-gray" style="font-size:9px">${esc(getClassroomName(u.classroom_id))}</span>`:''}</div><div style="font-size:12px;color:var(--text2)">${isFrozen?'NW: '+fmt(u.nw||u._nw||0):'Cash '+fmt(u.cash)+' | Portfolio '+fmt(pvMark(u))+' | Dividends '+fmt(u._divs||0)}</div></div><div class="lb-val ${(u.nw||u._nw||0)>=startFor(u)?'price-up':'price-down'}">${fmt(u.nw||u._nw||0)}</div></div>`).join(''):`<div class="empty">${UI.lbClassroom?'No students in this classroom':'No students yet'}</div>`}</div>${renderFundLeaderboard()}`;
 }
 function renderFundLeaderboard(){
   const ranked=(DB.funds||[]).filter(f=>!isHiddenTestEntity(f.manager_id)).map(f=>{
@@ -8873,7 +8955,7 @@ function renderPortfolio(){
         <div class="mcard"><div class="mlabel">Dividends</div><div class="mval green" style="font-size:16px;font-family:var(--mono)">+${fmt(_pnl.dividend)}</div></div>
         <div class="mcard"><div class="mlabel">Short P&L</div><div class="mval ${_pnl.short>=0?'green':'red'}" style="font-size:16px;font-family:var(--mono)">${_pnl.short>=0?'+':''}${fmt(_pnl.short)}</div></div>
       </div></div>`:''}` : '';
-    const _starting=DB.session.starting_cash||10000;
+    const _starting=startFor(u);
     const _gain=_nw-_starting;
     const _gainPct=Math.round(_gain/_starting*1000)/10;
     return tabs+`<div style="padding:12px 0 14px">
@@ -8881,7 +8963,7 @@ function renderPortfolio(){
       <div style="font-size:14px;color:${_gain>=0?'var(--green)':'var(--red)'};margin-top:2px">${_gain>=0?'+':''}${fmt(_gain)} (${_gain>=0?'+':''}${_gainPct}%) since start</div>
     </div>
     <div class="grid4"><div class="mcard"><div class="mlabel">Cash</div><div class="mval" style="font-family:var(--mono)">${fmt(u.cash)}</div></div><div class="mcard"><div class="mlabel">Portfolio</div><div class="mval" style="font-family:var(--mono)">${fmt(_pv)}</div></div><div class="mcard"><div class="mlabel">Short P&L</div><div class="mval ${_spnl>=0?'green':'red'}" style="font-family:var(--mono)">${fmt(_spnl)}</div></div><div class="mcard"><div class="mlabel">Dividends</div><div class="mval green" style="font-family:var(--mono)">${fmt(_divs)}</div></div></div>${analyticsRow}
-    <div class="card"><div class="section-title">Holdings</div><table><thead><tr><th>Ticker</th><th>Company</th><th>Shares</th><th>Price</th><th>Value</th><th>P&L</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    <div class="card"><div class="section-title">Holdings</div><table><thead><tr><th>Ticker</th><th>Company</th><th>Shares</th><th>Price</th><th>Value</th><th title="The stock's change since today's open, not your gain on it">Today</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   if(UI.portfolioTab==='shorts'){
@@ -10237,14 +10319,15 @@ function renderAdminBalances(students){
   // artifact, so they use the session VWAP -- see markPrice(). A student who
   // walks a thin stock up in the last minute of a session moves the last print
   // and barely moves this.
-  const rows=students.map(u=>({name:u.name,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pvMark(u)*100)/100,divs:Math.round(divRec(u)*100)/100,nw:nwMark(u)})).sort((a,b)=>b.nw-a.nw);
+  const rows=students.map(u=>({name:u.name,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pvMark(u)*100)/100,divs:Math.round(divRec(u)*100)/100,nw:nwMark(u),start:startFor(u)})).sort(byNwThenName('nw'));
+  const balRanks=tieRanks(rows.map(r=>r.nw));
   const csvEscape=v=>{if(v==null)return'';const s=String(v).replace(/\n/g,' ');return s.includes(',')||s.includes('"')?'"'+s.replace(/"/g,'""')+'"':s;};
-  const csv=[['Rank','Name','Cash','Portfolio (VWAP)','Dividends','Net worth (VWAP)','vs Start ('+fmt(startingCash())+')'],...rows.map((r,i)=>[i+1,r.name,r.cash.toFixed(2),r.portfolio.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),(r.nw-startingCash()).toFixed(2)])].map(r=>r.map(csvEscape).join(',')).join('\n');
+  const csv=[['Rank','Name','Cash','Portfolio (VWAP)','Dividends','Net worth (VWAP)','Starting cash','vs Start'],...rows.map((r,i)=>[balRanks[i],r.name,r.cash.toFixed(2),r.portfolio.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),r.start.toFixed(2),(r.nw-r.start).toFixed(2)])].map(r=>r.map(csvEscape).join(',')).join('\n');
   window._jexCSV=csv;
   return`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><span style="font-size:12px;color:var(--text2)">Live student balances</span><div style="display:flex;gap:8px"><button class="btn btn-sm" style="background:var(--purple);color:white;border-color:var(--purple)" onclick="generatePDFReport()">📄 Full PDF report</button><button class="btn btn-sm btn-success" onclick="downloadCSV()">Download CSV</button><button class="btn btn-sm btn-primary" onclick="const p=get('csv-panel');p.style.display=p.style.display==='none'?'block':'none'">Show CSV to copy</button></div></div>
-  <div class="grid4" style="margin-bottom:14px"><div class="mcard"><div class="mlabel">Students</div><div class="mval">${rows.length}</div></div><div class="mcard"><div class="mlabel">Avg net worth</div><div class="mval ${rows.length&&rows.reduce((s,r)=>s+r.nw,0)/rows.length>=startingCash()?'green':''}" style="font-family:var(--mono)">${rows.length?fmt(rows.reduce((s,r)=>s+r.nw,0)/rows.length):'—'}</div></div><div class="mcard"><div class="mlabel">Leader</div><div class="mval" style="font-size:15px;margin-top:4px">${esc(rows[0]?.name||'—')}</div></div><div class="mcard"><div class="mlabel">Total dividends paid</div><div class="mval green" style="font-family:var(--mono)">${fmt(rows.reduce((s,r)=>s+r.divs,0))}</div></div></div>
+  <div class="grid4" style="margin-bottom:14px"><div class="mcard"><div class="mlabel">Students</div><div class="mval">${rows.length}</div></div><div class="mcard"><div class="mlabel">Avg net worth</div><div class="mval ${rows.length&&rows.reduce((s,r)=>s+r.nw-r.start,0)>=0?'green':''}" style="font-family:var(--mono)">${rows.length?fmt(rows.reduce((s,r)=>s+r.nw,0)/rows.length):'—'}</div></div><div class="mcard"><div class="mlabel">Leader</div><div class="mval" style="font-size:15px;margin-top:4px">${esc(rows[0]?.name||'—')}</div></div><div class="mcard"><div class="mlabel">Total dividends paid</div><div class="mval green" style="font-family:var(--mono)">${fmt(rows.reduce((s,r)=>s+r.divs,0))}</div></div></div>
   <div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th style="padding-left:14px">Rank</th><th>Student</th><th class="r">Cash</th><th class="r">Portfolio</th><th class="r">Dividends</th><th class="r">Net worth <span class="info-bubble" tabindex="0">?<span class="info-tip">Marked at each stock&#39;s volume-weighted average price for the session, not its last trade. A single trade sets the last price and is easy to choose; to move a VWAP you have to be most of the day&#39;s volume. Real funds strike their official NAV the same way, and for the same reason.</span></span></th><th class="r">vs Start</th></tr></thead>
-  <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-startingCash(),vc=vs>=0?'price-up':'price-down';return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${i===0?'var(--amber)':i===1?'var(--text2)':i===2?'#993C1D':'var(--text3)'}">#${i+1}</td><td style="font-weight:500">${esc(r.name)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="7"><div class="empty">No approved students yet</div></td></tr>`}
+  <tbody>${rows.length?rows.map((r,i)=>{const vs=r.nw-r.start,vc=vs>=0?'price-up':'price-down',rk=balRanks[i];return`<tr><td style="padding-left:14px;font-family:var(--mono);font-weight:500;color:${rk===1?'var(--amber)':rk===2?'var(--text2)':rk===3?'#993C1D':'var(--text3)'}">#${rk}</td><td style="font-weight:500">${esc(r.name)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.cash)}</td><td class="r" style="font-family:var(--mono)">${fmt(r.portfolio)}</td><td class="r" style="color:var(--green);font-family:var(--mono)">${fmt(r.divs)}</td><td class="r" style="font-weight:500;font-family:var(--mono)">${fmt(r.nw)}</td><td class="r ${vc}" style="font-family:var(--mono)">${vs>=0?'+':''}${fmt(vs)}</td></tr>`;}).join(''):`<tr><td colspan="7"><div class="empty">No approved students yet</div></td></tr>`}
   </tbody></table></div>
   <div id="csv-panel" style="display:none;margin-top:12px"><div class="ibox ibox-teal">Click inside the box, press <strong>Ctrl+A</strong> (Cmd+A) to select all, then <strong>Ctrl+C</strong> to copy.</div><textarea readonly onclick="this.select()" style="width:100%;font-family:var(--mono);font-size:12px;padding:10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);resize:vertical;min-height:160px;line-height:1.5">${esc(csv)}</textarea></div>`;
 }
@@ -10733,7 +10816,7 @@ function renderAdminNews(){
           <span>${esc(n.company_name)}</span>
           <span>${n.ts||''}</span>
         </div>
-        ${(c=>c&&canManageCompany(c))(getCo(n.ticker))?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}
+        ${(c=>c&&canModerateCompany(c))(getCo(n.ticker))?`<button class="btn btn-sm btn-danger" onclick="deleteNews('${n.id}')">Delete</button>`:''}
       </div>
     </div>`).join('')}
   </div>`;
@@ -10890,7 +10973,8 @@ function renderExchangeStats(){
   const losers=[...movers].sort((a,b)=>a.chg-b.chg).filter(m=>m.chg<0);
   const mostActive=[...listed].map(c=>({ticker:c.ticker,name:c.name,trades:todayTrades.filter(t=>t.ticker===c.ticker).length})).sort((a,b)=>b.trades-a.trades);
   const bigTrade=todayTrades.length?todayTrades.reduce((a,b)=>b.price*b.qty>a.price*a.qty?b:a):null;
-  const ranked=students.map(u=>({name:u.name,nw:nwMark(u)})).sort((a,b)=>b.nw-a.nw);
+  const ranked=students.map(u=>({name:u.name,nw:nwMark(u)})).sort(byNwThenName('nw'));
+  const snapRanks=tieRanks(ranked.map(r=>r.nw));
   // Session recaps from minutes
   const recaps=(DB.minutes||[]).filter(m=>m.type==='official_notice'&&m.title.startsWith('Session recap'));
   return`<div class="grid4" style="margin-bottom:14px">
@@ -10922,7 +11006,7 @@ function renderExchangeStats(){
   <div class="grid2" style="margin-bottom:14px">
     <div class="card" style="margin-bottom:0"><div class="section-title">🏆 Leaderboard snapshot</div>
       ${ranked.slice(0,5).map((r,i)=>`<div class="lb-row" style="padding:8px 12px">
-        <div class="lb-rank ${i===0?'r-gold':i===1?'r-silver':i===2?'r-bronze':''}">#${i+1}</div>
+        <div class="lb-rank ${snapRanks[i]===1?'r-gold':snapRanks[i]===2?'r-silver':snapRanks[i]===3?'r-bronze':''}">#${snapRanks[i]}</div>
         <div class="lb-name" style="font-size:13px">${esc(r.name)}</div>
         <div class="lb-val" style="font-size:13px">${fmt(r.nw)}</div>
       </div>`).join('')||'<div class="empty" style="padding:12px">No students yet</div>'}
@@ -10980,7 +11064,7 @@ function exportStudentPDF(){
   <div class="grid" style="grid-template-columns:repeat(3,1fr)">
     <div class="card"><div class="label">Dividends received</div><div class="val mono green">${fmt(_divs)}</div></div>
     <div class="card"><div class="label">Total trades</div><div class="val">${myTrades.length}</div></div>
-    <div class="card"><div class="label">vs Starting cash</div><div class="val mono ${_nw-startingCash()>=0?'green':'red'}">${_nw-startingCash()>=0?'+':''}${fmt(_nw-startingCash())}</div></div>
+    <div class="card"><div class="label">vs Starting cash</div><div class="val mono ${_nw-startFor(u)>=0?'green':'red'}">${_nw-startFor(u)>=0?'+':''}${fmt(_nw-startFor(u))}</div></div>
   </div>
   <h2>Holdings</h2>
   ${myHoldings.length?`<table><thead><tr><th>Ticker</th><th>Shares</th><th>Current price</th><th>Value</th></tr></thead><tbody>
@@ -11224,7 +11308,7 @@ function renderTreasurerCashFlow(){
   // JXI buys are also 'exchange'-countered trades (minted, not sold by a
   // company) -- excluded here since this is specifically IPO/dilution
   // capital raised BY companies, not units minted for the index fund.
-  const totalCapitalRaised=DB.trades.filter(t=>t.seller_id==='exchange'&&!getCo(t.ticker)?.is_index_fund).reduce((s,t)=>s+(t.price*t.qty),0);
+  const totalCapitalRaised=capitalRaisedFor(null);
   const totalDividendsPaid=DB.dividends.reduce((s,d)=>s+d.total,0);
   const totalBuybacks=DB.buybacks.reduce((s,b)=>s+b.total,0);
   const uniqueOwnerIds=[...new Set(DB.companies.filter(c=>c.status==='listed'&&!c.is_index_fund).map(c=>c.owner_id))];
@@ -11419,7 +11503,8 @@ function renderAdminAnnouncements(){
 // RENDER: PDF REPORT
 // ═══════════════════════════════════════════════
 function generatePDFReport(){
-  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nwMark(u),_divs:divRec(u)})).sort((a,b)=>b._nw-a._nw);
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nwMark(u),_divs:divRec(u)})).sort(byNwThenName('_nw'));
+  const pdfRanks=tieRanks(students.map(u=>u._nw));
   const totalTrades=DB.trades.length;
   // The newest 200 FIRST, then put in time order for the page. Reversing
   // before slicing took the OLDEST 200 -- an instructor exporting this
@@ -11458,7 +11543,7 @@ function generatePDFReport(){
   </div>
   <h2>Leaderboard</h2>
   <table><thead><tr><th>Rank</th><th>Student</th><th>Cash</th><th>Portfolio</th><th>Dividends</th><th>Net worth</th><th>vs Start</th></tr></thead><tbody>
-  ${students.map((u,i)=>{const vs=u._nw-startingCash();return`<tr><td>${i===0?'<span class="badge badge-gold">🥇 #1</span>':'#'+(i+1)}</td><td><strong>${esc(u.name)}</strong></td><td>$${u.cash.toFixed(2)}</td><td>$${pvMark(u).toFixed(2)}</td><td>$${u._divs.toFixed(2)}</td><td><strong class="${vs>=0?'up':'dn'}">$${u._nw.toFixed(2)}</strong></td><td class="${vs>=0?'up':'dn'}">${vs>=0?'+':''}$${vs.toFixed(2)}</td></tr>`;}).join('')}
+  ${students.map((u,i)=>{const vs=u._nw-startFor(u);return`<tr><td>${pdfRanks[i]===1?'<span class="badge badge-gold">🥇 #1</span>':'#'+pdfRanks[i]}</td><td><strong>${esc(u.name)}</strong></td><td>$${u.cash.toFixed(2)}</td><td>$${pvMark(u).toFixed(2)}</td><td>$${u._divs.toFixed(2)}</td><td><strong class="${vs>=0?'up':'dn'}">$${u._nw.toFixed(2)}</strong></td><td class="${vs>=0?'up':'dn'}">${vs>=0?'+':''}$${vs.toFixed(2)}</td></tr>`;}).join('')}
   </tbody></table>
   <h2>Listed Companies</h2>
   <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Shares</th><th>Avail.</th><th>Market cap</th></tr></thead><tbody>
@@ -11487,7 +11572,18 @@ function generatePDFReport(){
 // MAIN RENDER
 // ═══════════════════════════════════════════════
 function getPageContent(){
-  const t=UI.navTab,u=cu();
+  const u=cu();
+  // A page built around an account you do not have is not reachable by URL
+  // either. An officer opening portfolio.html or mystock.html got a trading
+  // screen for an account with no holdings and no company. Deliberately
+  // narrow: shortcuts and the phone bar reach a few pages the top nav does
+  // not list (Orders for a company, Leaderboard for an officer), and those
+  // work fine.
+  const allowed=t=>t==='portfolio'||t==='orders'?!isAdmin(u)
+    :t==='mystock'?u.role==='company'
+    :true; // admin is not here: renderAdmin says "Admin access required" itself
+  if(u&&!allowed(UI.navTab))UI.navTab=isAdmin(u)?'admin':u.role==='company'?'mystock':'market';
+  const t=UI.navTab;
   if(t==='market'){
     if(UI.companyPage)return renderCompanyPage(UI.companyPage);
     return`<div id="market-content">${renderMarket()}</div>`;
