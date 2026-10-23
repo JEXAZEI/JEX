@@ -97,7 +97,12 @@ console.log('\n=== other users\' data stays fresh ===');
 check('autoRefresh now fetches jex_users', /sb\.get\('jex_users','order=created_at\.asc&select='\+JEX_USERS_SAFE_SELECT\),\n\s*\]\);/.test(src));
 check('it uses the safe select (no password/email on the wire)',
   /jex_users[^\n]*JEX_USERS_SAFE_SELECT/.test(src)&&!/JEX_USERS_SAFE_SELECT\s*=\s*'[^']*(password|sec_a)/.test(src));
-check('the signed-in user is merged, never overwritten', /if\(nu\.id!==UI\.userId\)Object\.assign\(cur,nu\)/.test(src));
+// Their own row is taken only when nothing changed it locally while the read
+// was in flight -- skipping it always left dividends and fills made from other
+// browsers off their balance until a reload.
+check('the signed-in user is updated only when their row was quiet during the read',
+  /if\(nu\.id!==UI\.userId\|\|ownQuiet\)Object\.assign\(cur,nu\)/.test(src)
+  &&/const ownBefore=/.test(src)&&/const ownQuiet=!!me&&ownBefore===/.test(src));
 check('jex_users is NOT added to the realtime subscription list',
   !/tables=\[[^\]]*'jex_users'/.test(src));
 

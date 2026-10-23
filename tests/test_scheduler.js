@@ -82,6 +82,8 @@ if(process.env.JEX_TZ_CHILD){
   eval(grabFn('getAZTime'));
   eval(grabFn('saveWeeklySchedule'));
   eval(grabFn('scheduleSession'));
+  eval(grabFn('closeOpenSessionFirst'));
+  eval(grabFn('clearSchedule'));
 
   const TZ=process.env.TZ||'?';
   const reset=f=>{fields=f;toasts=[];saved=null;};
@@ -141,6 +143,7 @@ if(process.env.JEX_TZ_CHILD){
         !!saved && saved.weekly_schedule.sat.open.h===0 && saved.weekly_schedule.sat.open.m===0,
         saved && JSON.stringify(saved.weekly_schedule.sat));
 
+  (async()=>{
   // ── scheduleSession ──
   // Times are chosen RELATIVE to the current Arizona clock, so the cases mean
   // the same thing whatever time of day the suite runs.
@@ -150,7 +153,7 @@ if(process.env.JEX_TZ_CHILD){
   if(nowMin < 22*60){                       // leave room for a future window
     const a=hm(nowMin+60), b=hm(nowMin+120);
     reset({'sched-start-h':a.h,'sched-start-m':a.m,'sched-end-h':b.h,'sched-end-m':b.m});
-    scheduleSession();
+    await scheduleSession();
     check('['+TZ+'] a window starting LATER today is stored as scheduled, not opened',
           !!saved && saved.status==='closed' && saved.scheduled_open
             && saved.scheduled_open.h===a.h && saved.scheduled_open.m===a.m,
@@ -162,7 +165,7 @@ if(process.env.JEX_TZ_CHILD){
   if(nowMin > 90 && nowMin < 22*60){        // a window already underway
     const a=hm(nowMin-60), b=hm(nowMin+60);
     reset({'sched-start-h':a.h,'sched-start-m':a.m,'sched-end-h':b.h,'sched-end-m':b.m});
-    scheduleSession();
+    await scheduleSession();
     check('['+TZ+'] a window already underway opens immediately',
           !!saved && saved.status==='open' && saved.ends_at>Date.now(),
           saved && JSON.stringify(saved));
@@ -181,25 +184,58 @@ if(process.env.JEX_TZ_CHILD){
   if(nowMin > 120){                          // a window that already finished
     const a=hm(nowMin-120), b=hm(nowMin-60);
     reset({'sched-start-h':a.h,'sched-start-m':a.m,'sched-end-h':b.h,'sched-end-m':b.m});
-    scheduleSession();
+    await scheduleSession();
     check('['+TZ+'] a window that already ended today is refused',
           saved===null && toasts.some(t=>/already passed/i.test(t)),
           JSON.stringify(toasts));
   }
 
   reset({'sched-start-h':15,'sched-start-m':0,'sched-end-h':9,'sched-end-m':0});
-  scheduleSession();
+  await scheduleSession();
   check('['+TZ+'] an end before the start is refused',
         saved===null && toasts.some(t=>/after the start|after start/i.test(t)),
         JSON.stringify(toasts));
 
   reset({'sched-start-h':'x','sched-start-m':0,'sched-end-h':9,'sched-end-m':0});
-  scheduleSession();
+  await scheduleSession();
   check('['+TZ+'] a non-numeric time is refused',
         saved===null && toasts.some(t=>/valid times/i.test(t)), JSON.stringify(toasts));
 
+  // ── an open session is closed properly, or not at all ──
+  // Setting a later window, or clearing the schedule, wrote status 'closed'
+  // straight over an open session: no day-order expiry, no frozen
+  // leaderboard, and only "Schedule cleared" to say the market had shut.
+  {
+    let closes=0,answer=false;
+    global.confirm=()=>answer;
+    global.setSession=async st=>{closes++;DB.session.status=st;};
+    if(nowMin < 22*60){
+      const a=hm(nowMin+60), b=hm(nowMin+120);
+      DB.session={status:'open'};answer=false;
+      reset({'sched-start-h':a.h,'sched-start-m':a.m,'sched-end-h':b.h,'sched-end-m':b.m});
+      await scheduleSession();
+      check('['+TZ+'] a later window while trading is open, declined: nothing changes',saved===null&&closes===0,JSON.stringify(saved));
+      DB.session={status:'open'};answer=true;
+      reset({'sched-start-h':a.h,'sched-start-m':a.m,'sched-end-h':b.h,'sched-end-m':b.m});
+      await scheduleSession();
+      check('['+TZ+'] ...accepted: trading is closed through setSession, then the window is stored',
+        closes===1&&!!saved&&saved.scheduled_open&&saved.status==='closed',JSON.stringify(saved));
+    }
+    closes=0;DB.session={status:'open'};answer=false;reset({});
+    await clearSchedule();
+    check('['+TZ+'] clearing the schedule can leave an open session open',
+      closes===0&&!!saved&&saved.status===undefined&&saved.scheduled_open===null&&saved.ends_at===null,JSON.stringify(saved));
+    closes=0;DB.session={status:'open'};answer=true;reset({});
+    await clearSchedule();
+    check('['+TZ+'] ...or close it properly',closes===1,String(closes));
+    closes=0;DB.session={status:'closed'};reset({});
+    await clearSchedule();
+    check('['+TZ+'] with trading closed it just clears, as before',closes===0&&saved&&saved.status==='closed');
+  }
+
   console.log(fails?('\n'+fails+' FAILURE(S) in '+TZ):('\nAll scheduler checks passed in '+TZ));
   process.exit(fails?1:0);
+  })();
 }
 
 // ── parent: run the whole thing under four timezones ──
@@ -208,6 +244,8 @@ if(process.env.JEX_TZ_CHILD){
 // while the host's own clock is not. Tokyo is +16 from Arizona and crosses the
 // date line relative to it; UTC is +7. If any of these disagree, the schedule
 // an instructor stores depends on the laptop they stored it from.
+// The child above finishes asynchronously, so this must not run in it.
+if(!process.env.JEX_TZ_CHILD){
 const ZONES=['America/Phoenix','UTC','America/New_York','Asia/Tokyo'];
 let bad=0, total=0;
 for(const tz of ZONES){
@@ -221,3 +259,4 @@ for(const tz of ZONES){
 }
 console.log(bad?('\n'+bad+' TIMEZONE(S) FAILED'):('\nAll scheduler checks passed in all '+ZONES.length+' timezones ('+total+' checks).'));
 process.exit(bad?1:0);
+}

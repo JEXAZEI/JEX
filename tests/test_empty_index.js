@@ -81,6 +81,7 @@ eval(grabFn('computeIndex'));
 eval(grabFn('computeJXI'));
 eval(grabFn('indexHasNoBasket'));
 eval(grabFn('emptyIndexMsg'));
+eval(grabFn('wholeQty'));
 eval(grabFn('placeBuy'));
 eval(grabFn('placeSell'));
 eval(grabFn('placeShort'));

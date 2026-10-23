@@ -354,8 +354,18 @@ ${PRELUDE}
   });
   await step('admins see the ordinary pages too', ()=>{
     UI.userId='u-chair';
-    for(const t of ['market','portfolio','trades','exchange','leaderboard','settings','orders','notifications','funds','news']){
+    for(const t of ['market','trades','exchange','leaderboard','settings','notifications','funds','news']){
       UI.navTab=t; render(); if(!appText().trim()) throw new Error('blank '+t+' as chairman');
+    }
+    UI.navTab='market';
+  });
+  // Portfolio, Orders and My stock are built around an account with holdings
+  // or a company; an officer has neither, so reaching one by URL lands on Admin.
+  await step('an officer sent to a student or company page lands on Admin', ()=>{
+    UI.userId='u-chair';
+    for(const t of ['portfolio','orders','mystock']){
+      UI.navTab=t; render();
+      if(UI.navTab!=='admin') throw new Error(t+' rendered for the chairman');
     }
     UI.navTab='market';
   });
@@ -1318,7 +1328,7 @@ ${PRELUDE}
   await step('a vote is cast with the right voting power', async ()=>{
     UI.navTab='market'; UI.companyPage='ACME'; UI.companyPageTab='votes'; render();
     const shares=(ME().holdings||{}).ACME||0;
-    await castVote('v-1','option1');
+    await castVote('v-1','A');
     const b=DB.ballots.find(x=>x.vote_id==='v-1'&&x.voter_id==='u-stu');
     if(!b) throw new Error('no ballot recorded');
     if(b.voting_power !== shares) throw new Error('power '+b.voting_power+' but holds '+shares);
@@ -1327,7 +1337,7 @@ ${PRELUDE}
 
   await step('voting twice is refused', async ()=>{
     const before = DB.ballots.length;
-    await castVote('v-1','option2');
+    await castVote('v-1','B');
     if(DB.ballots.length !== before) throw new Error('a second ballot was accepted');
     return 'refused';
   });

@@ -92,7 +92,7 @@ const DATA = {
     status:'open', order_type:'gtc', created_at:now}],
   jex_share_classes:[], jex_class_applications:[],
   jex_votes:[{id:'v-1', parent_ticker:'ACME', company_name:'Acme Corp', question:'Expand? <b>yes</b>',
-    option1:'Yes & go', option2:'No', status:'open', ts:TS, created_at:now}],
+    option_a:'Yes & go', option_b:'No', status:'open', ts:TS, created_at:now}],
   jex_vote_ballots:[], jex_price_alerts:[],
   jex_nw_history:[
     {id:'nw-1', user_id:'u-stu', nw:8000, cash:8000, portfolio:0, ts:TS, created_at:'2026-08-19T10:00:00Z'},
@@ -1185,11 +1185,13 @@ window.WebSocket = function(){
   setTimeout(function(){
     if(!self.onmessage) return;
     self.onmessage({data:JSON.stringify({event:'postgres_changes', payload:{data:{
-      table:'jex_companies', eventType:'UPDATE',
-      new:Object.assign({}, DATA.jex_companies[0], {price:13.25})}}})});
+      // Realtime's wire shape on a raw socket: type/record/old_record. The
+      // new/old/eventType names exist only after supabase-js renames them.
+      schema:'public', table:'jex_companies', type:'UPDATE',
+      record:Object.assign({}, DATA.jex_companies[0], {price:13.25}), old_record:{id:(DATA.jex_companies[0]||{}).id}}}})});
     self.onmessage({data:JSON.stringify({event:'postgres_changes', payload:{data:{
-      table:'jex_trades', eventType:'INSERT',
-      new:{id:100, ticker:'ACME', qty:2, price:13.25, buyer_id:'u-stu2', seller_id:'exchange', type:'market', ts:TS}}}})});
+      schema:'public', table:'jex_trades', type:'INSERT', old_record:{},
+      record:{id:100, ticker:'ACME', qty:2, price:13.25, buyer_id:'u-stu2', seller_id:'exchange', type:'market', ts:TS}}}})});
   }, 900);
 };
 window.WebSocket.prototype = {};

@@ -56,6 +56,9 @@ global.DB={limitOrders:[],session:{}};
 const USER={id:'u1',cash:100000,holdings:{ACME:50}};
 global.cu=()=>USER;
 global.sb={rpc:async(fn,p)=>{sent={fn,p};return{order:{id:'o1',ticker:p.p_ticker}};}};
+// State the extracted functions now share (see _stateEpoch / upsertById in app.js).
+var _stateEpoch=0;eval(grabFn('upsertById'));
+eval(grabFn('wholeQty'));
 eval(grabFn('placeLimitOrder'));
 
 const buyPanel = t => ({'limit-order-type':{value:t}});
