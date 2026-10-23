@@ -690,6 +690,21 @@ const RPC = {
     }
     return {session: DATA.jex_session[0]};
   },
+  // sql/president_password.sql: the Chairman only, on the President only,
+  // 6 to 72 characters. Logged and noticed by the server.
+  rpc_admin_set_president_password: (p)=>{
+    const me=caller();
+    if(!me) reject('Not authenticated');
+    if(me.role!=='chairman') reject("Only the Chairman can change the President's password");
+    const pres=DATA.jex_users.find(u=>u.id===p.p_user_id);
+    if(!pres||pres.role!=='president') reject('That account is not the President');
+    if(!p.p_new_pw||p.p_new_pw.length<6) reject('Password must be at least 6 characters');
+    if(new TextEncoder().encode(p.p_new_pw).length>72) reject('Password must be at most 72 characters');
+    DATA.jex_notifications.push({id:'nt-'+(_tradeSeq++), user_id:pres.id, type:'security',
+      message:'🔑 Your password was changed by the Chairman ('+me.name+'). If you did not ask for this, tell them right away.',
+      ticker:null, read:false, ts:TS, created_at:nowIso(), sent_by:'server'});
+    return {changed:true, name:pres.name, real_sign_in:true, devices_signed_out:2};
+  },
   // Closed to the web since server_events_batch4.sql: the page must never call it.
   rpc_push_notification: ()=>reject('permission denied for function rpc_push_notification','42501'),
   rpc_push_notification_all: (p)=>{

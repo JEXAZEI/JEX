@@ -3285,6 +3285,27 @@ async function adminResetPw(uid2,pw){
   catch(e){return toast(rpcErrorMessage(e));}
   toast(u.name+"'s password reset");render();
 }
+// The Chairman setting the President's password. Nobody could before: the
+// reset above refuses officer accounts, and a reset email only helps someone
+// who can still read that inbox. The server (rpc_admin_set_president_password,
+// sql/president_password.sql) re-checks all of it -- Chairman only, President
+// only, 6 to 72 characters -- sets the real sign-in password, signs the
+// President out everywhere, logs it and tells them.
+async function adminSetPresidentPw(uid2,pw,conf){
+  if(cu()?.role!=='chairman')return toast('Only the Chairman can change the President\'s password');
+  const u=getUser(uid2);if(!u||u.role!=='president')return toast('Select the President');
+  if(!pw||pw.length<6)return toast('Minimum 6 characters required');
+  if(new TextEncoder().encode(pw).length>72)return toast('Maximum 72 characters');
+  if(pw!==conf)return toast('Passwords do not match');
+  if(!confirm('Change '+u.name+'\'s password?\n\nThey will be signed out on every device and will need the new password to sign back in. They will be told the Chairman changed it.'))return;
+  let r;
+  try{r=await sb.rpc('rpc_admin_set_president_password',{p_user_id:uid2,p_new_pw:pw});}
+  catch(e){return toast(rpcErrorMessage(e));}
+  ['admin-pres-pw1','admin-pres-pw2'].forEach(id=>{const el=get(id);if(el)el.value='';});
+  afterServerEvent();
+  toast(u.name+'\'s password changed'+(r&&r.devices_signed_out?' — signed out on '+r.devices_signed_out+' device'+(r.devices_signed_out===1?'':'s'):''));
+  render();
+}
 async function adminSendResetEmail(uid2){
   if(!isAdmin(cu()))return toast('Admin access required');
   const u=getUser(uid2);if(!u)return;
@@ -4548,7 +4569,7 @@ const PUSH_TITLES={
   ipo:'🏢 IPO update',session:'🕐 Session update',
   price_alert:'🔔 Price alert',resume:'✅ Trading resumed',
   founder_alloc:'🎁 Founder shares',flag:'🚩 Flag raised',bug_report:'🐛 Bug report',contact_admin:'✉️ New message',
-  margin_call:'⚠️ Margin call',squeeze:'🔥 Short squeeze'
+  margin_call:'⚠️ Margin call',squeeze:'🔥 Short squeeze',security:'🔑 Your password was changed'
 };
 async function markAllRead(){
   const unread=DB.notifications.filter(n=>n.user_id===UI.userId&&!n.read);
@@ -9801,8 +9822,17 @@ function renderAdminPasswords(students,companies){
   // Officers whose passwords can be reset (not other chairmen/presidents)
   const officers=DB.users.filter(x=>['secretary','treasurer','compliance_officer'].includes(x.role)&&x.status==='approved');
   const resetableUsers=[...students,...companies,...officers];
-  return`<div class="card"><div class="section-title">Manual password reset</div>
-    <p style="font-size:13px;color:var(--text2);margin-bottom:14px">Use only if a user has forgotten both their password and security answer. Chairman and President cannot reset each other's passwords.</p>
+  // The Chairman alone can set the President's password (see adminSetPresidentPw).
+  const presidents=u?.role==='chairman'?DB.users.filter(x=>x.role==='president'&&x.status==='approved'):[];
+  const presCard=presidents.length?`<div class="card"><div class="section-title">President's password</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:14px">Set a new password for the President, for example if they are locked out. They are signed out on every device and told you changed it.</p>
+    <div class="frow"><label class="flabel">President</label><select id="admin-pres-uid">${presidents.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></div>
+    <div class="frow"><label class="flabel">New password</label><div class="pw-wrap"><input type="password" id="admin-pres-pw1" placeholder="New password (6 to 72 characters)" autocomplete="new-password"><button type="button" class="pw-eye" onclick="togglePw('admin-pres-pw1')" tabindex="-1">👁</button></div></div>
+    <div class="frow"><label class="flabel">Confirm new password</label><div class="pw-wrap"><input type="password" id="admin-pres-pw2" placeholder="Repeat new password" autocomplete="new-password"><button type="button" class="pw-eye" onclick="togglePw('admin-pres-pw2')" tabindex="-1">👁</button></div></div>
+    <button class="btn btn-primary" onclick="busy(this,&quot;Changing…&quot;,()=>adminSetPresidentPw(get('admin-pres-uid')?.value,get('admin-pres-pw1')?.value,get('admin-pres-pw2')?.value))">Change President's password</button>
+  </div>`:'';
+  return presCard+`<div class="card"><div class="section-title">Manual password reset</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:14px">Use only if a user has forgotten both their password and security answer. Chairman and President passwords are not reset here${presidents.length?' — the President\'s is set above':''}.</p>
     <div class="frow"><label class="flabel">Select user</label><select id="admin-reset-uid" onchange="renderAdminResetForm()"><option value="">— Select a user —</option>${resetableUsers.map(x=>`<option value="${x.id}">${esc(x.name)}${['secretary','treasurer','compliance_officer'].includes(x.role)?'':' ('+esc(x.email)+')'} — ${esc(x.role)}</option>`).join('')}</select></div>
     <div id="admin-reset-form"></div>
   </div>`;
@@ -10607,7 +10637,7 @@ function renderNotifications(){
   const notifs=myNotifications();
   const u=cu();
   const unread=notifs.filter(n=>!n.read).length;
-  const typeIcon={dividend:'💰',news:'📰',vote:'🗳️',vote_closed:'🗳️',ipo:'🏢',session:'🟢',limit_fill:'⚡',after_hours:'⏰',halt:'⚠️',resume:'✅',invite:'🤝',founder_alloc:'🎁',price_adj:'📊',squeeze:'🔥'};
+  const typeIcon={dividend:'💰',news:'📰',vote:'🗳️',vote_closed:'🗳️',ipo:'🏢',session:'🟢',limit_fill:'⚡',after_hours:'⏰',halt:'⚠️',resume:'✅',invite:'🤝',founder_alloc:'🎁',price_adj:'📊',squeeze:'🔥',security:'🔑'};
   return `<div class="card"><div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
     Notifications ${unread?`<span class="badge b-red">${unread} unread</span>`:''}
     ${notifs.length?`<button class="btn btn-sm" onclick="markAllRead()">Mark all read</button>`:''}

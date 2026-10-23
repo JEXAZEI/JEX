@@ -132,7 +132,7 @@ select jsonb_pretty(jsonb_build_object(
 
   -- ── 8. Are the fixes still in place ──
   --
-  -- Forty-two markers from the migrations that matter most. Every one should be
+  -- Forty-three markers from the migrations that matter most. Every one should be
   -- true. A false here means a function was replaced by hand afterwards and
   -- the fix went with it -- which is exactly how this codebase lost things
   -- before sql/ existed.
@@ -183,7 +183,8 @@ select jsonb_pretty(jsonb_build_object(
         ('price alerts need a signed-in account',  'rpc_trigger_price_alert', 'if not exists (select 1 from jex_users where auth_uid = auth.uid()) then raise exception'),
         ('a manual open sends no email',           'jex_ev_session', 'or p_old is not distinct from'),
         ('the schedule runs on the server''s clock','rpc_session_tick', 'return jex_session_tick_core();'),
-        ('a halt is lifted once',                  'rpc_admin_resume_stock', 'where ticker = p_ticker for update;')
+        ('a halt is lifted once',                  'rpc_admin_resume_stock', 'where ticker = p_ticker for update;'),
+        ('the Chairman can set the President''s password', 'rpc_admin_set_president_password', 'if v_me.role is distinct from ''chairman'' then')
       ) m(label, fn, marker)),
 
   -- ── 8b. Fixes that are about data, not a line in a function ──

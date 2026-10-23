@@ -99,7 +99,7 @@ const sq=src.slice(src.indexOf('function checkShortSqueezes('),src.indexOf('func
 check('the squeeze alert is the server\'s to send', /sb\.rpc\('rpc_check_short_squeeze'/.test(sq) && !/pushNotification/.test(sq));
 check('...stops asking once it is settled for the day', /r\.sent\|\|r\.reason==='already_sent'/.test(sq));
 check('...and asks once at a time per company', /_squeezeAsking\.has\(co\.ticker\)/.test(sq));
-check('a squeeze has its own icon and push title', /squeeze:'🔥'\}/.test(src) && /squeeze:'🔥 Short squeeze'/.test(src));
+check('a squeeze has its own icon and push title', /squeeze:'🔥'[,}]/.test(src) && /squeeze:'🔥 Short squeeze'/.test(src));
 
 // ── the squeeze check, run ──
 let toasts=[], rpcs=[], pushed=[], refreshed=0, store={};

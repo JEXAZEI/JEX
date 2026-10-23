@@ -1546,6 +1546,42 @@ ${PRELUDE}
     } finally { UI.userId=keep.user; window.confirm=keep.confirm; render(); }
   });
 
+  // sql/president_password.sql: the Chairman sets the President's password
+  // from Admin > Reset passwords. Nobody else sees the card, and the page
+  // writes no log entry or notice of its own.
+  await step("the Chairman can change the President's password, and only the Chairman", async ()=>{
+    const keep={user:UI.userId, nav:UI.navTab, tab:UI.adminTab, confirm:window.confirm};
+    const card=()=>[...document.querySelectorAll('.section-title')].some(e=>e.textContent==="President's password");
+    try{
+      UI.navTab='admin'; UI.adminTab='passwords';
+      UI.userId='u-pres'; render();
+      if(card()) throw new Error("the President sees the card for their own password");
+      UI.userId='u-chair'; render();
+      if(!card()) throw new Error('the Chairman does not see the card');
+      const opts=[...document.querySelectorAll('#admin-pres-uid option')].map(o=>o.value);
+      if(opts.join()!=='u-pres') throw new Error('the card offers '+opts.join());
+      let asked=''; window.confirm=m=>{asked=m; return true;};
+      const fill=(a,b)=>{ document.getElementById('admin-pres-pw1').value=a; document.getElementById('admin-pres-pw2').value=b; };
+      const n0=stub.rpcCalls.length;
+      fill('abc','abc'); await adminSetPresidentPw('u-pres','abc','abc');
+      fill('Game-day 9','Game-day 8'); await adminSetPresidentPw('u-pres','Game-day 9','Game-day 8');
+      if(stub.rpcCalls.slice(n0).some(c=>c.fn==='rpc_admin_set_president_password')) throw new Error('a short or mismatched password reached the server');
+      fill('Game-day 9','Game-day 9');
+      document.querySelector('[onclick*="adminSetPresidentPw"]').click();
+      await new Promise(r=>setTimeout(r,700));
+      const calls=stub.rpcCalls.slice(n0).map(c=>c.fn);
+      const sent=stub.rpcCalls.slice(n0).filter(c=>c.fn==='rpc_admin_set_president_password');
+      if(sent.length!==1) throw new Error(sent.length+' calls were sent: '+calls.join(','));
+      if(sent[0].params.p_user_id!=='u-pres'||sent[0].params.p_new_pw!=='Game-day 9') throw new Error('sent '+JSON.stringify(sent[0].params));
+      if(!/signed out on every device/.test(asked)) throw new Error('the confirmation did not say they are signed out: '+asked);
+      const own=calls.filter(f=>f==='rpc_log_activity'||f==='rpc_push_notification');
+      if(own.length) throw new Error('the page wrote '+own.join(','));
+      if(!calls.includes('rpc_admin_list_activity')) throw new Error("the Chairman's activity list was not refreshed");
+      if(document.getElementById('admin-pres-pw1')?.value) throw new Error('the password was left in the field');
+      return 'short and mismatched refused before sending; the button sent one change';
+    } finally { UI.userId=keep.user; UI.navTab=keep.nav; UI.adminTab=keep.tab; window.confirm=keep.confirm; render(); }
+  });
+
   await step('depositing into a fund does not destroy net worth', async ()=>{
     const me=DB.users.find(u=>u.id==='u-stu2');
     const nwBefore=nw(me);
