@@ -19,9 +19,15 @@
 const {spawn} = require('child_process');
 const fs = require('fs'), path = require('path'), http = require('http');
 
-const CHROME = ['/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
-                '/opt/pw-browsers/chromium/chrome-linux/chrome']
-  .find(p=>{try{fs.accessSync(p);return true;}catch(e){return false;}});
+// The Chromium build under /opt/pw-browsers changes with the image, so look
+// for any chromium-NNNN folder (old chrome-linux and newer chrome-linux64
+// layouts) as well as the plain /opt/pw-browsers/chromium launcher.
+const PW = '/opt/pw-browsers';
+const CHROME = [
+  ...(()=>{try{return fs.readdirSync(PW).filter(d=>/^chromium-\d+$/.test(d)).sort().reverse();}catch(e){return [];}})()
+    .flatMap(d=>[PW+'/'+d+'/chrome-linux64/chrome', PW+'/'+d+'/chrome-linux/chrome']),
+  PW+'/chromium/chrome-linux/chrome', PW+'/chromium']
+  .find(p=>{try{fs.accessSync(p,fs.constants.X_OK);return fs.statSync(p).isFile();}catch(e){return false;}});
 if(!CHROME){console.error('No Chromium found under /opt/pw-browsers');process.exit(2);}
 
 const ROOT = path.join(__dirname, '..', '..');

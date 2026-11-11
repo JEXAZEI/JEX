@@ -831,8 +831,18 @@ function exportCSV(filename,rows,headers){
     return s.includes(',')||s.includes('"')?'"'+s.replace(/"/g,'""')+'"':s;
   };
   const lines=[headers.map(escape).join(','),...rows.map(r=>headers.map(h=>escape(r[h]!==undefined?r[h]:r[headers.indexOf(h)])).join(','))];
-  const blob=new Blob([lines.join('\n')],{type:'text/csv'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;a.click();
+  saveBlob(filename,new Blob([lines.join('\n')],{type:'text/csv'}));
+}
+// Hands the browser a file to save. The link is put in the page for the click
+// (some browsers ignore a click on a detached one), and the blob URL is let go
+// a moment later rather than at once: revoking it in the same tick as the
+// click can cancel the download before it starts, and never revoking it kept
+// every export's data in memory for the life of the tab.
+function saveBlob(filename,blob){
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;a.download=filename;a.style.display='none';
+  document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),60000);
 }
 function exportTableCSV(table){
   const now=azDateStamp();   // Arizona, not UTC: after 5pm AZ, UTC is tomorrow
@@ -2122,7 +2132,7 @@ async function reassignClassroom(){
   try{await sb.rpc('rpc_admin_reassign_classroom',{p_user_id:rawId,p_classroom_id:cid});}
   catch(e){return toast(rpcErrorMessage(e));}
   const u=getUser(rawId);if(u)u.classroom_id=cid;
-  toast('Reassigned to classroom: '+(cid||'unassigned'));
+  toast(cid?'Reassigned to classroom: '+(getClassroomName(cid)||cid):'Removed from their classroom');
   render();
 }
 async function setTestAccount(uid,isTest){
@@ -10488,7 +10498,9 @@ function renderAdminBalances(students){
   // and barely moves this.
   const rows=students.map(u=>({name:u.name,cash:Math.round(u.cash*100)/100,portfolio:Math.round(pvMark(u)*100)/100,divs:Math.round(divRec(u)*100)/100,nw:nwMark(u),start:startFor(u)})).sort(byNwThenName('nw'));
   const balRanks=tieRanks(rows.map(r=>r.nw));
-  const csvEscape=v=>{if(v==null)return'';const s=String(v).replace(/\n/g,' ');return s.includes(',')||s.includes('"')?'"'+s.replace(/"/g,'""')+'"':s;};
+  // Same guard as exportCSV: a student named "=HYPERLINK(...)" was a live
+  // formula in the instructor's spreadsheet when this file was opened.
+  const csvEscape=v=>{if(v==null)return'';const s=neutralizeFormula(String(v).replace(/[\r\n]+/g,' '));return s.includes(',')||s.includes('"')?'"'+s.replace(/"/g,'""')+'"':s;};
   const csv=[['Rank','Name','Cash','Portfolio (VWAP)','Dividends','Net worth (VWAP)','Starting cash','vs Start'],...rows.map((r,i)=>[balRanks[i],r.name,r.cash.toFixed(2),r.portfolio.toFixed(2),r.divs.toFixed(2),r.nw.toFixed(2),r.start.toFixed(2),(r.nw-r.start).toFixed(2)])].map(r=>r.map(csvEscape).join(',')).join('\n');
   window._jexCSV=csv;
   return`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><span style="font-size:12px;color:var(--text2)">Live student balances</span><div style="display:flex;gap:8px"><button class="btn btn-sm" style="background:var(--purple);color:white;border-color:var(--purple)" onclick="generatePDFReport()">📄 Full PDF report</button><button class="btn btn-sm btn-success" onclick="downloadCSV()">Download CSV</button><button class="btn btn-sm btn-primary" onclick="const p=get('csv-panel');p.style.display=p.style.display==='none'?'block':'none'">Show CSV to copy</button></div></div>
@@ -10498,7 +10510,7 @@ function renderAdminBalances(students){
   </tbody></table></div>
   <div id="csv-panel" style="display:none;margin-top:12px"><div class="ibox ibox-teal">Click inside the box, press <strong>Ctrl+A</strong> (Cmd+A) to select all, then <strong>Ctrl+C</strong> to copy.</div><textarea readonly onclick="this.select()" style="width:100%;font-family:var(--mono);font-size:12px;padding:10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);resize:vertical;min-height:160px;line-height:1.5">${esc(csv)}</textarea></div>`;
 }
-function downloadCSV(){const csv=window._jexCSV;if(!csv)return;const blob=new Blob([csv],{type:'text/csv'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='jex_balances.csv';a.click();URL.revokeObjectURL(url);}
+function downloadCSV(){const csv=window._jexCSV;if(!csv)return;saveBlob('jex_balances.csv',new Blob([csv],{type:'text/csv'}));}
 async function adjustCompanyCash(uid2){
   if(!isAdmin(cu()))return toast('Admin access required');
   const u=getUser(uid2);if(!u)return;
@@ -11204,6 +11216,7 @@ function exportStudentPDF(){
   const myDivs=DB.dividends.filter(d=>(d.payouts||[]).some(p=>p.userId===u.id));
   const _nw=nw(u),_pv=pv(u),_spnl=sPnl(u),_divs=divRec(u);
   const win=window.open('','_blank');
+  if(!win)return toast('Your browser blocked the report window — allow pop-ups for this site and try again');
   win.document.write(`<!DOCTYPE html><html><head><title>JEX Portfolio — ${esc(u.name)}</title>
   <style>body{font-family:system-ui,sans-serif;padding:32px;color:#1a2233;max-width:800px;margin:0 auto}
   h1{color:#f0a500;font-size:24px;margin-bottom:4px}
@@ -11220,7 +11233,7 @@ function exportStudentPDF(){
   footer{margin-top:32px;font-size:11px;color:#8896a8;text-align:center}
   @media print{button{display:none}}</style></head><body>
   <h1>JEX — Portfolio Report</h1>
-  <p style="color:#4a5a72;margin-bottom:24px">${esc(u.name)} &nbsp;|&nbsp; ${esc(u.email)} &nbsp;|&nbsp; Generated ${new Date().toLocaleString()}</p>
+  <p style="color:#4a5a72;margin-bottom:24px">${esc(u.name)} &nbsp;|&nbsp; ${esc(u.email)} &nbsp;|&nbsp; Generated ${esc(fmtAZTime(new Date()))}</p>
   <h2>Summary</h2>
   <div class="grid">
     <div class="card"><div class="label">Cash</div><div class="val mono">${fmt(u.cash)}</div></div>
@@ -11670,17 +11683,28 @@ function renderAdminAnnouncements(){
 // RENDER: PDF REPORT
 // ═══════════════════════════════════════════════
 function generatePDFReport(){
-  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved').map(u=>({...u,_nw:nwMark(u),_divs:divRec(u)})).sort(byNwThenName('_nw'));
+  // Hidden test accounts and their companies out, and only listed companies
+  // under "Listed Companies" -- the same set as the Balances tab, its CSV and
+  // the session recap. This report ranked test accounts among the students,
+  // so its #1 and every rank below could disagree with the CSV beside it, and
+  // it counted pending, rejected and delisted companies as listed.
+  const listedCos=DB.companies.filter(c=>c.status==='listed'&&!isHiddenTestEntity(c.owner_id));
+  const hiddenTicker=t=>isHiddenTestEntity(getCo(t)?.owner_id);
+  const shownTrades=DB.trades.filter(t=>!hiddenTicker(t.ticker));
+  const shownDivs=DB.dividends.filter(d=>!hiddenTicker(d.ticker));
+  const shownNews=DB.news.filter(n=>!hiddenTicker(n.ticker));
+  const students=DB.users.filter(u=>u.role==='student'&&u.status==='approved'&&!isHiddenTestEntity(u.id)).map(u=>({...u,_nw:nwMark(u),_divs:divRec(u)})).sort(byNwThenName('_nw'));
   const pdfRanks=tieRanks(students.map(u=>u._nw));
-  const totalTrades=DB.trades.length;
+  const totalTrades=shownTrades.length;
   // The newest 200 FIRST, then put in time order for the page. Reversing
   // before slicing took the OLDEST 200 -- an instructor exporting this
   // mid-term got the first 200 trades of the year and nothing since.
   // DB.trades is newest-first (order=created_at.desc at boot, id.desc on the
   // poll), which is what makes the order of these two operations matter.
-  const recentTrades=DB.trades.slice(0,200).reverse();
-  const totalDivsPaid=DB.dividends.reduce((s,d)=>s+d.total,0);
+  const recentTrades=shownTrades.slice(0,200).reverse();
+  const totalDivsPaid=shownDivs.reduce((s,d)=>s+d.total,0);
   const w=window.open('','_blank');
+  if(!w)return toast('Your browser blocked the report window — allow pop-ups for this site and try again');
   w.document.write(`<!DOCTYPE html><html><head><title>JEX Exchange Report</title>
   <style>
     body{font-family:Arial,sans-serif;font-size:12px;color:#111;max-width:900px;margin:0 auto;padding:20px}
@@ -11701,10 +11725,10 @@ function generatePDFReport(){
     @media print{body{max-width:100%}}
   </style></head><body>
   <h1>JEX — JTED Stock Exchange</h1>
-  <div class="meta">Report generated ${new Date().toLocaleString()} · Arizona MST</div>
+  <div class="meta">Report generated ${esc(fmtAZTime(new Date()))} · Arizona time</div>
   <div class="stat-grid">
     <div class="stat"><div class="stat-num">${students.length}</div><div class="stat-label">Students</div></div>
-    <div class="stat"><div class="stat-num">${DB.companies.length}</div><div class="stat-label">Listed companies</div></div>
+    <div class="stat"><div class="stat-num">${listedCos.length}</div><div class="stat-label">Listed companies</div></div>
     <div class="stat"><div class="stat-num">${totalTrades}</div><div class="stat-label">Total trades</div></div>
     <div class="stat"><div class="stat-num">$${totalDivsPaid.toFixed(0)}</div><div class="stat-label">Dividends paid</div></div>
   </div>
@@ -11714,22 +11738,22 @@ function generatePDFReport(){
   </tbody></table>
   <h2>Listed Companies</h2>
   <table><thead><tr><th>Company</th><th>Ticker</th><th>Price</th><th>Change</th><th>Shares</th><th>Avail.</th><th>Market cap</th></tr></thead><tbody>
-  ${DB.companies.map(c=>{const chg=priceChg(c);return`<tr><td><strong>${esc(c.name)}</strong></td><td>${esc(c.ticker)}</td><td>$${c.price.toFixed(2)}</td><td class="${chg>=0?'up':'dn'}">${chg>=0?'+':''}${chg.toFixed(2)}%</td><td>${c.shares.toLocaleString()}</td><td>${c.shares_avail.toLocaleString()}</td><td>$${(c.price*c.shares).toFixed(2)}</td></tr>`;}).join('')}
+  ${listedCos.map(c=>{const chg=priceChg(c);return`<tr><td><strong>${esc(c.name)}</strong></td><td>${esc(c.ticker)}</td><td>$${c.price.toFixed(2)}</td><td class="${chg>=0?'up':'dn'}">${chg>=0?'+':''}${chg.toFixed(2)}%</td><td>${c.shares.toLocaleString()}</td><td>${c.shares_avail.toLocaleString()}</td><td>$${(c.price*c.shares).toFixed(2)}</td></tr>`;}).join('')}
   </tbody></table>
-  <h2>All Trades (${DB.trades.length})</h2>
+  <h2>All Trades (${shownTrades.length})</h2>
   <table><thead><tr><th>Time</th><th>Ticker</th><th>Price</th><th>Qty</th><th>Type</th><th>Buyer</th><th>Seller</th></tr></thead><tbody>
   ${recentTrades.map(t=>`<tr><td>${t.ts}</td><td>${esc(t.ticker)}</td><td>$${t.price.toFixed(2)}</td><td>${t.qty}</td><td>${t.type||'market'}</td><td>${['exchange','short'].includes(t.buyer_id)?'JEX':esc(getUser(t.buyer_id)?.name||'?')}</td><td>${['exchange','cover'].includes(t.seller_id)?'JEX':esc(getUser(t.seller_id)?.name||'?')}</td></tr>`).join('')}
-  ${DB.trades.length>200?`<tr><td colspan="7" style="text-align:center;color:#666">Showing the most recent 200 of ${DB.trades.length} trades</td></tr>`:''}
+  ${shownTrades.length>200?`<tr><td colspan="7" style="text-align:center;color:#666">Showing the most recent 200 of ${shownTrades.length} trades</td></tr>`:''}
   </tbody></table>
-  <h2>Dividends Paid (${DB.dividends.length})</h2>
+  <h2>Dividends Paid (${shownDivs.length})</h2>
   <table><thead><tr><th>Time</th><th>Company</th><th>Per share</th><th>Total</th><th>Recipients</th><th>Note</th></tr></thead><tbody>
-  ${DB.dividends.map(d=>`<tr><td>${d.ts}</td><td>${esc(d.company_name)} (${d.ticker})</td><td>$${d.per_share.toFixed(2)}</td><td class="up">$${d.total.toFixed(2)}</td><td>${(d.payouts||[]).length}</td><td>${esc(d.note||'')}</td></tr>`).join('')}
+  ${shownDivs.map(d=>`<tr><td>${d.ts}</td><td>${esc(d.company_name)} (${d.ticker})</td><td>$${d.per_share.toFixed(2)}</td><td class="up">$${d.total.toFixed(2)}</td><td>${(d.payouts||[]).length}</td><td>${esc(d.note||'')}</td></tr>`).join('')}
   </tbody></table>
-  <h2>Company News (${DB.news.length})</h2>
+  <h2>Company News (${shownNews.length})</h2>
   <table><thead><tr><th>Time</th><th>Company</th><th>Headline</th><th>Body</th></tr></thead><tbody>
-  ${DB.news.map(n=>`<tr><td>${n.ts}</td><td>${esc(n.company_name)} (${esc(n.ticker)})</td><td><strong>${esc(n.headline)}</strong></td><td>${esc(n.body||'—')}</td></tr>`).join('')}
+  ${shownNews.map(n=>`<tr><td>${n.ts}</td><td>${esc(n.company_name)} (${esc(n.ticker)})</td><td><strong>${esc(n.headline)}</strong></td><td>${esc(n.body||'—')}</td></tr>`).join('')}
   </tbody></table>
-  <div style="margin-top:30px;text-align:center;color:#999;font-size:10px">JEX — JTED Stock Exchange · Generated ${new Date().toLocaleString()}</div>
+  <div style="margin-top:30px;text-align:center;color:#999;font-size:10px">JEX — JTED Stock Exchange · Generated ${esc(fmtAZTime(new Date()))}</div>
   </body></html>`);
   w.document.close();
   setTimeout(()=>w.print(),500);

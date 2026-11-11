@@ -63,7 +63,7 @@ DB.ballots=[{vote_id:'v1',choice:'A',voting_power:60},{vote_id:'v1',choice:'B',v
   let out='';
   global.Blob=function(parts){out=parts.join('');};
   global.URL={createObjectURL:()=>'blob:'};
-  global.document={createElement:()=>({click(){}})};
+  global.saveBlob=(name,blob)=>{};
   global.neutralizeFormula=load('neutralizeFormula');
   load('exportCSV')('x.csv',[{name:'Ana',cash:0,nw:950}],['name','cash','nw']);
   check('a 0 in a CSV cell is written as 0',out.split('\n')[1]==='Ana,0,950',out);
