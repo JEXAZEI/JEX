@@ -163,7 +163,7 @@ check('an empty tape is an empty state', /No trades yet/.test(renderTrades(true)
 // checked on the source -- the export writes into a new window, which there is
 // no DOM here to open.
 check('the admin export slices the newest 200 before ordering them',
-      /const recentTrades=DB\.trades\.slice\(0,200\)\.reverse\(\);/.test(src));
+      /const recentTrades=(DB\.trades|shownTrades)\.slice\(0,200\)\.reverse\(\);/.test(src));
 check('...and no longer reverses the whole list first',
       !/\[\.\.\.DB\.trades\]\.reverse\(\)\.slice/.test(src));
 check('...and says which 200 they are',
